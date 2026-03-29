@@ -1,0 +1,94 @@
+package runnerlib
+
+// Named capability string constants. These values are permanent and immutable.
+// Renaming a capability is forbidden. Fundamental behavior changes require a new
+// name. CR-INV-004. Values match ont-runner-schema.md Section 6 exactly.
+//
+// The capability name is stamped into the Job spec as the CAPABILITY environment
+// variable. The runner reads this on executor startup to resolve the capability
+// from the registry.
+
+// ont-platform capabilities — cluster lifecycle and operations.
+const (
+	// CapabilityBootstrap performs full cluster bootstrap from seed nodes.
+	// Multi-step. Uses PVC protocol. Triggered by TalosCluster.
+	CapabilityBootstrap = "bootstrap"
+
+	// CapabilityTalosUpgrade performs a rolling Talos OS version upgrade.
+	// Triggered by TalosUpgrade CR.
+	CapabilityTalosUpgrade = "talos-upgrade"
+
+	// CapabilityKubeUpgrade performs a Kubernetes version upgrade.
+	// Triggered by TalosKubeUpgrade CR.
+	CapabilityKubeUpgrade = "kube-upgrade"
+
+	// CapabilityStackUpgrade performs a coordinated Talos OS and Kubernetes upgrade.
+	// Multi-step. Uses PVC protocol. Triggered by TalosStackUpgrade CR.
+	CapabilityStackUpgrade = "stack-upgrade"
+
+	// CapabilityNodePatch applies a machine config patch to one or more nodes.
+	// Triggered by TalosNodePatch CR.
+	CapabilityNodePatch = "node-patch"
+
+	// CapabilityNodeScaleUp provisions and bootstraps additional nodes into a cluster.
+	// Triggered by TalosNodeScaleUp CR.
+	CapabilityNodeScaleUp = "node-scale-up"
+
+	// CapabilityNodeDecommission cordons, drains, and removes a node.
+	// Triggered by TalosNodeDecommission CR.
+	CapabilityNodeDecommission = "node-decommission"
+
+	// CapabilityNodeReboot reboots one or all cluster nodes.
+	// Triggered by TalosReboot CR.
+	CapabilityNodeReboot = "node-reboot"
+
+	// CapabilityEtcdBackup takes an etcd snapshot and exports machine config to S3.
+	// Triggered by TalosBackup CR.
+	CapabilityEtcdBackup = "etcd-backup"
+
+	// CapabilityEtcdMaintenance performs etcd defragmentation and optional snapshot.
+	// Triggered by TalosEtcdMaintenance CR.
+	CapabilityEtcdMaintenance = "etcd-maintenance"
+
+	// CapabilityEtcdRestore performs disaster recovery from an S3 etcd snapshot.
+	// Triggered by TalosRecovery CR.
+	CapabilityEtcdRestore = "etcd-restore"
+
+	// CapabilityPKIRotate rotates PKI certificates and updates talosconfig secret.
+	// Triggered by TalosPKIRotation CR.
+	CapabilityPKIRotate = "pki-rotate"
+
+	// CapabilityCredentialRotate rotates service account signing keys and OIDC credentials.
+	// Triggered by TalosCredentialRotation CR.
+	CapabilityCredentialRotate = "credential-rotate"
+
+	// CapabilityHardeningApply applies a TalosHardeningProfile to a running cluster.
+	// Triggered by TalosHardeningApply CR.
+	CapabilityHardeningApply = "hardening-apply"
+
+	// CapabilityClusterReset performs a destructive factory reset with a human gate.
+	// Multi-step. Uses PVC protocol. Triggered by TalosClusterReset CR.
+	// Requires annotation ontai.dev/reset-approved=true before execution proceeds.
+	// INV-007, INV-015.
+	CapabilityClusterReset = "cluster-reset"
+)
+
+// ont-infra capabilities — pack compile and delivery.
+const (
+	// CapabilityPackCompile compiles a PackBuild into an immutable ClusterPack
+	// artifact and pushes it to the OCI registry.
+	// Runs as a Kueue Job (executor mode). Triggered by PackBuild CR via ont-infra.
+	// Note: distinct from the runner binary's compile subcommand.
+	CapabilityPackCompile = "pack-compile"
+
+	// CapabilityPackDeploy applies a ClusterPack to a target cluster.
+	// Triggered by PackExecution CR via ont-infra.
+	CapabilityPackDeploy = "pack-deploy"
+)
+
+// ont-security capabilities — RBAC plane.
+const (
+	// CapabilityRBACProvision provisions RBAC artifacts on a target cluster from
+	// the current PermissionSnapshot. Initiated by the security agent control loop.
+	CapabilityRBACProvision = "rbac-provision"
+)
