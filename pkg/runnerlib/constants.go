@@ -73,14 +73,20 @@ const (
 	CapabilityClusterReset = "cluster-reset"
 )
 
-// ont-infra capabilities — pack compile and delivery.
+// Compile mode capabilities — invoked by the ont-runner binary directly, not by ont-agent Jobs.
+// These capabilities run on the operator's workstation or in a CI/CD pipeline and are never
+// submitted to Kueue. They never run on any cluster.
 const (
-	// CapabilityPackCompile compiles a PackBuild into an immutable ClusterPack
-	// artifact and pushes it to the OCI registry.
-	// Runs as a Kueue Job (executor mode). Triggered by PackBuild CR via ont-infra.
-	// Note: distinct from the runner binary's compile subcommand.
+	// CapabilityPackCompile is an ont-runner compile mode invocation that renders PackBuild
+	// inputs (Helm charts, Kustomize overlays, raw manifests) into a ClusterPack OCI artifact.
+	// It is invoked by the human or CI/CD pipeline on the workstation — never as a Kueue Job,
+	// never via ont-agent, never on any cluster. The output is a ClusterPack CR YAML emitted
+	// for git commit and a ClusterPack OCI artifact pushed to the OCI registry.
 	CapabilityPackCompile = "pack-compile"
+)
 
+// ont-infra capabilities — pack delivery. Execute mode: Kueue Jobs on the management cluster.
+const (
 	// CapabilityPackDeploy applies a ClusterPack to a target cluster.
 	// Triggered by PackExecution CR via ont-infra.
 	CapabilityPackDeploy = "pack-deploy"
