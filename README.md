@@ -1,1 +1,1 @@
-ont-runner — ONT Platform Intelligence. See ont-runner-design.md for architecture.
+conductor — ONT Platform Intelligence. See conductor-design.md for architecture.

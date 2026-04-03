@@ -7,7 +7,7 @@ import (
 )
 
 // RunnerConfigSpec is the operator-generated operational contract for a specific
-// cluster or pack. Generated at runtime by ont-platform or ont-infra using
+// cluster or pack. Generated at runtime by platform or wrapper using
 // GenerateFromTalosCluster or GenerateFromPackBuild. Never human-authored.
 // INV-009, INV-010.
 type RunnerConfigSpec struct {
@@ -19,10 +19,6 @@ type RunnerConfigSpec struct {
 	// Tag convention: v{talosVersion}-r{revision} for stable; dev or dev-rc{N}
 	// for development. INV-011, INV-012.
 	RunnerImage string
-
-	// LicenseSecretRef is an optional reference to a JWT license Secret.
-	// Required for clusters beyond the community tier limit. INV-007.
-	LicenseSecretRef *SecretRef
 
 	// Phases declares the applicable execution phases for this RunnerConfig.
 	// Management cluster: launch and enable. Tenant clusters: launch and bootstrap.
@@ -68,7 +64,6 @@ type OperationalHistoryEntry struct {
 }
 
 // SecretRef is a reference to a Kubernetes Secret by name and namespace.
-// Used for LicenseSecretRef and other secret-backed configuration.
 type SecretRef struct {
 	// Name is the Kubernetes Secret name.
 	Name string
@@ -92,35 +87,9 @@ type RunnerConfigStatus struct {
 	// AgentLeader is the pod name currently holding the leader election lease.
 	AgentLeader string
 
-	// LicenseStatus reflects the current license validation result.
-	// LicenseConstraint means this cluster exceeds the community tier limit and
-	// has no valid license. The agent refuses to start for this cluster.
-	LicenseStatus LicenseStatus
-
 	// Conditions is the standard Kubernetes condition list for RunnerConfig.
 	// Standard condition types: LaunchComplete, EnableComplete, BootstrapComplete,
-	// PhaseFailed, CapabilityUnavailable, LicenseConstraint.
+	// PhaseFailed, CapabilityUnavailable.
 	Conditions []metav1.Condition
 }
 
-// LicenseStatus is a typed string representing the current license validation state.
-type LicenseStatus string
-
-const (
-	// LicenseStatusCommunity indicates the cluster is operating under the community
-	// tier. No JWT license key is present or required at this cluster count.
-	LicenseStatusCommunity LicenseStatus = "Community"
-
-	// LicenseStatusLicensed indicates a valid enterprise JWT license is present
-	// and the cluster count is within the licensed limit.
-	LicenseStatusLicensed LicenseStatus = "Licensed"
-
-	// LicenseStatusExpired indicates a JWT license was present but has expired.
-	// The runner agent blocks new Job submissions on this cluster.
-	LicenseStatusExpired LicenseStatus = "LicenseExpired"
-
-	// LicenseStatusConstraint indicates the cluster exceeds the community tier
-	// limit and no valid license is present. The runner agent refuses to start
-	// for this cluster. INV (CR-INV-008).
-	LicenseStatusConstraint LicenseStatus = "LicenseConstraint"
-)

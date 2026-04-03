@@ -3,7 +3,7 @@ package runnerlib_test
 import (
 	"testing"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // TestJobSpecZeroValueNoPanic verifies that the zero value of JobSpec is
@@ -34,7 +34,7 @@ func TestSecretVolumeReadOnlyConvention(t *testing.T) {
 	// A SecretVolume produced by the builder must always have ReadOnly=true.
 	spec, err := runnerlib.NewJobSpecBuilder().
 		WithCapability(runnerlib.CapabilityBootstrap).
-		WithRunnerImage("registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1").
+		WithRunnerImage("registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1").
 		WithSecretVolume("talosconfig-ccs-dev", "/mnt/talosconfig").
 		Build()
 	if err != nil {
@@ -64,7 +64,7 @@ func TestJobSpecBuilderBuildRequiredFields(t *testing.T) {
 
 	t.Run("missing Capability", func(t *testing.T) {
 		_, err := runnerlib.NewJobSpecBuilder().
-			WithRunnerImage("registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1").
+			WithRunnerImage("registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1").
 			Build()
 		if err == nil {
 			t.Error("Build must return an error when Capability is not set")
@@ -85,7 +85,7 @@ func TestJobSpecBuilderFieldPropagation(t *testing.T) {
 	const (
 		capability    = "bootstrap"
 		clusterRef    = "10.20.0.10"
-		runnerImage   = "registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1"
+		runnerImage   = "registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1"
 		queueName     = "platform-queue"
 		resultCM      = "bootstrap-result-ccs-dev"
 		secretName    = "talosconfig-ccs-dev"
@@ -144,7 +144,7 @@ func TestJobSpecBuilderFieldPropagation(t *testing.T) {
 func TestJobSpecBuilderDefaultTTL(t *testing.T) {
 	spec, err := runnerlib.NewJobSpecBuilder().
 		WithCapability(runnerlib.CapabilityBootstrap).
-		WithRunnerImage("registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1").
+		WithRunnerImage("registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1").
 		Build()
 	if err != nil {
 		t.Fatalf("Build failed: %v", err)
@@ -161,7 +161,7 @@ func TestJobSpecBuilderDefaultTTL(t *testing.T) {
 func TestJobSpecBuilderValueSemantics(t *testing.T) {
 	base := runnerlib.NewJobSpecBuilder().
 		WithCapability(runnerlib.CapabilityBootstrap).
-		WithRunnerImage("registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1")
+		WithRunnerImage("registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1")
 
 	// Branch from base — should not affect base.
 	branch1 := base.WithClusterRef("cluster-a")

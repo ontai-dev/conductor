@@ -2,13 +2,13 @@ package runnerlib
 
 // Named capability string constants. These values are permanent and immutable.
 // Renaming a capability is forbidden. Fundamental behavior changes require a new
-// name. CR-INV-004. Values match ont-runner-schema.md Section 6 exactly.
+// name. CR-INV-004. Values match conductor-schema.md Section 6 exactly.
 //
 // The capability name is stamped into the Job spec as the CAPABILITY environment
 // variable. The runner reads this on executor startup to resolve the capability
 // from the registry.
 
-// ont-platform capabilities — cluster lifecycle and operations.
+// platform capabilities — cluster lifecycle and operations.
 const (
 	// CapabilityBootstrap performs full cluster bootstrap from seed nodes.
 	// Multi-step. Uses PVC protocol. Triggered by TalosCluster.
@@ -73,26 +73,26 @@ const (
 	CapabilityClusterReset = "cluster-reset"
 )
 
-// Compile mode capabilities — invoked by the ont-runner binary directly, not by ont-agent Jobs.
+// Compile mode capabilities — invoked by the conductor binary directly, not by conductor Jobs.
 // These capabilities run on the operator's workstation or in a CI/CD pipeline and are never
 // submitted to Kueue. They never run on any cluster.
 const (
-	// CapabilityPackCompile is an ont-runner compile mode invocation that renders PackBuild
+	// CapabilityPackCompile is an conductor compile mode invocation that renders PackBuild
 	// inputs (Helm charts, Kustomize overlays, raw manifests) into a ClusterPack OCI artifact.
 	// It is invoked by the human or CI/CD pipeline on the workstation — never as a Kueue Job,
-	// never via ont-agent, never on any cluster. The output is a ClusterPack CR YAML emitted
+	// never via conductor, never on any cluster. The output is a ClusterPack CR YAML emitted
 	// for git commit and a ClusterPack OCI artifact pushed to the OCI registry.
 	CapabilityPackCompile = "pack-compile"
 )
 
-// ont-infra capabilities — pack delivery. Execute mode: Kueue Jobs on the management cluster.
+// wrapper capabilities — pack delivery. Execute mode: Kueue Jobs on the management cluster.
 const (
 	// CapabilityPackDeploy applies a ClusterPack to a target cluster.
-	// Triggered by PackExecution CR via ont-infra.
+	// Triggered by PackExecution CR via wrapper.
 	CapabilityPackDeploy = "pack-deploy"
 )
 
-// ont-security capabilities — RBAC plane.
+// guardian capabilities — RBAC plane.
 const (
 	// CapabilityRBACProvision provisions RBAC artifacts on a target cluster from
 	// the current PermissionSnapshot. Initiated by the security agent control loop.

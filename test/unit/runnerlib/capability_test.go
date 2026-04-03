@@ -3,7 +3,7 @@ package runnerlib_test
 import (
 	"testing"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // TestCapabilityManifestEntriesNonNil verifies that a CapabilityManifest with

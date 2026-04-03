@@ -2,10 +2,10 @@ package runnerlib
 
 // TalosClusterSpec is the minimal representation of a TalosCluster CR spec used
 // by GenerateFromTalosCluster to produce a RunnerConfigSpec. Fields derived from
-// ont-platform-schema.md Section 2 (TalosCluster key spec fields).
+// platform-schema.md Section 2 (TalosCluster key spec fields).
 //
 // This type exists in the shared library to decouple the generator from the
-// ont-platform CRD Go types. Operators populate this from their CRD types and
+// platform CRD Go types. Operators populate this from their CRD types and
 // pass it to the generator.
 type TalosClusterSpec struct {
 	// ClusterEndpoint is the VIP or first control plane IP. Embedded in all
@@ -13,7 +13,7 @@ type TalosClusterSpec struct {
 	//
 	// TODO: a formal cluster name field should be added to TalosCluster when the
 	// Schema Engineer defines the CRD API types. ClusterEndpoint is used as cluster
-	// identity here as an interim measure. ont-platform-schema.md §2 TalosCluster.
+	// identity here as an interim measure. platform-schema.md §2 TalosCluster.
 	ClusterEndpoint string
 
 	// TalosVersion is the Talos OS version. Determines runner compatibility.
@@ -40,10 +40,10 @@ type TalosClusterSpec struct {
 
 // PackBuildSpec is the minimal representation of a PackBuild CR spec used by
 // GenerateFromPackBuild to produce a RunnerConfigSpec. Fields derived from
-// ont-infra-schema.md Section 3 (PackBuild key spec fields).
+// wrapper-schema.md Section 3 (PackBuild key spec fields).
 //
 // This type exists in the shared library to decouple the generator from the
-// ont-infra CRD Go types. Operators populate this from their CRD types and pass
+// wrapper CRD Go types. Operators populate this from their CRD types and pass
 // it to the generator.
 type PackBuildSpec struct {
 	// SourceHelm is the Helm chart source configuration. Nil if not a Helm-based pack.
@@ -60,7 +60,7 @@ type PackBuildSpec struct {
 }
 
 // HelmSource describes a Helm chart source for a PackBuild.
-// ont-infra-schema.md §3 PackBuild source.helm fields.
+// wrapper-schema.md §3 PackBuild source.helm fields.
 type HelmSource struct {
 	// RepoURL is the Helm chart repository URL.
 	RepoURL string
@@ -77,21 +77,21 @@ type HelmSource struct {
 }
 
 // KustomizeSource describes a Kustomize overlay source for a PackBuild.
-// ont-infra-schema.md §3 PackBuild source.kustomize fields.
+// wrapper-schema.md §3 PackBuild source.kustomize fields.
 type KustomizeSource struct {
 	// OverlayPath is the path reference to the Kustomize overlay directory.
 	OverlayPath string
 }
 
 // RawManifestSource describes a single raw manifest reference for a PackBuild.
-// ont-infra-schema.md §3 PackBuild source.raw fields.
+// wrapper-schema.md §3 PackBuild source.raw fields.
 type RawManifestSource struct {
 	// Path is the path reference to the raw Kubernetes manifest file.
 	Path string
 }
 
 // GenerateFromTalosCluster produces a RunnerConfigSpec from a TalosClusterSpec.
-// Called by ont-platform when a TalosCluster CR lands on the management cluster.
+// Called by platform when a TalosCluster CR lands on the management cluster.
 // The returned RunnerConfigSpec has ClusterRef populated from the spec endpoint,
 // RunnerImage left empty (the operator sets this from the cluster's desired runner
 // version), and Phases initialized with a "launch" phase.
@@ -102,7 +102,7 @@ func GenerateFromTalosCluster(spec TalosClusterSpec) (RunnerConfigSpec, error) {
 	return RunnerConfigSpec{
 		// TODO: replace ClusterEndpoint-as-identity with a formal cluster name field
 		// once TalosCluster CRD API types are defined by the Schema Engineer.
-		// See ont-platform-schema.md §2 TalosCluster.
+		// See platform-schema.md §2 TalosCluster.
 		ClusterRef:  spec.ClusterEndpoint,
 		RunnerImage: "", // Caller must set this from the cluster's desired runner version.
 		Phases: []PhaseConfig{
@@ -116,7 +116,7 @@ func GenerateFromTalosCluster(spec TalosClusterSpec) (RunnerConfigSpec, error) {
 }
 
 // GenerateFromPackBuild produces a RunnerConfigSpec from a PackBuildSpec.
-// Called by ont-infra when a PackBuild CR lands on the management cluster.
+// Called by wrapper when a PackBuild CR lands on the management cluster.
 // Pack compilation is not cluster-specific — ClusterRef is empty. RunnerImage
 // must be set by the caller.
 //

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // TestRunnerConfigSpecZeroValue verifies that a zero-value RunnerConfigSpec is
@@ -15,7 +15,6 @@ func TestRunnerConfigSpecZeroValue(t *testing.T) {
 	// All field accesses must not panic.
 	_ = s.ClusterRef
 	_ = s.RunnerImage
-	_ = s.LicenseSecretRef
 	_ = s.Phases
 	_ = s.OperationalHistory
 
@@ -23,28 +22,6 @@ func TestRunnerConfigSpecZeroValue(t *testing.T) {
 	for range s.Phases {
 	}
 	for range s.OperationalHistory {
-	}
-}
-
-// TestLicenseStatusConstantsNonEmptyAndDistinct verifies that all LicenseStatus
-// constants are non-empty strings and that no two constants share the same value.
-func TestLicenseStatusConstantsNonEmptyAndDistinct(t *testing.T) {
-	constants := []runnerlib.LicenseStatus{
-		runnerlib.LicenseStatusCommunity,
-		runnerlib.LicenseStatusLicensed,
-		runnerlib.LicenseStatusExpired,
-		runnerlib.LicenseStatusConstraint,
-	}
-
-	seen := make(map[runnerlib.LicenseStatus]bool)
-	for _, c := range constants {
-		if c == "" {
-			t.Errorf("LicenseStatus constant is empty string")
-		}
-		if seen[c] {
-			t.Errorf("LicenseStatus constant %q is duplicated", c)
-		}
-		seen[c] = true
 	}
 }
 

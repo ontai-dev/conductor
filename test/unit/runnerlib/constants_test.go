@@ -3,7 +3,7 @@ package runnerlib_test
 import (
 	"testing"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // allCapabilityConstants returns all 18 named capability constants.
@@ -11,7 +11,7 @@ import (
 // added or removed, this function must be updated. The test verifies count = 18.
 func allCapabilityConstants() []string {
 	return []string{
-		// ont-platform (15)
+		// platform (15)
 		runnerlib.CapabilityBootstrap,
 		runnerlib.CapabilityTalosUpgrade,
 		runnerlib.CapabilityKubeUpgrade,
@@ -27,10 +27,10 @@ func allCapabilityConstants() []string {
 		runnerlib.CapabilityCredentialRotate,
 		runnerlib.CapabilityHardeningApply,
 		runnerlib.CapabilityClusterReset,
-		// ont-infra (2)
+		// wrapper (2)
 		runnerlib.CapabilityPackCompile,
 		runnerlib.CapabilityPackDeploy,
-		// ont-security (1)
+		// guardian (1)
 		runnerlib.CapabilityRBACProvision,
 	}
 }
@@ -46,7 +46,7 @@ func TestAllCapabilityConstantsNonEmpty(t *testing.T) {
 }
 
 // TestAllCapabilityConstantsCount verifies exactly 18 named capabilities exist,
-// matching ont-runner-schema.md Section 6.
+// matching conductor-schema.md Section 6.
 func TestAllCapabilityConstantsCount(t *testing.T) {
 	all := allCapabilityConstants()
 	if len(all) != 18 {
@@ -87,7 +87,7 @@ func TestNonObviousCapabilityConstantValues(t *testing.T) {
 }
 
 // TestCapabilityConstantsMatchSchema verifies the exact string values of all
-// 18 constants against ont-runner-schema.md Section 6. Any mismatch breaks the
+// 18 constants against conductor-schema.md Section 6. Any mismatch breaks the
 // operator-runner Job dispatch protocol.
 func TestCapabilityConstantsMatchSchema(t *testing.T) {
 	expected := map[string]string{

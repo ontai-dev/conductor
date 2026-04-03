@@ -1,4 +1,4 @@
-// Package runnerlib is the shared library between the ont-runner binary and all
+// Package runnerlib is the shared library between the conductor binary and all
 // ONT platform operators.
 //
 // All operators import this package. Breaking changes require a major version bump
@@ -17,7 +17,7 @@
 //   - Named capability string constants.
 //
 // Do not add logic to this package beyond what is declared in
-// ont-runner-design.md Section 12. This package is an API contract, not an
+// conductor-design.md Section 12. This package is an API contract, not an
 // implementation. All execution logic lives in the runner binary's internal
 // packages.
 //

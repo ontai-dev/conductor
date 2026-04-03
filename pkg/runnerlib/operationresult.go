@@ -5,7 +5,7 @@ import "time"
 // OperationResultSpec is the complete result document written to a Kubernetes
 // ConfigMap by every runner executor Job before exit. The operator reads this
 // ConfigMap to advance the CR status. No other communication channel exists
-// between operator and runner. ont-runner-design.md Section 8, ont-runner-schema.md
+// between operator and runner. conductor-design.md Section 8, conductor-schema.md
 // Section 8.
 type OperationResultSpec struct {
 	// Phase identifies the RunnerConfig phase this result belongs to.
@@ -26,7 +26,7 @@ type OperationResultSpec struct {
 
 	// Artifacts is the list of artifacts produced by this execution.
 	// References only — never raw content, never secret values. Section 10 of
-	// ont-runner-design.md.
+	// conductor-design.md.
 	Artifacts []ArtifactRef
 
 	// FailureReason is populated when Status is ResultFailed. Nil on success.
@@ -52,7 +52,7 @@ const (
 
 // ArtifactRef is a structured reference to an artifact produced by a capability.
 // Never contains raw artifact content. Secrets are referenced, never embedded.
-// ont-runner-design.md Section 10.
+// conductor-design.md Section 10.
 type ArtifactRef struct {
 	// Name is a logical identifier for this artifact within the OperationResult.
 	Name string
@@ -74,7 +74,7 @@ type ArtifactRef struct {
 
 // FailureReason is a structured failure description populated in OperationResultSpec
 // when Status is ResultFailed. Every failure is classified into exactly one
-// FailureCategory. ont-runner-design.md Section 6.1.
+// FailureCategory. conductor-design.md Section 6.1.
 type FailureReason struct {
 	// Category classifies the failure. Never empty.
 	Category FailureCategory
@@ -89,7 +89,7 @@ type FailureReason struct {
 
 // FailureCategory is a typed string classifying the failure domain.
 // Every failure is classified into exactly one category.
-// ont-runner-design.md Section 6.1.
+// conductor-design.md Section 6.1.
 type FailureCategory string
 
 const (
@@ -121,7 +121,7 @@ const (
 
 	// StorageUnavailable indicates PVC creation failed for a multi-step capability.
 	// The management cluster must have a storage class available.
-	// ont-runner-design.md Section 5.6, ont-runner-schema.md Section 7.
+	// conductor-design.md Section 5.6, conductor-schema.md Section 7.
 	StorageUnavailable FailureCategory = "StorageUnavailable"
 )
 

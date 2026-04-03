@@ -1,4 +1,4 @@
-module github.com/ontai-dev/ont-runner
+module github.com/ontai-dev/conductor
 
 go 1.25.0
 

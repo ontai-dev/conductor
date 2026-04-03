@@ -4,7 +4,7 @@ import "errors"
 
 // ServiceAccountName is the default Kubernetes ServiceAccount used by runner Jobs.
 // All runner Jobs run under this service account unless overridden.
-const ServiceAccountName = "ont-runner"
+const ServiceAccountName = "conductor"
 
 // DefaultTTLSecondsAfterFinished is the default TTL applied to completed Jobs
 // when WithTTL is not called on the builder. 600 seconds = 10 minutes.
@@ -19,7 +19,7 @@ const DefaultTTLSecondsAfterFinished int32 = 600
 //	spec, err := NewJobSpecBuilder().
 //	    WithCapability(CapabilityBootstrap).
 //	    WithClusterRef("my-cluster").
-//	    WithRunnerImage("registry.ontai.dev/ontai-dev/ont-runner:v1.9.3-r1").
+//	    WithRunnerImage("registry.ontai.dev/ontai-dev/conductor:v1.9.3-r1").
 //	    WithQueueName("platform-system-queue").
 //	    WithOperationResultConfigMap("bootstrap-result-my-cluster").
 //	    Build()
@@ -184,7 +184,7 @@ func (b *jobSpecBuilder) WithTTL(seconds int32) JobSpecBuilder {
 
 // Build validates required fields and produces a JobSpec.
 // Returns an error if RunnerImage or Capability is empty.
-// Applies defaults: Namespace=ont-system if empty, TTL=600s, ServiceAccountName="ont-runner".
+// Applies defaults: Namespace=ont-system if empty, TTL=600s, ServiceAccountName="conductor".
 func (b *jobSpecBuilder) Build() (JobSpec, error) {
 	if b.runnerImage == "" {
 		return JobSpec{}, errors.New("runnerlib: JobSpecBuilder.Build: RunnerImage is required")

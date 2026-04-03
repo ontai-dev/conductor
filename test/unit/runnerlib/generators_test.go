@@ -3,7 +3,7 @@ package runnerlib_test
 import (
 	"testing"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // TestGenerateFromTalosClusterZeroValueSpec verifies that GenerateFromTalosCluster
@@ -19,7 +19,6 @@ func TestGenerateFromTalosClusterZeroValueSpec(t *testing.T) {
 	// The returned struct must be valid (accessible without panic).
 	_ = spec.ClusterRef
 	_ = spec.RunnerImage
-	_ = spec.LicenseSecretRef
 	_ = spec.Phases
 	_ = spec.OperationalHistory
 
@@ -44,7 +43,6 @@ func TestGenerateFromPackBuildZeroValueSpec(t *testing.T) {
 
 	_ = spec.ClusterRef
 	_ = spec.RunnerImage
-	_ = spec.LicenseSecretRef
 	_ = spec.Phases
 	_ = spec.OperationalHistory
 

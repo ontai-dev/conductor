@@ -3,7 +3,7 @@ package runnerlib_test
 import (
 	"testing"
 
-	"github.com/ontai-dev/ont-runner/pkg/runnerlib"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 // TestResultStatusConstantsDistinct verifies that ResultSucceeded and ResultFailed
@@ -21,7 +21,7 @@ func TestResultStatusConstantsDistinct(t *testing.T) {
 }
 
 // TestFailureCategoryConstantsMatchDesignDoc verifies that all FailureCategory
-// constants match the exact strings declared in ont-runner-design.md Section 6.1.
+// constants match the exact strings declared in conductor-design.md Section 6.1.
 // These strings appear in OperationResult ConfigMaps and are parsed by operators.
 // Any mismatch breaks the operator-runner protocol.
 func TestFailureCategoryConstantsMatchDesignDoc(t *testing.T) {
@@ -67,7 +67,7 @@ func TestOperationResultSpecNilFailureReasonNoPanic(t *testing.T) {
 
 // TestArtifactRefHasNoRawContent is a structural test verifying that ArtifactRef
 // does not expose a Content or Data field. Artifacts are references, never raw
-// content. ont-runner-design.md Section 10.
+// content. conductor-design.md Section 10.
 //
 // This test is a compilation-time structural assertion: if Content or Data fields
 // were added to ArtifactRef, callers would be tempted to embed raw content, which
