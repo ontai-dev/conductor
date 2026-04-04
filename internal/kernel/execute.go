@@ -7,6 +7,7 @@ import (
 
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
+	"github.com/ontai-dev/conductor/internal/persistence"
 )
 
 // RunExecute implements the execute-mode pipeline.
@@ -17,11 +18,15 @@ import (
 //	CapabilityUnavailable structured failure.
 //
 // Phase 3 — Execution: dispatch to the capability handler.
-// Phase 4 — Finalization: (stub) write OperationResult to ConfigMap.
+// Phase 4 — Finalization: write OperationResult JSON to the named ConfigMap.
 //
-// conductor-design.md §4.2.
-func RunExecute(ctx config.ExecutionContext, reg *capability.Registry) error {
-	// Phase 1 — Validate.
+// The writer parameter satisfies the ConfigMapWriter interface. Production
+// callers pass persistence.NewKubeConfigMapWriter(client); unit tests pass
+// persistence.NoopConfigMapWriter{} or a recording fake.
+//
+// conductor-design.md §4.2, conductor-schema.md §8.
+func RunExecute(ctx config.ExecutionContext, reg *capability.Registry, writer persistence.ConfigMapWriter) error {
+	// Phase 1 — Validate mode.
 	if ctx.Mode != config.ModeExecute {
 		ExitInvariantViolation(fmt.Sprintf(
 			"RunExecute called with mode %q; expected execute", ctx.Mode))
@@ -48,12 +53,17 @@ func RunExecute(ctx config.ExecutionContext, reg *capability.Registry) error {
 		return fmt.Errorf("execute mode: capability %q returned error: %w", ctx.Capability, err)
 	}
 
-	// Phase 4 — Write OperationResult to ConfigMap (stub).
-	// TODO: implement ConfigMap write in a dedicated persistence session.
-	// conductor-design.md §2.8.
-	_ = result
-	fmt.Printf("conductor execute: capability=%q cluster=%q status=%s [configmap write pending]\n",
-		ctx.Capability, ctx.ClusterRef, result.Status)
+	// Phase 4 — Write OperationResult to the named ConfigMap.
+	// This is the only output channel between operator and Conductor Job.
+	// conductor-schema.md §8, conductor-design.md §2.8.
+	ns := ctx.Namespace
+	if ns == "" {
+		ns = config.DefaultNamespace
+	}
+	if writeErr := writer.WriteResult(context.Background(), ns, ctx.OperationResultCM, result); writeErr != nil {
+		return fmt.Errorf("execute mode: write OperationResult to ConfigMap %q in %q: %w",
+			ctx.OperationResultCM, ns, writeErr)
+	}
 
 	return nil
 }

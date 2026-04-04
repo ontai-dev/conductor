@@ -15,13 +15,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
 	"github.com/ontai-dev/conductor/internal/kernel"
+	"github.com/ontai-dev/conductor/internal/persistence"
 )
 
 func main() {
@@ -51,19 +57,32 @@ func main() {
 
 // runExecute implements the execute-mode pipeline.
 // Reads CAPABILITY, CLUSTER_REF, and OPERATION_RESULT_CM from the environment,
-// resolves the named capability from the registry, executes it, and exits.
-// conductor-design.md §4.2.
+// resolves the named capability from the registry, executes it, writes
+// OperationResult to the named ConfigMap, and exits.
+// conductor-design.md §4.2, conductor-schema.md §8.
 func runExecute() {
-	ctx, err := config.BuildExecuteContext()
+	execCtx, err := config.BuildExecuteContext()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}
 
-	reg := capability.NewRegistry()
-	registerAllCapabilities(reg)
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: build in-cluster config: %v\n", err)
+		os.Exit(1)
+	}
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: build kube client: %v\n", err)
+		os.Exit(1)
+	}
 
-	if err := kernel.RunExecute(ctx, reg); err != nil {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+
+	writer := persistence.NewKubeConfigMapWriter(kubeClient)
+	if err := kernel.RunExecute(execCtx, reg, writer); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}
@@ -80,23 +99,33 @@ func runAgent(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, err := config.BuildAgentContext(*clusterRef)
+	execCtx, err := config.BuildAgentContext(*clusterRef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conductor agent: %v\n", err)
 		os.Exit(1)
 	}
 
-	if err := kernel.RunAgent(ctx); err != nil {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor agent: build in-cluster config: %v\n", err)
+		os.Exit(1)
+	}
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor agent: build kube client: %v\n", err)
+		os.Exit(1)
+	}
+	dynamicClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor agent: build dynamic client: %v\n", err)
+		os.Exit(1)
+	}
+
+	goCtx := context.Background()
+	if err := kernel.RunAgent(goCtx, execCtx, kubeClient, dynamicClient); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor agent: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// registerAllCapabilities populates the capability registry with all named
-// capabilities supported by this Conductor image. All registrations are static
-// at build time — no runtime plugin loading. CR-INV-004, conductor-design.md §2.3.
-func registerAllCapabilities(reg *capability.Registry) {
-	capability.RegisterAll(reg)
 }
 
 func printUsage() {

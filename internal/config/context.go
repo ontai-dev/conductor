@@ -39,6 +39,14 @@ const (
 	// EnvOperationResultCM is the ConfigMap name the executor writes
 	// OperationResultSpec to before exit. Required in execute mode.
 	EnvOperationResultCM = "OPERATION_RESULT_CM"
+
+	// EnvPodNamespace is the Kubernetes downward API variable that carries the
+	// namespace the Conductor pod runs in. Defaults to ont-system when absent.
+	EnvPodNamespace = "POD_NAMESPACE"
+
+	// DefaultNamespace is the Kubernetes namespace used when POD_NAMESPACE is unset.
+	// Execute mode Jobs and agent Deployments always run in ont-system.
+	DefaultNamespace = "ont-system"
 )
 
 // ExecutionContext is the immutable configuration snapshot for one binary
@@ -58,6 +66,12 @@ type ExecutionContext struct {
 	// OperationResultCM is the ConfigMap to write OperationResultSpec to.
 	// Non-empty in execute mode only.
 	OperationResultCM string
+
+	// Namespace is the Kubernetes namespace this invocation runs in.
+	// Populated from POD_NAMESPACE (downward API); defaults to ont-system.
+	// Used by execute mode to address the OperationResult ConfigMap and by
+	// agent mode to address RunnerConfig and Lease resources.
+	Namespace string
 
 	// RunnerConfig is the RunnerConfigSpec loaded from the mounted ConfigMap or
 	// environment at startup. Zero value in compile mode.
@@ -89,11 +103,17 @@ func BuildExecuteContext() (ExecutionContext, error) {
 		)
 	}
 
+	ns := os.Getenv(EnvPodNamespace)
+	if ns == "" {
+		ns = DefaultNamespace
+	}
+
 	return ExecutionContext{
 		Mode:              ModeExecute,
 		Capability:        cap,
 		ClusterRef:        clusterRef,
 		OperationResultCM: resultCM,
+		Namespace:         ns,
 	}, nil
 }
 
@@ -105,8 +125,14 @@ func BuildAgentContext(clusterRef string) (ExecutionContext, error) {
 			"agent mode: cluster-ref is required — set via --cluster-ref flag",
 		)
 	}
+	ns := os.Getenv(EnvPodNamespace)
+	if ns == "" {
+		ns = DefaultNamespace
+	}
+
 	return ExecutionContext{
 		Mode:       ModeAgent,
 		ClusterRef: clusterRef,
+		Namespace:  ns,
 	}, nil
 }

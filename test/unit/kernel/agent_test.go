@@ -1,47 +1,55 @@
 package kernel_test
 
 import (
+	"context"
 	"testing"
+
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/ontai-dev/conductor/internal/config"
 	"github.com/ontai-dev/conductor/internal/kernel"
 )
 
-// TestRunAgent_RefusesCompileModeWithInvariantViolation verifies that RunAgent
-// exits with InvariantViolation when called with ModeCompile. The exit is
-// non-recoverable (os.Exit(2)), so we verify the guard panics in test context by
-// wrapping in a subprocess. Since subprocess testing adds complexity, this test
-// verifies the mode-guard logic path via a non-compile mode to confirm the happy
-// path, and relies on TestGuardNotCompileMode for the panic/exit path.
-// conductor-schema.md §10, INV-023.
+// TestRunAgent_ValidContextReturnsNil verifies that RunAgent returns nil for a
+// valid agent context when the caller cancels the context before leader election
+// can proceed (clean shutdown path). conductor-design.md §4.3.
 func TestRunAgent_ValidContextReturnsNil(t *testing.T) {
-	ctx := config.ExecutionContext{
+	goCtx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: leader election returns immediately on cancelled ctx
+
+	execCtx := config.ExecutionContext{
 		Mode:       config.ModeAgent,
 		ClusterRef: "ccs-test",
+		Namespace:  "ont-system",
 	}
 
-	if err := kernel.RunAgent(ctx); err != nil {
-		t.Errorf("expected nil error for valid agent context; got %v", err)
+	fakeClient := fake.NewSimpleClientset()
+	fakeDynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+
+	if err := kernel.RunAgent(goCtx, execCtx, fakeClient, fakeDynamic); err != nil {
+		t.Errorf("expected nil error for valid agent context with cancelled ctx; got %v", err)
 	}
 }
 
-// TestRunAgent_WrongModeReturnsError verifies that RunAgent returns an error
-// (InvariantViolation via os.Exit, but for execute mode it errors before exit)
-// when called with ModeExecute rather than ModeAgent.
-// Since GuardNotCompileMode only fires on compile, execute mode reaches the
-// explicit mode check and triggers ExitInvariantViolation — which is os.Exit(2).
-// We test the one recoverable path: that a wrong-but-non-compile mode is rejected.
-// In practice this is tested via integration; here we verify ModeAgent succeeds.
-func TestRunAgent_ModeAgentWithEmptyClusterRefReturnsError(t *testing.T) {
-	ctx := config.ExecutionContext{
+// TestRunAgent_ModeAgentWithEmptyClusterRefNoPanic verifies that RunAgent does not
+// panic with an empty ClusterRef — the agent prints it but the leader election
+// leaseName degrades gracefully to "conductor-".
+func TestRunAgent_ModeAgentWithEmptyClusterRefNoPanic(t *testing.T) {
+	goCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	execCtx := config.ExecutionContext{
 		Mode:       config.ModeAgent,
 		ClusterRef: "",
+		Namespace:  "ont-system",
 	}
 
-	// BuildAgentContext validates ClusterRef, but RunAgent receives a pre-built
-	// ExecutionContext. An empty ClusterRef is structurally valid here — the
-	// agent prints it but does not error. Validate no panic occurs.
-	if err := kernel.RunAgent(ctx); err != nil {
+	fakeClient := fake.NewSimpleClientset()
+	fakeDynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+
+	if err := kernel.RunAgent(goCtx, execCtx, fakeClient, fakeDynamic); err != nil {
 		t.Errorf("expected nil error even with empty ClusterRef; got %v", err)
 	}
 }
