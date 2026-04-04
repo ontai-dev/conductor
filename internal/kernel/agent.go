@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/ontai-dev/conductor/internal/agent"
 	"github.com/ontai-dev/conductor/internal/capability"
@@ -104,6 +105,39 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	fmt.Printf("conductor agent: cluster=%q starting local PermissionService on %s\n",
 		execCtx.ClusterRef, permSvcAddr)
 
+	// Construct the PermissionSnapshot pull loop (target clusters only).
+	// When MGMT_KUBECONFIG_PATH is set, this Conductor is on a target cluster and
+	// must pull PermissionSnapshots from the management cluster, verify their
+	// Ed25519 signatures (INV-026), and populate the local SnapshotStore.
+	// conductor-schema.md §10 step 8, conductor-design.md §2.10.
+	var snapshotPullLoop *agent.SnapshotPullLoop
+	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
+		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
+		if err != nil {
+			return fmt.Errorf("conductor agent: build management cluster REST config: %w", err)
+		}
+		mgmtDynamicClient, err := dynamic.NewForConfig(mgmtConfig)
+		if err != nil {
+			return fmt.Errorf("conductor agent: build management cluster dynamic client: %w", err)
+		}
+		if pubKeyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); pubKeyPath != "" {
+			snapshotPullLoop, err = agent.NewSnapshotPullLoopWithKey(
+				mgmtDynamicClient, dynamicClient, snapshotStore,
+				execCtx.ClusterRef, ns, pubKeyPath,
+			)
+			if err != nil {
+				return fmt.Errorf("conductor agent: build snapshot pull loop with signing key: %w", err)
+			}
+		} else {
+			snapshotPullLoop = agent.NewSnapshotPullLoop(
+				mgmtDynamicClient, dynamicClient, snapshotStore,
+				execCtx.ClusterRef, ns,
+			)
+		}
+		fmt.Printf("conductor agent: cluster=%q snapshot pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+	}
+
 	// Phase 3 — Start the SealedCausalChain admission webhook server.
 	// The webhook enforces spec.lineage immutability on all Seam-managed CRDs.
 	// seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
@@ -145,7 +179,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -169,6 +203,7 @@ func onLeaderStart(
 	publisher *agent.CapabilityPublisher,
 	reconciler *agent.ReceiptReconciler,
 	signingLoop *agent.SigningLoop,
+	snapshotPullLoop *agent.SnapshotPullLoop,
 ) {
 	// Publish capability manifest to RunnerConfig status (one-shot on leader start).
 	// Failure is logged but does not abort — the agent retries on the next leader
@@ -205,6 +240,13 @@ func onLeaderStart(
 	// conductor-schema.md §10 steps 9–10. INV-026.
 	if signingLoop != nil {
 		go signingLoop.Run(leaderCtx, signingInterval)
+	}
+
+	// Start PermissionSnapshot pull loop (target clusters only).
+	// Pulls from management cluster, verifies signature (INV-026), populates
+	// local SnapshotStore for PermissionService. conductor-schema.md §10 step 8.
+	if snapshotPullLoop != nil {
+		go snapshotPullLoop.Run(leaderCtx, signingInterval)
 	}
 
 	// Block until leadership is lost.
