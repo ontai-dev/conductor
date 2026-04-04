@@ -87,13 +87,45 @@ func runExecute() {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 
+	// TalosClient: constructed from the mounted talosconfig Secret. The
+	// TALOSCONFIG_PATH env var points to the file inside the mounted volume.
+	// Capabilities that do not require Talos access (pack-deploy, rbac-provision)
+	// are unaffected when this is nil — handlers return ValidationFailure if they
+	// require it and find it absent.
+	var talosClient capability.TalosNodeClient
+	if talosconfigPath := os.Getenv("TALOSCONFIG_PATH"); talosconfigPath != "" {
+		adapter, err := capability.NewTalosClientAdapter(context.Background(), talosconfigPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "conductor execute: build talos client: %v\n", err)
+			os.Exit(1)
+		}
+		defer adapter.Close() //nolint:errcheck
+		talosClient = adapter
+	}
+
+	// StorageClient: constructed from S3_REGION (required) and S3_ENDPOINT
+	// (optional). Only non-nil when both the CAPABILITY and S3_REGION env vars
+	// are set — capabilities that do not need storage (all except etcd-backup,
+	// etcd-restore) leave S3_REGION unset.
+	var storageClient capability.StorageClient
+	if os.Getenv("S3_REGION") != "" {
+		adapter, err := capability.NewS3StorageClientAdapter(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "conductor execute: build S3 client: %v\n", err)
+			os.Exit(1)
+		}
+		storageClient = adapter
+	}
+
+	// OCIClient: always constructed; uses only stdlib net/http.
+	ociClient := capability.NewOCIRegistryClientAdapter()
+
 	clients := capability.ExecuteClients{
 		KubeClient:    kubeClient,
 		DynamicClient: dynamicClient,
-		// TalosClient, StorageClient, OCIClient: constructed from mounted
-		// Secrets when the respective capabilities require them. For now these
-		// are left nil; handlers return ValidationFailure if a client is
-		// required but absent. Populated in a subsequent session.
+		TalosClient:   talosClient,
+		StorageClient: storageClient,
+		OCIClient:     ociClient,
 	}
 
 	writer := persistence.NewKubeConfigMapWriter(kubeClient)

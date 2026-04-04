@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"k8s.io/client-go/dynamic"
@@ -11,6 +12,7 @@ import (
 	"github.com/ontai-dev/conductor/internal/agent"
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
+	"github.com/ontai-dev/conductor/internal/webhook"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
@@ -52,7 +54,49 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	manifest := agent.BuildManifest(names, agentVersion)
 
 	publisher := agent.NewCapabilityPublisher(dynamicClient, ns)
-	reconciler := agent.NewReceiptReconciler(dynamicClient, ns)
+
+	// Construct the receipt reconciler. When SIGNING_PUBLIC_KEY_PATH is set,
+	// use the mounted Ed25519 public key for INV-026 signature enforcement.
+	// When absent, operate in bootstrap window mode (INV-020).
+	var reconciler *agent.ReceiptReconciler
+	if keyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); keyPath != "" {
+		var err error
+		reconciler, err = agent.NewReceiptReconcilerWithKey(dynamicClient, ns, keyPath)
+		if err != nil {
+			return fmt.Errorf("conductor agent: build receipt reconciler with signing key: %w", err)
+		}
+	} else {
+		reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
+	}
+
+	// Phase 3 — Start the SealedCausalChain admission webhook server.
+	// The webhook enforces spec.lineage immutability on all Seam-managed CRDs.
+	// seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
+	// Runs on all replicas (not gated by leader election) — the webhook must serve
+	// requests regardless of whether this replica holds the leader lease.
+	// WEBHOOK_TLS_CERT_PATH, WEBHOOK_TLS_KEY_PATH, and WEBHOOK_ADDR are read from
+	// the environment. When cert/key are not configured the webhook is skipped
+	// (development/test mode).
+	certPath := os.Getenv("WEBHOOK_TLS_CERT_PATH")
+	keyPath := os.Getenv("WEBHOOK_TLS_KEY_PATH")
+	if certPath != "" && keyPath != "" {
+		webhookAddr := os.Getenv("WEBHOOK_ADDR")
+		if webhookAddr == "" {
+			webhookAddr = ":8443"
+		}
+		wh := webhook.NewWebhookServer(webhookAddr, certPath, keyPath)
+		go func() {
+			if err := wh.Start(goCtx, certPath, keyPath); err != nil {
+				fmt.Printf("conductor agent: cluster=%q webhook server error: %v\n",
+					execCtx.ClusterRef, err)
+			}
+		}()
+		fmt.Printf("conductor agent: cluster=%q starting admission webhook on %s\n",
+			execCtx.ClusterRef, webhookAddr)
+	} else {
+		fmt.Printf("conductor agent: cluster=%q WEBHOOK_TLS_CERT_PATH/WEBHOOK_TLS_KEY_PATH not set — webhook disabled\n",
+			execCtx.ClusterRef)
+	}
 
 	// Phase 4 — Run leader election. Blocks until goCtx is cancelled.
 	// On leader win: run capability publisher once, then start receipt reconciler loop.

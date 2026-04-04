@@ -1,0 +1,229 @@
+package capability_test
+
+// Adapter unit tests for TalosClientAdapter, S3StorageClientAdapter, and
+// OCIRegistryClientAdapter. All tests use doubles/stubs — no real Talos nodes,
+// S3 buckets, or OCI registries are required. conductor-design.md §5.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/ontai-dev/conductor/internal/capability"
+)
+
+// ── S3StorageClientAdapter tests ─────────────────────────────────────────────
+
+// TestNewS3StorageClientAdapter_MissingRegion verifies that constructing an
+// S3StorageClientAdapter without S3_REGION set returns an error rather than
+// panicking or silently succeeding.
+func TestNewS3StorageClientAdapter_MissingRegion(t *testing.T) {
+	t.Setenv("S3_REGION", "")
+	t.Setenv("S3_ENDPOINT", "")
+	_, err := capability.NewS3StorageClientAdapter(context.Background())
+	if err == nil {
+		t.Fatal("expected error when S3_REGION is not set; got nil")
+	}
+}
+
+// ── OCIRegistryClientAdapter tests ───────────────────────────────────────────
+
+// ociServer starts a test HTTP server that responds to OCI Distribution API
+// requests. It serves one manifest with the given layers, and one blob per
+// layer digest.
+func ociServer(t *testing.T, name string, layers []struct{ Digest, Content string }) *httptest.Server {
+	t.Helper()
+	type layer struct {
+		Digest    string `json:"digest"`
+		MediaType string `json:"mediaType"`
+		Size      int64  `json:"size"`
+	}
+	type manifest struct {
+		SchemaVersion int     `json:"schemaVersion"`
+		MediaType     string  `json:"mediaType"`
+		Layers        []layer `json:"layers"`
+	}
+
+	mfstLayers := make([]layer, len(layers))
+	blobs := map[string]string{}
+	for i, l := range layers {
+		mfstLayers[i] = layer{
+			Digest:    l.Digest,
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Size:      int64(len(l.Content)),
+		}
+		blobs[l.Digest] = l.Content
+	}
+	mfstJSON, _ := json.Marshal(manifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.oci.image.manifest.v1+json",
+		Layers:        mfstLayers,
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/v2/%s/manifests/latest", name):
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Write(mfstJSON) //nolint:errcheck
+		default:
+			for digest, content := range blobs {
+				blobPath := fmt.Sprintf("/v2/%s/blobs/%s", name, digest)
+				if r.Method == http.MethodGet && r.URL.Path == blobPath {
+					w.Write([]byte(content)) //nolint:errcheck
+					return
+				}
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// httpClientForServer returns an *http.Client that routes all requests through
+// the given httptest.Server by stripping the host.
+func httpClientForServer(srv *httptest.Server) *http.Client {
+	return srv.Client()
+}
+
+// TestOCIRegistryClientAdapter_PullManifests_SingleLayer verifies that a
+// single-layer OCI image returns one manifest bytes slice with the layer content.
+func TestOCIRegistryClientAdapter_PullManifests_SingleLayer(t *testing.T) {
+	layers := []struct{ Digest, Content string }{
+		{Digest: "sha256:abc123", Content: "apiVersion: v1\nkind: ConfigMap\n"},
+	}
+	srv := ociServer(t, "myrepo/mypkg", layers)
+
+	// Build a reference using the test server host.
+	host := srv.Listener.Addr().String()
+	ref := fmt.Sprintf("%s/myrepo/mypkg:latest", host)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	manifests, err := adapter.PullManifests(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("PullManifests: unexpected error: %v", err)
+	}
+	if len(manifests) != 1 {
+		t.Fatalf("expected 1 manifest; got %d", len(manifests))
+	}
+	if !bytes.Equal(manifests[0], []byte(layers[0].Content)) {
+		t.Errorf("manifest content mismatch: got %q; want %q", manifests[0], layers[0].Content)
+	}
+}
+
+// TestOCIRegistryClientAdapter_PullManifests_MultipleLayer verifies that a
+// multi-layer OCI image returns one manifest bytes slice per layer.
+func TestOCIRegistryClientAdapter_PullManifests_MultipleLayer(t *testing.T) {
+	layers := []struct{ Digest, Content string }{
+		{Digest: "sha256:aaa", Content: "layer-one-content"},
+		{Digest: "sha256:bbb", Content: "layer-two-content"},
+		{Digest: "sha256:ccc", Content: "layer-three-content"},
+	}
+	srv := ociServer(t, "myrepo/mypkg", layers)
+
+	host := srv.Listener.Addr().String()
+	ref := fmt.Sprintf("%s/myrepo/mypkg:latest", host)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	manifests, err := adapter.PullManifests(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("PullManifests: unexpected error: %v", err)
+	}
+	if len(manifests) != len(layers) {
+		t.Fatalf("expected %d manifests; got %d", len(layers), len(manifests))
+	}
+	for i, l := range layers {
+		if !bytes.Equal(manifests[i], []byte(l.Content)) {
+			t.Errorf("layer %d content mismatch: got %q; want %q", i, manifests[i], l.Content)
+		}
+	}
+}
+
+// TestOCIRegistryClientAdapter_PullManifests_NotFound verifies that a 404 from
+// the registry manifests endpoint returns an error.
+func TestOCIRegistryClientAdapter_PullManifests_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	host := srv.Listener.Addr().String()
+	ref := fmt.Sprintf("%s/missing/image:latest", host)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	_, err := adapter.PullManifests(context.Background(), ref)
+	if err == nil {
+		t.Fatal("expected error for 404 manifest response; got nil")
+	}
+}
+
+// TestOCIRegistryClientAdapter_PullManifests_MalformedRef verifies that a
+// reference string with no slash returns a parse error immediately.
+func TestOCIRegistryClientAdapter_PullManifests_MalformedRef(t *testing.T) {
+	adapter := capability.NewOCIRegistryClientAdapter()
+	_, err := adapter.PullManifests(context.Background(), "no-slash-at-all")
+	if err == nil {
+		t.Fatal("expected error for malformed reference with no slash; got nil")
+	}
+}
+
+// TestOCIRegistryClientAdapter_PullManifests_EmptyLayers verifies that an OCI
+// image with no layers returns an error rather than an empty successful result.
+func TestOCIRegistryClientAdapter_PullManifests_EmptyLayers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type manifest struct {
+			SchemaVersion int           `json:"schemaVersion"`
+			Layers        []interface{} `json:"layers"`
+		}
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		json.NewEncoder(w).Encode(manifest{SchemaVersion: 2, Layers: nil}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+
+	host := srv.Listener.Addr().String()
+	ref := fmt.Sprintf("%s/myrepo/empty:latest", host)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	_, err := adapter.PullManifests(context.Background(), ref)
+	if err == nil {
+		t.Fatal("expected error for OCI image with no layers; got nil")
+	}
+}
+
+// ── parseOCIRef tests via PullManifests error path ────────────────────────────
+
+// TestOCIRef_DigestRef verifies that a digest reference (with @sha256:...) is
+// routed to the correct manifest URL.
+func TestOCIRef_DigestRef(t *testing.T) {
+	digest := "sha256:deadbeef"
+	requested := ""
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = r.URL.Path
+		http.NotFound(w, r) // just capture the URL; don't serve a valid response
+	}))
+	t.Cleanup(srv.Close)
+
+	host := srv.Listener.Addr().String()
+	ref := fmt.Sprintf("%s/myrepo/img@%s", host, digest)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	adapter.PullManifests(context.Background(), ref) //nolint:errcheck
+
+	expected := fmt.Sprintf("/v2/myrepo/img/manifests/%s", digest)
+	if requested != expected {
+		t.Errorf("manifest URL path: got %q; want %q", requested, expected)
+	}
+}
+
+// ── stub: no-op io.ReadCloser ─────────────────────────────────────────────────
+
+type nopReadCloser struct{ r io.Reader }
+
+func (n nopReadCloser) Read(p []byte) (int, error) { return n.r.Read(p) }
+func (n nopReadCloser) Close() error               { return nil }
