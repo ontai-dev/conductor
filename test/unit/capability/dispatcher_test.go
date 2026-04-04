@@ -41,10 +41,11 @@ func TestDispatcher_ExecuteKnownCapabilityReturnsResult(t *testing.T) {
 	}
 }
 
-// TestDispatcher_StubHandlerReturnsFailedResult verifies that stub handlers
-// (used for all unimplemented capabilities) return ResultFailed with
-// ExecutionFailure category and a "not yet implemented" reason.
-func TestDispatcher_StubHandlerReturnsFailedResult(t *testing.T) {
+// TestDispatcher_NilClientHandlerReturnsValidationFailure verifies that real
+// capability handlers invoked with nil clients (as in unit tests) return
+// ResultFailed with ValidationFailure category rather than panicking.
+// This is the nil-client contract for all 17 execute-mode handlers.
+func TestDispatcher_NilClientHandlerReturnsValidationFailure(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 
@@ -53,21 +54,22 @@ func TestDispatcher_StubHandlerReturnsFailedResult(t *testing.T) {
 		t.Fatalf("resolve bootstrap failed: %v", err)
 	}
 
+	// All ExecuteClients fields are nil — matches the zero value.
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityBootstrap,
 		ClusterRef: "ccs-test",
 	})
 	if err != nil {
-		t.Fatalf("stub execute returned unexpected error: %v", err)
+		t.Fatalf("handler returned unexpected error with nil clients: %v", err)
 	}
 	if result.Status != runnerlib.ResultFailed {
-		t.Errorf("stub: expected ResultFailed; got %q", result.Status)
+		t.Errorf("expected ResultFailed; got %q", result.Status)
 	}
 	if result.FailureReason == nil {
-		t.Fatal("stub: expected non-nil FailureReason")
+		t.Fatal("expected non-nil FailureReason")
 	}
-	if result.FailureReason.Category != runnerlib.ExecutionFailure {
-		t.Errorf("stub: expected ExecutionFailure category; got %q", result.FailureReason.Category)
+	if result.FailureReason.Category != runnerlib.ValidationFailure {
+		t.Errorf("expected ValidationFailure category; got %q", result.FailureReason.Category)
 	}
 }
 

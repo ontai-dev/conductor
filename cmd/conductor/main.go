@@ -78,11 +78,26 @@ func runExecute() {
 		os.Exit(1)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: build dynamic client: %v\n", err)
+		os.Exit(1)
+	}
+
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 
+	clients := capability.ExecuteClients{
+		KubeClient:    kubeClient,
+		DynamicClient: dynamicClient,
+		// TalosClient, StorageClient, OCIClient: constructed from mounted
+		// Secrets when the respective capabilities require them. For now these
+		// are left nil; handlers return ValidationFailure if a client is
+		// required but absent. Populated in a subsequent session.
+	}
+
 	writer := persistence.NewKubeConfigMapWriter(kubeClient)
-	if err := kernel.RunExecute(execCtx, reg, writer); err != nil {
+	if err := kernel.RunExecute(execCtx, reg, writer, clients); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}

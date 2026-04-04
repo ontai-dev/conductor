@@ -25,7 +25,9 @@ type Handler interface {
 }
 
 // ExecuteParams carries all input parameters for one capability execution.
-// Constructed by the execute-mode pipeline from the ExecutionContext.
+// Constructed by the execute-mode pipeline from the ExecutionContext and the
+// injected ExecuteClients. Client fields are nil in unit tests; handlers that
+// require a non-nil client return ValidationFailure when absent.
 type ExecuteParams struct {
 	// Capability is the name of the capability being executed. Matches one of
 	// the Capability* constants in pkg/runnerlib/constants.go.
@@ -36,6 +38,14 @@ type ExecuteParams struct {
 
 	// OperationResultCM is the ConfigMap name to write OperationResultSpec to.
 	OperationResultCM string
+
+	// Namespace is the Kubernetes namespace the Conductor Job runs in
+	// (ont-system). Used to address CRDs and ConfigMaps.
+	Namespace string
+
+	// ExecuteClients bundles the injected client dependencies.
+	// See ExecuteClients documentation for nil-client semantics.
+	ExecuteClients
 }
 
 // Registry is the static capability registry. All handlers are registered at

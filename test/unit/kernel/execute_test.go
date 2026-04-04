@@ -27,7 +27,7 @@ func TestRunExecute_UnknownCapabilityReturnsError(t *testing.T) {
 		Namespace:         "ont-system",
 	}
 
-	err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{})
+	err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{}, capability.ExecuteClients{})
 	if err == nil {
 		t.Fatal("expected error for unknown capability; got nil")
 	}
@@ -48,7 +48,7 @@ func TestRunExecute_KnownCapabilityDispatchesSuccessfully(t *testing.T) {
 		Namespace:         "ont-system",
 	}
 
-	if err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{}); err != nil {
+	if err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{}, capability.ExecuteClients{}); err != nil {
 		t.Errorf("expected no error for known capability; got %v", err)
 	}
 }
@@ -90,7 +90,7 @@ func TestRunExecute_AllStubCapabilitiesDispatchWithoutPanic(t *testing.T) {
 				Namespace:         "ont-system",
 			}
 
-			if err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{}); err != nil {
+			if err := kernel.RunExecute(ctx, reg, persistence.NoopConfigMapWriter{}, capability.ExecuteClients{}); err != nil {
 				t.Errorf("unexpected error for stub capability %q: %v", name, err)
 			}
 		})
@@ -113,7 +113,7 @@ func TestRunExecute_WritesOperationResultToConfigMap(t *testing.T) {
 	}
 
 	rec := &recordingConfigMapWriter{}
-	if err := kernel.RunExecute(ctx, reg, rec); err != nil {
+	if err := kernel.RunExecute(ctx, reg, rec, capability.ExecuteClients{}); err != nil {
 		t.Fatalf("expected no error; got %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestRunExecute_ConfigMapWriteFailureReturnsError(t *testing.T) {
 		Namespace:         "ont-system",
 	}
 
-	err := kernel.RunExecute(ctx, reg, &failingConfigMapWriter{})
+	err := kernel.RunExecute(ctx, reg, &failingConfigMapWriter{}, capability.ExecuteClients{})
 	if err == nil {
 		t.Fatal("expected error from ConfigMap write failure; got nil")
 	}
@@ -173,7 +173,7 @@ func TestRunExecute_DefaultsNamespaceToOntSystem(t *testing.T) {
 	}
 
 	rec := &recordingConfigMapWriter{}
-	if err := kernel.RunExecute(ctx, reg, rec); err != nil {
+	if err := kernel.RunExecute(ctx, reg, rec, capability.ExecuteClients{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.lastNamespace != config.DefaultNamespace {

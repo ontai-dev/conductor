@@ -8,24 +8,19 @@ import (
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
-// stubHandler is a placeholder capability implementation returned for all named
-// capabilities in the current build. Each stub returns a failed OperationResult
-// with ExecutionFailure and a "not yet implemented" reason. This ensures that:
-//  1. All capabilities are registered and resolvable (no CapabilityUnavailable).
-//  2. The dispatcher, registry, and execute-mode pipeline are fully testable.
-//  3. Actual capability implementations are added in future sessions without
-//     modifying the registry or dispatcher.
-//
-// conductor-design.md §5 — capability authoring will replace stubs individually.
+// stubHandler is a placeholder capability implementation used exclusively
+// for tests that want to exercise the registry/dispatcher pipeline without
+// real client dependencies. It is not used in production — RegisterAll
+// registers the real handler implementations.
 type stubHandler struct {
 	name string
 }
 
-func (h *stubHandler) Execute(_ context.Context, params ExecuteParams) (runnerlib.OperationResultSpec, error) {
+func (h *stubHandler) Execute(_ context.Context, _ ExecuteParams) (runnerlib.OperationResultSpec, error) {
 	now := time.Now()
 	return runnerlib.OperationResultSpec{
-		Capability: h.name,
-		Status:     runnerlib.ResultFailed,
+		Capability:  h.name,
+		Status:      runnerlib.ResultFailed,
 		StartedAt:   now,
 		CompletedAt: now,
 		Artifacts:   []runnerlib.ArtifactRef{},
@@ -37,40 +32,43 @@ func (h *stubHandler) Execute(_ context.Context, params ExecuteParams) (runnerli
 	}, nil
 }
 
-// stub returns a stubHandler for the given capability name.
+// stub returns a stubHandler for the given capability name. For test use only.
 func stub(name string) Handler {
 	return &stubHandler{name: name}
 }
 
-// RegisterAll populates the registry with stub handlers for every named
-// capability declared in conductor-schema.md §6. Registration is static at
-// build time. CR-INV-004, conductor-design.md §2.3.
+// RegisterAll populates the registry with the real capability handler
+// implementations for every named execute-mode capability declared in
+// conductor-schema.md §6. Registration is static at build time.
 //
-// When a capability is fully implemented, replace stub(name) with the real
-// handler — no other change is required.
+// All handlers accept nil clients and return ValidationFailure when a required
+// client is absent — enabling unit tests to call RegisterAll without wiring
+// real Kubernetes or Talos clients.
+//
+// CR-INV-004, conductor-design.md §2.3.
 func RegisterAll(reg *Registry) {
 	// Platform capabilities — cluster lifecycle and operations.
-	reg.Register(runnerlib.CapabilityBootstrap, stub(runnerlib.CapabilityBootstrap))
-	reg.Register(runnerlib.CapabilityTalosUpgrade, stub(runnerlib.CapabilityTalosUpgrade))
-	reg.Register(runnerlib.CapabilityKubeUpgrade, stub(runnerlib.CapabilityKubeUpgrade))
-	reg.Register(runnerlib.CapabilityStackUpgrade, stub(runnerlib.CapabilityStackUpgrade))
-	reg.Register(runnerlib.CapabilityNodePatch, stub(runnerlib.CapabilityNodePatch))
-	reg.Register(runnerlib.CapabilityNodeScaleUp, stub(runnerlib.CapabilityNodeScaleUp))
-	reg.Register(runnerlib.CapabilityNodeDecommission, stub(runnerlib.CapabilityNodeDecommission))
-	reg.Register(runnerlib.CapabilityNodeReboot, stub(runnerlib.CapabilityNodeReboot))
-	reg.Register(runnerlib.CapabilityEtcdBackup, stub(runnerlib.CapabilityEtcdBackup))
-	reg.Register(runnerlib.CapabilityEtcdMaintenance, stub(runnerlib.CapabilityEtcdMaintenance))
-	reg.Register(runnerlib.CapabilityEtcdRestore, stub(runnerlib.CapabilityEtcdRestore))
-	reg.Register(runnerlib.CapabilityPKIRotate, stub(runnerlib.CapabilityPKIRotate))
-	reg.Register(runnerlib.CapabilityCredentialRotate, stub(runnerlib.CapabilityCredentialRotate))
-	reg.Register(runnerlib.CapabilityHardeningApply, stub(runnerlib.CapabilityHardeningApply))
-	reg.Register(runnerlib.CapabilityClusterReset, stub(runnerlib.CapabilityClusterReset))
+	reg.Register(runnerlib.CapabilityBootstrap, &bootstrapHandler{})
+	reg.Register(runnerlib.CapabilityTalosUpgrade, &talosUpgradeHandler{})
+	reg.Register(runnerlib.CapabilityKubeUpgrade, &kubeUpgradeHandler{})
+	reg.Register(runnerlib.CapabilityStackUpgrade, &stackUpgradeHandler{})
+	reg.Register(runnerlib.CapabilityNodePatch, &nodePatchHandler{})
+	reg.Register(runnerlib.CapabilityNodeScaleUp, &nodeScaleUpHandler{})
+	reg.Register(runnerlib.CapabilityNodeDecommission, &nodeDecommissionHandler{})
+	reg.Register(runnerlib.CapabilityNodeReboot, &nodeRebootHandler{})
+	reg.Register(runnerlib.CapabilityEtcdBackup, &etcdBackupHandler{})
+	reg.Register(runnerlib.CapabilityEtcdMaintenance, &etcdMaintenanceHandler{})
+	reg.Register(runnerlib.CapabilityEtcdRestore, &etcdRestoreHandler{})
+	reg.Register(runnerlib.CapabilityPKIRotate, &pkiRotateHandler{})
+	reg.Register(runnerlib.CapabilityCredentialRotate, &credentialRotateHandler{})
+	reg.Register(runnerlib.CapabilityHardeningApply, &hardeningApplyHandler{})
+	reg.Register(runnerlib.CapabilityClusterReset, &clusterResetHandler{})
 
 	// Wrapper capabilities — pack delivery.
-	reg.Register(runnerlib.CapabilityPackDeploy, stub(runnerlib.CapabilityPackDeploy))
+	reg.Register(runnerlib.CapabilityPackDeploy, &packDeployHandler{})
 
 	// Guardian capabilities — RBAC plane.
-	reg.Register(runnerlib.CapabilityRBACProvision, stub(runnerlib.CapabilityRBACProvision))
+	reg.Register(runnerlib.CapabilityRBACProvision, &rbacProvisionHandler{})
 
 	// Note: CapabilityPackCompile is NOT registered here. pack-compile is a
 	// Compiler compile-mode invocation only — it never runs as a Conductor Job.
