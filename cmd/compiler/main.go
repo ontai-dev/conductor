@@ -82,14 +82,26 @@ func runCompile(args []string) {
 // Validates TalosCluster spec, generates and SOPS-encrypts secrets, writes
 // encrypted files to the output path. conductor-schema.md §9.
 //
-// TODO: implement full pipeline in a dedicated Conductor Engineer session
-// covering Helm rendering, SOPS encryption, and talosconfig generation.
+// Pipeline (conductor-schema.md §9):
+//  1. Read TalosCluster spec and human-provided machineconfig files.
+//  2. Validate TalosCluster spec against platform-schema.md rules.
+//  3. Validate machineconfig structure against the declared Talos version.
+//  4. SOPS-encrypt talos-secret, machineconfigs, talosconfig using admin's age key.
+//  5. Write encrypted files to the output path (clusters/{cluster-name}/ in git).
+//  6. Produce validation report.
+//
+// NOT YET IMPLEMENTED — blocked on SOPS age-encryption client package
+// (internal/clients/sops). Schedule a dedicated Conductor Engineer session
+// to add the SOPS handler and implement this pipeline end-to-end.
 func compileCluster(input, output string) error {
-	// Stub: validate paths are non-empty (already checked by caller).
-	// Full pipeline: load TalosCluster spec → validate → generate secrets →
-	// SOPS-encrypt → write to output. conductor-schema.md §9 Phase 1-5.
-	fmt.Printf("compiler: compile cluster: input=%s output=%s [pipeline stub]\n", input, output)
-	return nil
+	return fmt.Errorf(
+		"compile cluster: not yet implemented\n"+
+			"  input: %s\n"+
+			"  output: %s\n"+
+			"  blocked: SOPS age-encryption client (internal/clients/sops) not yet implemented\n"+
+			"  action: schedule a dedicated Conductor Engineer session — conductor-schema.md §9",
+		input, output,
+	)
 }
 
 // compilePack runs the pack compilation pipeline.
@@ -97,15 +109,36 @@ func compileCluster(input, output string) error {
 // pins image digests, and pushes a ClusterPack OCI artifact.
 // conductor-schema.md §9, CapabilityPackCompile.
 //
-// TODO: implement full pipeline in a dedicated Conductor Engineer session
-// covering Helm rendering, Kustomize resolution, and OCI push.
+// Pipeline (conductor-schema.md §9):
+//  1. Read PackBuild spec.
+//  2. Pull Helm chart via helm goclient. Render with declared values.
+//  3. Resolve Kustomize overlay via kustomize goclient.
+//  4. Normalize all inputs to flat Kubernetes manifests.
+//  5. Validate all resources against target Kubernetes version schemas.
+//  6. Build execution order from declared dependencies. Fail if acyclic check fails.
+//  7. Generate minimum necessary RBAC.
+//  8. Pin all image references to digest.
+//  9. Compute content-addressed checksum.
+// 10. Generate provenance record with build identity, timestamp, source digests.
+// 11. Push ClusterPack artifact to OCI registry.
+// 12. Write OperationResult with registered ClusterPack version and digest.
+// 13. Exit.
+//
+// NOT YET IMPLEMENTED — blocked on compile-mode client packages:
+//   internal/clients/helm (Helm chart rendering)
+//   internal/clients/kustomize (Kustomize overlay resolution)
+// Schedule a dedicated Conductor Engineer session to add these packages and
+// implement this pipeline end-to-end. OCI push is available via internal/capability
+// adapters — that step can reuse the existing adapter once the above are in place.
 func compilePack(input, output string) error {
-	// Stub: validate paths are non-empty (already checked by caller).
-	// Full pipeline: load PackBuild spec → Helm render → Kustomize resolve →
-	// normalize → validate → artifact construction → OCI push.
-	// conductor-schema.md §9 Phase 1-5.
-	fmt.Printf("compiler: compile pack: input=%s output=%s [pipeline stub]\n", input, output)
-	return nil
+	return fmt.Errorf(
+		"compile pack: not yet implemented\n"+
+			"  input: %s\n"+
+			"  output: %s\n"+
+			"  blocked: Helm goclient (internal/clients/helm) and Kustomize goclient (internal/clients/kustomize) not yet implemented\n"+
+			"  action: schedule a dedicated Conductor Engineer session — conductor-schema.md §9",
+		input, output,
+	)
 }
 
 func printUsage() {
