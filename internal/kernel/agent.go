@@ -12,6 +12,7 @@ import (
 	"github.com/ontai-dev/conductor/internal/agent"
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
+	"github.com/ontai-dev/conductor/internal/permissionservice"
 	"github.com/ontai-dev/conductor/internal/webhook"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -69,6 +70,40 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
 	}
 
+	// Construct the signing loop (management cluster only). When
+	// SIGNING_PRIVATE_KEY_PATH is set, the agent is on the management cluster
+	// and signs PackInstance and PermissionSnapshot CRs with the platform key.
+	// conductor-schema.md §10 steps 9–10. INV-026.
+	var signingLoop *agent.SigningLoop
+	if privKeyPath := os.Getenv("SIGNING_PRIVATE_KEY_PATH"); privKeyPath != "" {
+		var err error
+		signingLoop, err = agent.NewSigningLoop(dynamicClient, privKeyPath)
+		if err != nil {
+			return fmt.Errorf("conductor agent: build signing loop: %w", err)
+		}
+		fmt.Printf("conductor agent: cluster=%q signing loop enabled (management cluster)\n",
+			execCtx.ClusterRef)
+	}
+
+	// Phase 3 — Start the local PermissionService gRPC server.
+	// Serves authorization decisions from the local acknowledged PermissionSnapshot
+	// without requiring management cluster connectivity. All clusters (management
+	// and target) start this server. conductor-schema.md §10 step 6.
+	permSvcAddr := os.Getenv("PERMISSION_SERVICE_ADDR")
+	if permSvcAddr == "" {
+		permSvcAddr = ":50051"
+	}
+	snapshotStore := permissionservice.NewSnapshotStore()
+	localSvc := permissionservice.NewLocalService(snapshotStore)
+	go func() {
+		if err := permissionservice.ListenAndServe(goCtx, permSvcAddr, localSvc); err != nil {
+			fmt.Printf("conductor agent: cluster=%q permission service error: %v\n",
+				execCtx.ClusterRef, err)
+		}
+	}()
+	fmt.Printf("conductor agent: cluster=%q starting local PermissionService on %s\n",
+		execCtx.ClusterRef, permSvcAddr)
+
 	// Phase 3 — Start the SealedCausalChain admission webhook server.
 	// The webhook enforces spec.lineage immutability on all Seam-managed CRDs.
 	// seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
@@ -110,7 +145,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -125,14 +160,15 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 }
 
 // onLeaderStart is invoked by RunLeaderElection when this replica wins the lease.
-// It publishes the capability manifest and then drives the receipt reconciliation
-// loop until leaderCtx is cancelled. conductor-design.md §2.10.
+// It publishes the capability manifest, then starts all write-path goroutines.
+// Blocks until leaderCtx is cancelled. conductor-design.md §2.10.
 func onLeaderStart(
 	leaderCtx context.Context,
 	clusterRef string,
 	manifest runnerlib.CapabilityManifest,
 	publisher *agent.CapabilityPublisher,
 	reconciler *agent.ReceiptReconciler,
+	signingLoop *agent.SigningLoop,
 ) {
 	// Publish capability manifest to RunnerConfig status (one-shot on leader start).
 	// Failure is logged but does not abort — the agent retries on the next leader
@@ -144,21 +180,33 @@ func onLeaderStart(
 			clusterRef, len(manifest.Entries))
 	}
 
-	// Run receipt reconciliation loop until leadership is lost.
-	// conductor-schema.md §10 step 4, conductor-design.md §2.10.
 	const reconcileInterval = 30 * time.Second
-	ticker := time.NewTicker(reconcileInterval)
-	defer ticker.Stop()
+	const signingInterval = 30 * time.Second
 
-	for {
-		select {
-		case <-leaderCtx.Done():
-			return
-		case <-ticker.C:
-			if err := reconciler.Reconcile(leaderCtx); err != nil {
-				fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
-					clusterRef, err)
+	// Start receipt reconciliation loop as a goroutine.
+	// conductor-schema.md §10 step 4, conductor-design.md §2.10.
+	go func() {
+		ticker := time.NewTicker(reconcileInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaderCtx.Done():
+				return
+			case <-ticker.C:
+				if err := reconciler.Reconcile(leaderCtx); err != nil {
+					fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
+						clusterRef, err)
+				}
 			}
 		}
+	}()
+
+	// Start signing loop (management cluster only).
+	// conductor-schema.md §10 steps 9–10. INV-026.
+	if signingLoop != nil {
+		go signingLoop.Run(leaderCtx, signingInterval)
 	}
+
+	// Block until leadership is lost.
+	<-leaderCtx.Done()
 }
