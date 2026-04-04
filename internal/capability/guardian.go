@@ -5,6 +5,9 @@ package capability
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -15,6 +18,11 @@ import (
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+// managementSignatureAnnotation is the annotation key used by the management
+// cluster Conductor to store the base64-encoded Ed25519 signature of the
+// PermissionSnapshot spec. INV-026.
+const managementSignatureAnnotation = "runner.ontai.dev/management-signature"
 
 // permissionSnapshotGVR is the GroupVersionResource for PermissionSnapshot.
 // security.ontai.dev/v1alpha1/permissionsnapshots — guardian-schema.md §7.
@@ -52,6 +60,8 @@ func (h *rbacProvisionHandler) Execute(ctx context.Context, params ExecuteParams
 	// Find the snapshot whose spec.targetCluster matches the ClusterRef.
 	var snapshotPrincipalPerms []interface{}
 	var snapshotVersion string
+	var snapshotSpec map[string]interface{}
+	var snapshotAnnotations map[string]interface{}
 	for _, item := range snapList.Items {
 		tc, _, _ := unstructuredString(item.Object, "spec", "targetCluster")
 		if tc != params.ClusterRef {
@@ -60,12 +70,21 @@ func (h *rbacProvisionHandler) Execute(ctx context.Context, params ExecuteParams
 		snapshotVersion, _, _ = unstructuredString(item.Object, "spec", "version")
 		perms, _, _ := unstructuredList(item.Object, "spec", "principalPermissions")
 		snapshotPrincipalPerms = perms
+		snapshotSpec, _, _ = unstructuredNestedMap(item.Object, "spec")
+		snapshotAnnotations, _, _ = unstructuredNestedMap(item.Object, "metadata", "annotations")
 		break
 	}
 
 	if snapshotVersion == "" {
 		return failureResult(runnerlib.CapabilityRBACProvision, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("no PermissionSnapshot found for cluster %q in security-system", params.ClusterRef)), nil
+	}
+
+	// Verify Ed25519 signature on the PermissionSnapshot. INV-026.
+	// Bootstrap window mode (SigningPublicKey == nil) bypasses verification. INV-020.
+	if sigErr := verifyPermissionSnapshotSignature(params.SigningPublicKey, snapshotAnnotations, snapshotSpec); sigErr != nil {
+		return failureResult(runnerlib.CapabilityRBACProvision, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("PermissionSnapshot signature verification failed (INV-026): %v", sigErr)), nil
 	}
 
 	// Apply ClusterRoles from the snapshot's principalPermissions.
@@ -136,6 +155,68 @@ func (h *rbacProvisionHandler) Execute(ctx context.Context, params ExecuteParams
 // ---------------------------------------------------------------------------
 // Helpers — unstructured field access
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Signature verification — INV-026 / INV-020
+// ---------------------------------------------------------------------------
+
+// verifyPermissionSnapshotSignature verifies the Ed25519 signature on a
+// PermissionSnapshot CR. pubKey == nil enters bootstrap window mode (INV-020):
+// all snapshots are accepted without verification. When pubKey is set, the
+// annotation runner.ontai.dev/management-signature must be present and valid.
+// The signed message is json.Marshal(spec), consistent with signing_loop.go.
+// INV-026.
+func verifyPermissionSnapshotSignature(pubKey ed25519.PublicKey, annotations map[string]interface{}, spec map[string]interface{}) error {
+	// Bootstrap window — key not yet mounted. Accept all snapshots. INV-020.
+	if pubKey == nil {
+		return nil
+	}
+
+	sig64, hasSig := annotations[managementSignatureAnnotation].(string)
+	if !hasSig || sig64 == "" {
+		return fmt.Errorf("snapshot missing required signature annotation %q (INV-026)",
+			managementSignatureAnnotation)
+	}
+
+	sigBytes, err := base64.StdEncoding.DecodeString(sig64)
+	if err != nil {
+		return fmt.Errorf("decode signature base64: %w", err)
+	}
+
+	message, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("marshal spec for signature verification: %w", err)
+	}
+
+	if !ed25519.Verify(pubKey, message, sigBytes) {
+		return fmt.Errorf("Ed25519 signature verification failed (INV-026)")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — unstructured field access
+// ---------------------------------------------------------------------------
+
+// unstructuredNestedMap traverses obj via keys and returns the nested map.
+func unstructuredNestedMap(obj map[string]interface{}, keys ...string) (map[string]interface{}, bool, error) {
+	cur := obj
+	for i, k := range keys {
+		v, ok := cur[k]
+		if !ok {
+			return nil, false, nil
+		}
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return nil, false, fmt.Errorf("expected map at key %q", k)
+		}
+		if i == len(keys)-1 {
+			return m, true, nil
+		}
+		cur = m
+	}
+	return nil, false, nil
+}
 
 // unstructuredString traverses obj via keys and returns the string value.
 func unstructuredString(obj map[string]interface{}, keys ...string) (string, bool, error) {

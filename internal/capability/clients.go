@@ -5,6 +5,7 @@ package capability
 
 import (
 	"context"
+	"crypto/ed25519"
 	"io"
 
 	"k8s.io/client-go/dynamic"
@@ -90,4 +91,10 @@ type ExecuteClients struct {
 	// OCIClient is the OCI registry client for ClusterPack artifact fetching.
 	// Non-nil only for pack-deploy.
 	OCIClient OCIRegistryClient
+
+	// SigningPublicKey is the Ed25519 public key used to verify PermissionSnapshot
+	// and PackInstance signatures authored by the management cluster Conductor.
+	// nil during bootstrap window mode (INV-020) — verification is bypassed.
+	// Non-nil in normal operation — INV-026 enforcement applies.
+	SigningPublicKey ed25519.PublicKey
 }
