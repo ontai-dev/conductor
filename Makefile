@@ -2,13 +2,19 @@
 IMAGE_REGISTRY ?= registry.ontai.dev/ontai-dev
 TAG            ?= dev
 
-.PHONY: build test lint lint-docs install-hooks clean docker-build
+.PHONY: build test e2e lint lint-docs install-hooks clean docker-build
 
 build:
 	go build ./...
 
 test:
-	go test ./...
+	go test ./test/unit/...
+
+e2e:
+	MGMT_KUBECONFIG=$(MGMT_KUBECONFIG) TENANT_KUBECONFIG=$(TENANT_KUBECONFIG) \
+	REGISTRY_ADDR=$(REGISTRY_ADDR) MGMT_CLUSTER_NAME=$(MGMT_CLUSTER_NAME) \
+	TENANT_CLUSTER_NAME=$(TENANT_CLUSTER_NAME) \
+	go test ./test/e2e/... -v -timeout 30m
 
 lint: lint-docs install-hooks
 	golangci-lint run ./...
