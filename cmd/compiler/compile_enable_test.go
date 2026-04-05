@@ -1,6 +1,6 @@
 // compile_enable_test.go tests the compiler enable subcommand.
-// Verifies that compileEnableBundle produces all five manifest files and that
-// each carries the required content per conductor-schema.md §9 Step 3 and §15.
+// Verifies that compileEnableBundle produces the phased directory structure and that
+// each phase carries the required content per conductor-schema.md §9 Step 3 and §15.
 // All tests are fully offline.
 // conductor-schema.md §9, §15, guardian-schema.md §6.
 package main
@@ -12,30 +12,71 @@ import (
 	"testing"
 )
 
-// TestEnable_ProducesAllOutputFiles verifies that compileEnableBundle writes
-// all five required manifest files. conductor-schema.md §9 Step 3.
+// readPhaseFile reads a file within a named phase subdirectory.
+func readPhaseFile(t *testing.T, outDir, phase, filename string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(outDir, phase, filename))
+	if err != nil {
+		t.Fatalf("read %s/%s: %v", phase, filename, err)
+	}
+	return string(data)
+}
+
+// TestEnable_ProducesAllOutputFiles verifies that compileEnableBundle writes all five
+// phase subdirectories, each containing a phase-meta.yaml. conductor-schema.md §9 Step 3.
 func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	expectedFiles := []string{
-		"crds.yaml",
-		"operators.yaml",
-		"rbac.yaml",
-		"leaderelection.yaml",
-		"rbacprofiles.yaml",
+	phases := []struct {
+		dir   string
+		files []string
+	}{
+		{"01-guardian-bootstrap", []string{
+			"phase-meta.yaml",
+			"namespace-labels.yaml",
+			"guardian-crds.yaml",
+			"guardian-rbac.yaml",
+			"guardian-rbacprofiles.yaml",
+		}},
+		{"02-guardian-deploy", []string{
+			"phase-meta.yaml",
+			"guardian-deployment.yaml",
+		}},
+		{"03-platform-wrapper", []string{
+			"phase-meta.yaml",
+			"platform-wrapper-crds.yaml",
+			"platform-wrapper-rbac.yaml",
+			"platform-wrapper-rbacprofiles.yaml",
+			"platform-wrapper-deployments.yaml",
+		}},
+		{"04-conductor", []string{
+			"phase-meta.yaml",
+			"conductor-crds.yaml",
+			"conductor-rbac.yaml",
+			"conductor-rbacprofile.yaml",
+			"conductor-deployment.yaml",
+		}},
+		{"05-post-bootstrap", []string{
+			"phase-meta.yaml",
+			"leaderelection.yaml",
+		}},
 	}
-	for _, name := range expectedFiles {
-		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
-			t.Errorf("expected output file %q not found: %v", name, err)
+
+	for _, ph := range phases {
+		for _, name := range ph.files {
+			p := filepath.Join(outDir, ph.dir, name)
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("expected file %s/%s not found: %v", ph.dir, name, err)
+			}
 		}
 	}
 }
 
 // TestEnable_ConductorDeploymentCarriesManagementRole verifies that the Conductor
-// Deployment in operators.yaml carries CONDUCTOR_ROLE=management.
+// Deployment in 04-conductor/conductor-deployment.yaml carries CONDUCTOR_ROLE=management.
 // This is the Role Declaration Contract stamped by compiler enable. §15.
 func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 	outDir := t.TempDir()
@@ -43,11 +84,7 @@ func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(outDir, "operators.yaml"))
-	if err != nil {
-		t.Fatalf("read operators.yaml: %v", err)
-	}
-	content := string(data)
+	content := readPhaseFile(t, outDir, "04-conductor", "conductor-deployment.yaml")
 
 	// Conductor Deployment must have CONDUCTOR_ROLE=management. §15.
 	assertContainsStr(t, content, "CONDUCTOR_ROLE")
@@ -55,62 +92,70 @@ func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 }
 
 // TestEnable_ConductorInOntSystem verifies that the Conductor Deployment is in
-// ont-system, not seam-system. CONTEXT.md §4 Namespace Model.
+// ont-system and other operators are in seam-system. CONTEXT.md §4 Namespace Model.
 func TestEnable_ConductorInOntSystem(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "operators.yaml"))
-	content := string(data)
+	// Conductor must be in ont-system.
+	conductorDeploy := readPhaseFile(t, outDir, "04-conductor", "conductor-deployment.yaml")
+	assertContainsStr(t, conductorDeploy, "namespace: ont-system")
 
-	assertContainsStr(t, content, "namespace: ont-system")
-	// All other operators must be in seam-system.
-	assertContainsStr(t, content, "namespace: seam-system")
+	// Guardian and platform/wrapper operators must be in seam-system.
+	guardianDeploy := readPhaseFile(t, outDir, "02-guardian-deploy", "guardian-deployment.yaml")
+	assertContainsStr(t, guardianDeploy, "namespace: seam-system")
+
+	pwDeploy := readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-deployments.yaml")
+	assertContainsStr(t, pwDeploy, "namespace: seam-system")
 }
 
-// TestEnable_OperatorsYAMLContainsAllDeployments verifies operators.yaml includes
-// Deployments for all five Seam operators.
+// TestEnable_OperatorsYAMLContainsAllDeployments verifies that Deployments for all five
+// Seam operators are present across the phase deployment files.
 func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "operators.yaml"))
-	content := string(data)
+	// Collect all deployment content across phases 2, 3, 4.
+	content := readPhaseFile(t, outDir, "02-guardian-deploy", "guardian-deployment.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-deployments.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-deployment.yaml")
 
 	assertContainsStr(t, content, "kind: Deployment")
 	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
 		if !strings.Contains(content, "name: "+name) {
-			t.Errorf("operators.yaml does not contain Deployment for %q", name)
+			t.Errorf("deployment files do not contain Deployment for %q", name)
 		}
 	}
 }
 
-// TestEnable_RBACYAMLContainsAllOperators verifies rbac.yaml includes SA,
-// ClusterRole, and ClusterRoleBinding for each operator.
+// TestEnable_RBACYAMLContainsAllOperators verifies that SA, ClusterRole, and
+// ClusterRoleBinding exist for each operator across the phase RBAC files.
 func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "rbac.yaml"))
-	content := string(data)
+	// Collect all RBAC content across phases 1, 3, 4.
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbac.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbac.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-rbac.yaml")
 
 	assertContainsStr(t, content, "kind: ServiceAccount")
 	assertContainsStr(t, content, "kind: ClusterRole")
 	assertContainsStr(t, content, "kind: ClusterRoleBinding")
 	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
 		if !strings.Contains(content, name+"-manager-role") {
-			t.Errorf("rbac.yaml does not contain ClusterRole for %q", name)
+			t.Errorf("RBAC files do not contain ClusterRole for %q", name)
 		}
 	}
 }
 
-// TestEnable_LeaderElectionYAMLContainsLeases verifies leaderelection.yaml
+// TestEnable_LeaderElectionYAMLContainsLeases verifies 05-post-bootstrap/leaderelection.yaml
 // contains Lease resources for all operators.
 func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 	outDir := t.TempDir()
@@ -118,8 +163,7 @@ func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "leaderelection.yaml"))
-	content := string(data)
+	content := readPhaseFile(t, outDir, "05-post-bootstrap", "leaderelection.yaml")
 
 	assertContainsStr(t, content, "kind: Lease")
 	// Conductor lease is in ont-system; others in seam-system.
@@ -128,8 +172,8 @@ func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 	assertContainsStr(t, content, "guardian-leader")
 }
 
-// TestEnable_RBACProfilesYAMLContainsAllProfiles verifies rbacprofiles.yaml
-// includes RBACProfile CRs for all five Seam operator service accounts.
+// TestEnable_RBACProfilesYAMLContainsAllProfiles verifies that RBACProfile CRs for all
+// five Seam operator service accounts are present across the phase RBACProfile files.
 // guardian-schema.md §6 (Seam operator RBACProfiles).
 func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 	outDir := t.TempDir()
@@ -137,33 +181,37 @@ func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "rbacprofiles.yaml"))
-	content := string(data)
+	// Collect RBACProfile content across phases 1, 3, 4.
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-rbacprofile.yaml")
 
 	assertContainsStr(t, content, "apiVersion: security.ontai.dev/v1alpha1")
 	assertContainsStr(t, content, "kind: RBACProfile")
 	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
 		if !strings.Contains(content, "rbac-"+name) {
-			t.Errorf("rbacprofiles.yaml does not contain RBACProfile for %q", name)
+			t.Errorf("RBACProfile files do not contain RBACProfile for %q", name)
 		}
 	}
 }
 
-// TestEnable_RBACProfilesCarryReviewAnnotation verifies that rbacprofiles.yaml
-// includes the human-review annotation. guardian-schema.md §6.
+// TestEnable_RBACProfilesCarryReviewAnnotation verifies that RBACProfile files
+// include the human-review annotation. guardian-schema.md §6.
 func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "rbacprofiles.yaml"))
-	assertContainsStr(t, string(data), "review-required")
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-rbacprofile.yaml")
+
+	assertContainsStr(t, content, "review-required")
 }
 
-// TestEnable_OutputIsDeterministic verifies that successive compileEnableBundle
-// calls produce identical output for all five manifest files.
-// conductor-design.md §1.2 Deterministic Execution.
+// TestEnable_OutputIsDeterministic verifies that successive compileEnableBundle calls
+// produce identical output for all phase files. conductor-design.md §1.2.
 func TestEnable_OutputIsDeterministic(t *testing.T) {
 	out1 := t.TempDir()
 	out2 := t.TempDir()
@@ -175,18 +223,43 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		t.Fatalf("second compileEnableBundle: %v", err)
 	}
 
-	for _, name := range []string{"crds.yaml", "operators.yaml", "rbac.yaml",
-		"leaderelection.yaml", "rbacprofiles.yaml"} {
-		d1, _ := os.ReadFile(filepath.Join(out1, name))
-		d2, _ := os.ReadFile(filepath.Join(out2, name))
+	checks := []struct{ phase, file string }{
+		{"01-guardian-bootstrap", "phase-meta.yaml"},
+		{"01-guardian-bootstrap", "namespace-labels.yaml"},
+		{"01-guardian-bootstrap", "guardian-crds.yaml"},
+		{"01-guardian-bootstrap", "guardian-rbac.yaml"},
+		{"01-guardian-bootstrap", "guardian-rbacprofiles.yaml"},
+		{"02-guardian-deploy", "phase-meta.yaml"},
+		{"02-guardian-deploy", "guardian-deployment.yaml"},
+		{"03-platform-wrapper", "phase-meta.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-crds.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-rbac.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-deployments.yaml"},
+		{"04-conductor", "phase-meta.yaml"},
+		{"04-conductor", "conductor-crds.yaml"},
+		{"04-conductor", "conductor-rbac.yaml"},
+		{"04-conductor", "conductor-rbacprofile.yaml"},
+		{"04-conductor", "conductor-deployment.yaml"},
+		{"05-post-bootstrap", "phase-meta.yaml"},
+		{"05-post-bootstrap", "leaderelection.yaml"},
+	}
+
+	for _, c := range checks {
+		d1, err1 := os.ReadFile(filepath.Join(out1, c.phase, c.file))
+		d2, err2 := os.ReadFile(filepath.Join(out2, c.phase, c.file))
+		if err1 != nil || err2 != nil {
+			t.Errorf("read %s/%s: err1=%v err2=%v", c.phase, c.file, err1, err2)
+			continue
+		}
 		if string(d1) != string(d2) {
-			t.Errorf("%s is not deterministic: successive calls produced different output", name)
+			t.Errorf("%s/%s is not deterministic: successive calls produced different output", c.phase, c.file)
 		}
 	}
 }
 
 // TestEnable_VersionPropagatesIntoImages verifies that the --version flag value
-// appears in operator image references in operators.yaml.
+// appears in operator image references across deployment files.
 func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 	outDir := t.TempDir()
 	const version = "v1.9.3-r5"
@@ -194,20 +267,29 @@ func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "operators.yaml"))
-	assertContainsStr(t, string(data), version)
+	// Version must appear in all three deployment phase files.
+	for _, path := range []struct{ phase, file string }{
+		{"02-guardian-deploy", "guardian-deployment.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-deployments.yaml"},
+		{"04-conductor", "conductor-deployment.yaml"},
+	} {
+		content := readPhaseFile(t, outDir, path.phase, path.file)
+		assertContainsStr(t, content, version)
+	}
 }
 
-// TestEnable_CRDsYAMLIncludesAllOperatorCRDs verifies that the crds.yaml produced
-// by enable is the same complete CRD bundle as compiler launch.
+// TestEnable_CRDsYAMLIncludesAllOperatorCRDs verifies that all operator API groups
+// are present across the phase CRD files. conductor-schema.md §9 Step 3.
 func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev"); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(outDir, "crds.yaml"))
-	content := string(data)
+	// Collect all CRD content across phases 1, 3, 4.
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-crds.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-crds.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-crds.yaml")
 
 	for _, group := range []string{
 		"platform.ontai.dev",
@@ -217,7 +299,85 @@ func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 		"runner.ontai.dev",
 	} {
 		if !strings.Contains(content, group) {
-			t.Errorf("crds.yaml missing API group %q", group)
+			t.Errorf("CRD files missing API group %q", group)
 		}
+	}
+}
+
+// --- WS2: namespace-labels.yaml tests ---
+
+// TestEnable_NamespaceLabels_BothNamespacesPresent verifies that namespace-labels.yaml
+// contains patches for both kube-system and seam-system.
+// guardian 25c9e93 WS3 CheckBootstrapLabels contract.
+func TestEnable_NamespaceLabels_BothNamespacesPresent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "namespace-labels.yaml")
+
+	assertContainsStr(t, content, "kube-system")
+	assertContainsStr(t, content, "seam-system")
+}
+
+// TestEnable_NamespaceLabels_CorrectKindAndLabel verifies that namespace-labels.yaml
+// carries kind: Namespace and the correct seam.ontai.dev/webhook-mode=exempt label.
+func TestEnable_NamespaceLabels_CorrectKindAndLabel(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "namespace-labels.yaml")
+
+	assertContainsStr(t, content, "kind: Namespace")
+	assertContainsStr(t, content, "seam.ontai.dev/webhook-mode")
+	assertContainsStr(t, content, "exempt")
+}
+
+// TestEnable_NamespaceLabels_IsSSAPatchOnly verifies that namespace-labels.yaml does NOT
+// contain spec or status fields — it must be a server-side apply metadata-only patch,
+// not a full Namespace manifest. INV-020, CS-INV-004.
+func TestEnable_NamespaceLabels_IsSSAPatchOnly(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "namespace-labels.yaml")
+
+	if strings.Contains(content, "spec:") {
+		t.Error("namespace-labels.yaml contains spec: — must be SSA metadata-only patch")
+	}
+	if strings.Contains(content, "status:") {
+		t.Error("namespace-labels.yaml contains status: — must be SSA metadata-only patch")
+	}
+}
+
+// TestEnable_NamespaceLabels_PhaseMeta verifies that 01-guardian-bootstrap/phase-meta.yaml
+// declares the correct phase name, order=1, and lists namespace-labels.yaml first
+// in applyOrder.
+func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "phase-meta.yaml")
+
+	assertContainsStr(t, content, "phase: guardian-bootstrap")
+	assertContainsStr(t, content, "order: 1")
+	// namespace-labels.yaml must be the first entry in applyOrder.
+	namespaceIdx := strings.Index(content, "namespace-labels.yaml")
+	guardianCRDsIdx := strings.Index(content, "guardian-crds.yaml")
+	if namespaceIdx < 0 {
+		t.Error("phase-meta.yaml does not list namespace-labels.yaml in applyOrder")
+	}
+	if guardianCRDsIdx < 0 {
+		t.Error("phase-meta.yaml does not list guardian-crds.yaml in applyOrder")
+	}
+	if namespaceIdx > 0 && guardianCRDsIdx > 0 && namespaceIdx > guardianCRDsIdx {
+		t.Error("namespace-labels.yaml must appear before guardian-crds.yaml in applyOrder")
 	}
 }
