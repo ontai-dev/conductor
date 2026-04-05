@@ -28,6 +28,7 @@ import (
 	"github.com/ontai-dev/conductor/internal/config"
 	"github.com/ontai-dev/conductor/internal/kernel"
 	"github.com/ontai-dev/conductor/internal/persistence"
+	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
 func main() {
@@ -55,11 +56,11 @@ func main() {
 	}
 }
 
-// runExecute implements the execute-mode pipeline.
-// Reads CAPABILITY, CLUSTER_REF, and OPERATION_RESULT_CM from the environment,
-// resolves the named capability from the registry, executes it, writes
-// OperationResult to the named ConfigMap, and exits.
-// conductor-design.md §4.2, conductor-schema.md §8.
+// runExecute implements the execute-mode step sequencer pipeline.
+// Reads CLUSTER_REF and POD_NAMESPACE from the environment, loads RunnerConfig
+// steps, materialises one capability Job per step in declared order, harvests
+// ConfigMap results, and writes StepResults to RunnerConfig status.
+// conductor-design.md §4.2, conductor-schema.md §17.
 func runExecute() {
 	execCtx, err := config.BuildExecuteContext()
 	if err != nil {
@@ -129,7 +130,25 @@ func runExecute() {
 	}
 
 	writer := persistence.NewKubeConfigMapWriter(kubeClient)
-	if err := kernel.RunExecute(execCtx, reg, writer, clients); err != nil {
+
+	// capabilityStepExecutor wraps the registry and persistence writer to
+	// implement kernel.StepExecutor — dispatches each step's capability inline.
+	// TODO: replace with a Job-materialising implementation once the sequencer
+	// architecture moves to true child-Job creation per step.
+	executor := &capabilityStepExecutor{
+		reg:     reg,
+		writer:  writer,
+		clients: clients,
+	}
+
+	// NoopStepStatusWriter is used until the RunnerConfig status-write
+	// implementation lands. Step results are recorded in the output ConfigMaps
+	// and harvested by the owning operator via status reads.
+	// TODO: replace with a real RunnerConfig status writer that patches
+	// RunnerConfig.status.stepResults via the Kubernetes API.
+	statusWriter := kernel.NoopStepStatusWriter{}
+
+	if err := kernel.RunExecute(execCtx, executor, statusWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}
@@ -179,8 +198,69 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: conductor <subcommand> [flags]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  execute              (reads CAPABILITY, CLUSTER_REF, OPERATION_RESULT_CM from env)")
+	fmt.Fprintln(os.Stderr, "  execute              (reads CLUSTER_REF, POD_NAMESPACE from env; steps from RunnerConfig)")
 	fmt.Fprintln(os.Stderr, "  agent --cluster-ref <name>")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Note: compile mode is not supported by the Conductor binary. Use the Compiler binary.")
+}
+
+// capabilityStepExecutor implements kernel.StepExecutor by dispatching each step
+// to the capability registry directly and writing the result ConfigMap via the
+// persistence writer. This is the inline-dispatch production implementation —
+// each step runs its capability handler in the same process.
+//
+// TODO: replace with a Job-materialising implementation once the sequencer
+// architecture evolves to create a Kueue child Job per step.
+type capabilityStepExecutor struct {
+	reg     *capability.Registry
+	writer  persistence.ConfigMapWriter
+	clients capability.ExecuteClients
+}
+
+func (e *capabilityStepExecutor) Execute(
+	ctx context.Context,
+	step runnerlib.RunnerConfigStep,
+	clusterRef, namespace string,
+) (runnerlib.RunnerConfigStepResult, error) {
+	handler, err := e.reg.Resolve(step.Capability)
+	if err != nil {
+		// Capability not registered — return a Failed result, not a Go error.
+		// The sequencer decides whether to halt based on HaltOnFailure.
+		return runnerlib.RunnerConfigStepResult{
+			StepName: step.Name,
+			Phase:    runnerlib.StepPhaseFailed,
+		}, nil
+	}
+
+	// Derive a per-step ConfigMap name from step name and clusterRef.
+	cmName := fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
+
+	params := capability.ExecuteParams{
+		Capability:        step.Capability,
+		ClusterRef:        clusterRef,
+		OperationResultCM: cmName,
+		Namespace:         namespace,
+		ExecuteClients:    e.clients,
+	}
+	result, err := handler.Execute(ctx, params)
+	if err != nil {
+		return runnerlib.RunnerConfigStepResult{}, fmt.Errorf(
+			"capabilityStepExecutor: step %q capability %q: %w", step.Name, step.Capability, err)
+	}
+
+	if writeErr := e.writer.WriteResult(ctx, namespace, cmName, result); writeErr != nil {
+		return runnerlib.RunnerConfigStepResult{}, fmt.Errorf(
+			"capabilityStepExecutor: write ConfigMap for step %q: %w", step.Name, writeErr)
+	}
+
+	phase := runnerlib.StepPhaseSucceeded
+	if result.Status == runnerlib.ResultFailed {
+		phase = runnerlib.StepPhaseFailed
+	}
+
+	return runnerlib.RunnerConfigStepResult{
+		StepName:  step.Name,
+		Phase:     phase,
+		OutputRef: runnerlib.ConfigMapRef{Namespace: namespace, Name: cmName},
+	}, nil
 }
