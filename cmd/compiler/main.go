@@ -38,6 +38,8 @@ func main() {
 		runSubcommand("enable", os.Args[2:], compileEnable)
 	case "packbuild":
 		runSubcommand("packbuild", os.Args[2:], compilePackBuild)
+	case "maintenance":
+		runMaintenanceSubcommand(os.Args[2:])
 	case "domain":
 		fmt.Fprintln(os.Stderr, "compiler domain: reserved — domain CR compilation is not yet implemented")
 		os.Exit(1)
@@ -82,5 +84,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  launch    --input <path> --output <path>")
 	fmt.Fprintln(os.Stderr, "  enable    --input <path> --output <path>")
 	fmt.Fprintln(os.Stderr, "  packbuild --input <path> --output <path>")
+	fmt.Fprintln(os.Stderr, "  maintenance --operation <type> --cluster <name> --output <path>")
 	fmt.Fprintln(os.Stderr, "  domain")
 }
