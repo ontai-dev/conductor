@@ -9,8 +9,8 @@
 // Subcommands:
 //
 //	compiler bootstrap --input <path> --output <path>
-//	compiler launch    --input <path> --output <path>
-//	compiler enable    --input <path> --output <path>
+//	compiler launch    --output <path>
+//	compiler enable    --output <path> [--version <tag>]
 //	compiler packbuild --input <path> --output <path>
 //	compiler domain
 //
@@ -33,9 +33,9 @@ func main() {
 	case "bootstrap":
 		runSubcommand("bootstrap", os.Args[2:], compileBootstrap)
 	case "launch":
-		runSubcommand("launch", os.Args[2:], compileLaunch)
+		runLaunchSubcommand(os.Args[2:])
 	case "enable":
-		runSubcommand("enable", os.Args[2:], compileEnable)
+		runEnableSubcommand(os.Args[2:])
 	case "packbuild":
 		runSubcommand("packbuild", os.Args[2:], compilePackBuild)
 	case "component":
