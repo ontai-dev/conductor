@@ -37,6 +37,13 @@ var psGVR = schema.GroupVersionResource{
 	Resource: "permissionsnapshots",
 }
 
+// secretGVR mirrors the secretGVR defined in signing_loop.go (core v1 Secrets).
+var secretGVR = schema.GroupVersionResource{
+	Group:    "",
+	Version:  "v1",
+	Resource: "secrets",
+}
+
 // writePrivKeyFile writes an Ed25519 private key in PKCS#8 PEM format to a temp file.
 func writePrivKeyFile(t *testing.T, priv ed25519.PrivateKey) string {
 	t.Helper()
@@ -279,4 +286,186 @@ func TestSigningLoop_EmptyStoreNoPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	loop.Run(ctx, 0) // must not panic
+}
+
+// ── Secret storage tests (Gap 28) ────────────────────────────────────────────
+
+// makeSignedSecretObj builds a test Secret object with the given artifact and
+// signature data fields.
+func makeSignedSecretObj(name, ns, artifactB64, sigB64 string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": ns,
+			},
+			"type": "Opaque",
+			"data": map[string]interface{}{
+				"artifact":  artifactB64,
+				"signature": sigB64,
+			},
+		},
+	}
+}
+
+// allGVRs returns a GVR list that includes PackInstance, PermissionSnapshot,
+// and core Secret so all signing loop operations succeed in tests.
+func allSigningLoopGVRs() []schema.GroupVersionResource {
+	return []schema.GroupVersionResource{packInstanceGVR, psGVR, secretGVR}
+}
+
+// TestSigningLoop_StoresNewSecretForPackInstance verifies that after the sign
+// cycle completes for an unsigned PackInstance, a Secret encoding the signed
+// artifact is created in seam-tenant-{clusterName}. Gap 28.
+func TestSigningLoop_StoresNewSecretForPackInstance(t *testing.T) {
+	pub, priv := genKeyPair(t)
+	privPath := writePrivKeyFile(t, priv)
+
+	spec := map[string]interface{}{"clusterRef": "ccs-dev", "packRef": "base-pack-v1"}
+	cr := makeCR(packInstanceGVR, "my-pack", "seam-tenant-ccs-dev", spec)
+
+	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
+	loop, err := agent.NewSigningLoop(fakeClient, privPath)
+	if err != nil {
+		t.Fatalf("NewSigningLoop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	loop.Run(ctx, 0)
+
+	// The Secret must be created in seam-tenant-ccs-dev.
+	secretName := "seam-pack-signed-ccs-dev-my-pack"
+	secret, err := fakeClient.Resource(secretGVR).Namespace("seam-tenant-ccs-dev").Get(
+		context.Background(), secretName, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("Secret not created after signing cycle: %v", err)
+	}
+
+	// Verify the signature field matches the PackInstance annotation signature.
+	pi, _ := fakeClient.Resource(packInstanceGVR).Namespace("seam-tenant-ccs-dev").Get(
+		context.Background(), "my-pack", metav1.GetOptions{},
+	)
+	piSig := pi.GetAnnotations()["runner.ontai.dev/management-signature"]
+
+	data := secret.Object["data"].(map[string]interface{})
+	secretSig, _ := data["signature"].(string)
+	if secretSig != piSig {
+		t.Errorf("Secret signature %q does not match PackInstance annotation %q", secretSig, piSig)
+	}
+
+	// Verify the artifact field is the base64-encoded JSON of the spec.
+	artifactB64, _ := data["artifact"].(string)
+	if artifactB64 == "" {
+		t.Error("Secret artifact field must not be empty")
+	}
+	// Confirm the embedded signature is cryptographically valid.
+	sigBytes, _ := base64.StdEncoding.DecodeString(secretSig)
+	specJSON, _ := json.Marshal(spec)
+	if !ed25519.Verify(pub, specJSON, sigBytes) {
+		t.Error("signature stored in Secret does not verify against spec JSON")
+	}
+}
+
+// TestSigningLoop_IdempotentSkipWhenSignatureMatches verifies that when the
+// Secret already exists and its signature field matches the PackInstance
+// annotation, the signing cycle does not overwrite the Secret. Gap 28.
+func TestSigningLoop_IdempotentSkipWhenSignatureMatches(t *testing.T) {
+	_, priv := genKeyPair(t)
+	privPath := writePrivKeyFile(t, priv)
+
+	spec := map[string]interface{}{"clusterRef": "ccs-dev"}
+	cr := makeCR(packInstanceGVR, "existing-pack", "seam-tenant-ccs-dev", spec)
+	// Pre-set a stable fake signature annotation on the PackInstance.
+	cr.SetAnnotations(map[string]string{
+		"runner.ontai.dev/management-signature": "stableSig==",
+	})
+
+	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
+
+	// Pre-create the Secret with the same signature and a sentinel artifact value.
+	sentinelArtifact := "c2VudGluZWwtYXJ0aWZhY3Q=" // base64 of "sentinel-artifact"
+	secretObj := makeSignedSecretObj(
+		"seam-pack-signed-ccs-dev-existing-pack", "seam-tenant-ccs-dev",
+		sentinelArtifact, "stableSig==",
+	)
+	if _, err := fakeClient.Resource(secretGVR).Namespace("seam-tenant-ccs-dev").Create(
+		context.Background(), secretObj, metav1.CreateOptions{},
+	); err != nil {
+		t.Fatalf("pre-create Secret: %v", err)
+	}
+
+	loop, err := agent.NewSigningLoop(fakeClient, privPath)
+	if err != nil {
+		t.Fatalf("NewSigningLoop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	loop.Run(ctx, 0)
+
+	// Verify the Secret was NOT overwritten — sentinel artifact value is preserved.
+	got, err := fakeClient.Resource(secretGVR).Namespace("seam-tenant-ccs-dev").Get(
+		context.Background(), "seam-pack-signed-ccs-dev-existing-pack", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get Secret after idempotent cycle: %v", err)
+	}
+	data := got.Object["data"].(map[string]interface{})
+	if data["artifact"] != sentinelArtifact {
+		t.Errorf("idempotent cycle must not overwrite Secret artifact; got %q, want %q",
+			data["artifact"], sentinelArtifact)
+	}
+}
+
+// TestSigningLoop_OverwritesSecretOnSignatureMismatch verifies that when the
+// Secret already exists but its signature field differs from the PackInstance
+// annotation, the signing cycle overwrites the Secret. Gap 28.
+func TestSigningLoop_OverwritesSecretOnSignatureMismatch(t *testing.T) {
+	_, priv := genKeyPair(t)
+	privPath := writePrivKeyFile(t, priv)
+
+	spec := map[string]interface{}{"clusterRef": "ccs-dev"}
+	cr := makeCR(packInstanceGVR, "updated-pack", "seam-tenant-ccs-dev", spec)
+	// PackInstance annotation carries the new (current) signature.
+	cr.SetAnnotations(map[string]string{
+		"runner.ontai.dev/management-signature": "newSig==",
+	})
+
+	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
+
+	// Pre-create the Secret with an outdated signature.
+	oldSecret := makeSignedSecretObj(
+		"seam-pack-signed-ccs-dev-updated-pack", "seam-tenant-ccs-dev",
+		"b2xkYXJ0aWZhY3Q=", "oldSig==",
+	)
+	if _, err := fakeClient.Resource(secretGVR).Namespace("seam-tenant-ccs-dev").Create(
+		context.Background(), oldSecret, metav1.CreateOptions{},
+	); err != nil {
+		t.Fatalf("pre-create Secret: %v", err)
+	}
+
+	loop, err := agent.NewSigningLoop(fakeClient, privPath)
+	if err != nil {
+		t.Fatalf("NewSigningLoop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	loop.Run(ctx, 0)
+
+	// Verify the Secret was overwritten with the new signature.
+	got, err := fakeClient.Resource(secretGVR).Namespace("seam-tenant-ccs-dev").Get(
+		context.Background(), "seam-pack-signed-ccs-dev-updated-pack", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get Secret after mismatch cycle: %v", err)
+	}
+	data := got.Object["data"].(map[string]interface{})
+	if data["signature"] != "newSig==" {
+		t.Errorf("Secret signature after overwrite: got %q, want %q", data["signature"], "newSig==")
+	}
 }

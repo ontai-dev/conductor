@@ -11,7 +11,9 @@ import (
 	"os"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -33,20 +35,32 @@ var permissionSnapshotGVR = schema.GroupVersionResource{
 	Resource: "permissionsnapshots",
 }
 
+// secretGVR is the GroupVersionResource for Kubernetes core Secrets.
+// Used by the signing loop to store signed PackInstance artifacts on the
+// management cluster for consumption by the target cluster PackInstancePullLoop.
+// Gap 28, conductor-schema.md §10.
+var secretGVR = schema.GroupVersionResource{
+	Group:    "",
+	Version:  "v1",
+	Resource: "secrets",
+}
+
 // SigningLoop implements the management-cluster signing loops for PackInstance
 // and PermissionSnapshot CRs. It runs on the management cluster only.
 //
 // On each cycle it:
-//  1. Lists all PackInstance CRs across all namespaces.
-//  2. Lists all PermissionSnapshot CRs across all namespaces.
-//  3. For each CR without a management-signature annotation: computes an
-//     Ed25519 signature of json.Marshal(spec) and writes it as an annotation patch.
+//  1. For each PackInstance CR without a management-signature annotation:
+//     computes an Ed25519 signature of json.Marshal(spec) and writes it as an
+//     annotation patch. Then stores the signed artifact as a Secret in the
+//     seam-tenant-{clusterName} namespace (Gap 28).
+//  2. For each PermissionSnapshot CR without a management-signature annotation:
+//     computes and writes the annotation.
 //
-// The signature is consumed by the target cluster ReceiptReconciler (Session 15 WS2)
-// before acknowledging receipt. INV-026, conductor-schema.md §10.
+// The PackInstance signature is consumed by the target cluster PackInstancePullLoop.
+// The PermissionSnapshot signature is consumed by the SnapshotPullLoop. INV-026.
 //
 // Only the leader runs the signing loop (called from onLeaderStart).
-// Signing is idempotent — already-signed CRs are skipped.
+// Signing and Secret storage are both idempotent.
 type SigningLoop struct {
 	client  dynamic.Interface
 	privKey ed25519.PrivateKey
@@ -108,14 +122,174 @@ func (l *SigningLoop) Run(ctx context.Context, interval time.Duration) {
 }
 
 // signAll iterates over PackInstance and PermissionSnapshot CRs and signs any
-// that are missing the management-signature annotation.
+// that are missing the management-signature annotation. PackInstances also have
+// their signed artifact stored as a Secret on the management cluster (Gap 28).
 func (l *SigningLoop) signAll(ctx context.Context) {
-	l.signGVR(ctx, packInstanceGVR)
+	l.signPackInstances(ctx)
 	l.signGVR(ctx, permissionSnapshotGVR)
 }
 
+// signPackInstances handles the full signing cycle for PackInstance CRs:
+//  1. Signs any unsigned PackInstance (writes managementSignatureAnnotation).
+//  2. Stores the signed artifact as a Secret in seam-tenant-{clusterName}
+//     so the target cluster PackInstancePullLoop can consume it. Gap 28.
+//
+// Both signing and Secret storage are idempotent.
+func (l *SigningLoop) signPackInstances(ctx context.Context) {
+	list, err := l.client.Resource(packInstanceGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// CRD may not exist on this cluster yet — not fatal.
+		return
+	}
+
+	for _, item := range list.Items {
+		annotations := item.GetAnnotations()
+
+		// Read existing signature annotation (empty string if absent).
+		var sigB64 string
+		if annotations != nil {
+			sigB64 = annotations[managementSignatureAnnotation]
+		}
+
+		if sigB64 == "" {
+			// Not yet signed — compute Ed25519 signature and patch the annotation.
+			spec, _, _ := unstructuredNestedMap(item.Object, "spec")
+			message, err := json.Marshal(spec)
+			if err != nil {
+				continue
+			}
+			sig := ed25519.Sign(l.privKey, message)
+			sigB64 = base64.StdEncoding.EncodeToString(sig)
+
+			patch := map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"annotations": map[string]interface{}{
+						managementSignatureAnnotation: sigB64,
+					},
+				},
+			}
+			patchBytes, err := json.Marshal(patch)
+			if err != nil {
+				continue
+			}
+			ns := item.GetNamespace()
+			if _, err := l.client.Resource(packInstanceGVR).Namespace(ns).Patch(
+				ctx,
+				item.GetName(),
+				types.MergePatchType,
+				patchBytes,
+				metav1.PatchOptions{},
+			); err != nil {
+				// Patch failed — skip Secret storage this cycle; next cycle retries.
+				continue
+			}
+		}
+
+		// Store the signed artifact as a Secret on the management cluster.
+		// Target cluster PackInstancePullLoop polls these Secrets. Gap 28.
+		spec, _, _ := unstructuredNestedMap(item.Object, "spec")
+		l.storeSignedArtifactSecret(ctx, item.GetName(), spec, sigB64)
+	}
+}
+
+// storeSignedArtifactSecret creates or updates a Secret in
+// seam-tenant-{clusterName} encoding the signed PackInstance artifact.
+//
+// Secret name pattern: seam-pack-signed-{clusterName}-{packInstanceName}.
+// Data fields:
+//   - artifact: base64(json.Marshal(spec)) — the full PackInstance spec as JSON.
+//   - signature: sigB64 — the base64-encoded Ed25519 signature.
+//
+// Idempotency rules:
+//   - Secret absent → create.
+//   - Secret exists, data.signature matches sigB64 → skip (no-op).
+//   - Secret exists, data.signature differs → overwrite.
+//
+// Gap 28, INV-026.
+func (l *SigningLoop) storeSignedArtifactSecret(ctx context.Context, packInstanceName string, spec map[string]interface{}, sigB64 string) {
+	clusterName, _ := spec["clusterRef"].(string)
+	if clusterName == "" {
+		// Cannot determine target namespace without clusterRef — skip.
+		return
+	}
+
+	secretName := fmt.Sprintf("seam-pack-signed-%s-%s", clusterName, packInstanceName)
+	secretNS := fmt.Sprintf("seam-tenant-%s", clusterName)
+
+	// Serialize artifact spec to JSON and base64-encode for Secret data storage.
+	artifactJSON, err := json.Marshal(spec)
+	if err != nil {
+		return
+	}
+	artifactB64 := base64.StdEncoding.EncodeToString(artifactJSON)
+
+	// Check for existing Secret.
+	existing, err := l.client.Resource(secretGVR).Namespace(secretNS).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		// Secret exists — check idempotency on the signature field.
+		data, _, _ := unstructuredNestedMap(existing.Object, "data")
+		existingSig, _ := data["signature"].(string)
+		if existingSig == sigB64 {
+			// Signature unchanged — Secret is current. Skip. Gap 28.
+			return
+		}
+		// Signature changed — overwrite with updated data.
+		updated := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Secret",
+				"metadata": map[string]interface{}{
+					"name":            secretName,
+					"namespace":       secretNS,
+					"resourceVersion": existing.GetResourceVersion(),
+				},
+				"type": "Opaque",
+				"data": map[string]interface{}{
+					"artifact":  artifactB64,
+					"signature": sigB64,
+				},
+			},
+		}
+		if _, err := l.client.Resource(secretGVR).Namespace(secretNS).Update(
+			ctx, updated, metav1.UpdateOptions{},
+		); err != nil {
+			// Log-only — next cycle retries.
+			_ = err
+		}
+		return
+	}
+
+	if !k8serrors.IsNotFound(err) {
+		// Real error (not NotFound) — skip this cycle; next cycle retries.
+		return
+	}
+
+	// Secret does not exist — create it.
+	secret := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]interface{}{
+				"name":      secretName,
+				"namespace": secretNS,
+			},
+			"type": "Opaque",
+			"data": map[string]interface{}{
+				"artifact":  artifactB64,
+				"signature": sigB64,
+			},
+		},
+	}
+	if _, err := l.client.Resource(secretGVR).Namespace(secretNS).Create(
+		ctx, secret, metav1.CreateOptions{},
+	); err != nil {
+		// Log-only — next cycle retries.
+		_ = err
+	}
+}
+
 // signGVR lists all CRs of the given GVR and patches the management-signature
-// annotation on any that do not yet have it.
+// annotation on any that do not yet have it. Used for PermissionSnapshot CRs.
 func (l *SigningLoop) signGVR(ctx context.Context, gvr schema.GroupVersionResource) {
 	// List across all namespaces.
 	list, err := l.client.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{})
