@@ -22,7 +22,7 @@ func readPhaseFile(t *testing.T, outDir, phase, filename string) string {
 	return string(data)
 }
 
-// TestEnable_ProducesAllOutputFiles verifies that compileEnableBundle writes all five
+// TestEnable_ProducesAllOutputFiles verifies that compileEnableBundle writes all six
 // phase subdirectories, each containing a phase-meta.yaml. conductor-schema.md §9 Step 3.
 func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 	outDir := t.TempDir()
@@ -34,6 +34,11 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		dir   string
 		files []string
 	}{
+		{"00-infrastructure-dependencies", []string{
+			"phase-meta.yaml",
+			"cnpg-operator.yaml",
+			"cnpg-cluster.yaml",
+		}},
 		{"01-guardian-bootstrap", []string{
 			"phase-meta.yaml",
 			"namespace-labels.yaml",
@@ -224,6 +229,9 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 	}
 
 	checks := []struct{ phase, file string }{
+		{"00-infrastructure-dependencies", "phase-meta.yaml"},
+		{"00-infrastructure-dependencies", "cnpg-operator.yaml"},
+		{"00-infrastructure-dependencies", "cnpg-cluster.yaml"},
 		{"01-guardian-bootstrap", "phase-meta.yaml"},
 		{"01-guardian-bootstrap", "namespace-labels.yaml"},
 		{"01-guardian-bootstrap", "guardian-crds.yaml"},
@@ -380,4 +388,110 @@ func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 	if namespaceIdx > 0 && guardianCRDsIdx > 0 && namespaceIdx > guardianCRDsIdx {
 		t.Error("namespace-labels.yaml must appear before guardian-crds.yaml in applyOrder")
 	}
+}
+
+// --- Phase 00: infrastructure-dependencies tests ---
+
+// TestEnable_Phase00_DirectoryExistsAndIsFirst verifies that 00-infrastructure-dependencies
+// exists and that its directory name sorts before 01-guardian-bootstrap.
+// conductor-schema.md §9 phase 0.
+func TestEnable_Phase00_DirectoryExistsAndIsFirst(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	// Directory must exist.
+	info, err := os.Stat(filepath.Join(outDir, "00-infrastructure-dependencies"))
+	if err != nil {
+		t.Fatalf("00-infrastructure-dependencies directory not found: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("00-infrastructure-dependencies is not a directory")
+	}
+
+	// Lexicographic order: "00-" sorts before "01-".
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("output directory is empty")
+	}
+	if entries[0].Name() != "00-infrastructure-dependencies" {
+		t.Errorf("first directory entry is %q, expected 00-infrastructure-dependencies", entries[0].Name())
+	}
+}
+
+// TestEnable_Phase00_MetaOrderIsZero verifies that phase-meta.yaml in phase 00
+// declares order: 0. conductor-schema.md §9 phase 0.
+func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "phase-meta.yaml")
+	assertContainsStr(t, content, "phase: infrastructure-dependencies")
+	assertContainsStr(t, content, "order: 0")
+}
+
+// TestEnable_Phase00_CNPGOperatorYAMLPresent verifies that cnpg-operator.yaml is
+// present and non-empty in 00-infrastructure-dependencies.
+// guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase00_CNPGOperatorYAMLPresent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-operator.yaml")
+	if len(strings.TrimSpace(content)) == 0 {
+		t.Fatal("cnpg-operator.yaml is empty")
+	}
+
+	// Must contain the CNPG operator namespace and CRDs.
+	assertContainsStr(t, content, "cnpg-system")
+	assertContainsStr(t, content, "postgresql.cnpg.io")
+	assertContainsStr(t, content, "kind: CustomResourceDefinition")
+	assertContainsStr(t, content, "kind: Deployment")
+
+	// Must carry the four standard CNPG CRDs.
+	for _, crd := range []string{"clusters.postgresql.cnpg.io", "backups.postgresql.cnpg.io",
+		"scheduledbackups.postgresql.cnpg.io", "poolers.postgresql.cnpg.io"} {
+		if !strings.Contains(content, crd) {
+			t.Errorf("cnpg-operator.yaml missing CRD %q", crd)
+		}
+	}
+}
+
+// TestEnable_Phase00_CNPGClusterCRNameAndNamespace verifies that cnpg-cluster.yaml
+// contains a CNPG Cluster CR named guardian-db in seam-system.
+// guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase00_CNPGClusterCRNameAndNamespace(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-cluster.yaml")
+	assertContainsStr(t, content, "kind: Cluster")
+	assertContainsStr(t, content, "name: guardian-db")
+	assertContainsStr(t, content, "namespace: seam-system")
+	assertContainsStr(t, content, "postgresql.cnpg.io/v1")
+}
+
+// TestEnable_Phase00_CNPGClusterThreeInstances verifies that cnpg-cluster.yaml
+// declares instances: 3 (HA deployment for management Guardian).
+// guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-cluster.yaml")
+	assertContainsStr(t, content, "instances: 3")
+	assertContainsStr(t, content, "50Gi")
+	assertContainsStr(t, content, "guardian-db-credentials")
 }
