@@ -105,12 +105,12 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	fmt.Printf("conductor agent: cluster=%q starting local PermissionService on %s\n",
 		execCtx.ClusterRef, permSvcAddr)
 
-	// Construct the PermissionSnapshot pull loop (target clusters only).
+	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance).
 	// When MGMT_KUBECONFIG_PATH is set, this Conductor is on a target cluster and
-	// must pull PermissionSnapshots from the management cluster, verify their
-	// Ed25519 signatures (INV-026), and populate the local SnapshotStore.
-	// conductor-schema.md §10 step 8, conductor-design.md §2.10.
+	// must pull artifacts from the management cluster, verify Ed25519 signatures
+	// (INV-026), and update local state. conductor-schema.md §10, Gap 28.
 	var snapshotPullLoop *agent.SnapshotPullLoop
+	var packInstancePullLoop *agent.PackInstancePullLoop
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
 		if err != nil {
@@ -120,7 +120,12 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		if err != nil {
 			return fmt.Errorf("conductor agent: build management cluster dynamic client: %w", err)
 		}
-		if pubKeyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); pubKeyPath != "" {
+
+		pubKeyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH")
+
+		// PermissionSnapshot pull loop — populates SnapshotStore for local gRPC.
+		// conductor-schema.md §10 step 8, conductor-design.md §2.10.
+		if pubKeyPath != "" {
 			snapshotPullLoop, err = agent.NewSnapshotPullLoopWithKey(
 				mgmtDynamicClient, dynamicClient, snapshotStore,
 				execCtx.ClusterRef, ns, pubKeyPath,
@@ -135,6 +140,25 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			)
 		}
 		fmt.Printf("conductor agent: cluster=%q snapshot pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// PackInstance pull loop — verifies signed artifacts and writes PackReceipts.
+		// Gap 28, INV-026.
+		if pubKeyPath != "" {
+			packInstancePullLoop, err = agent.NewPackInstancePullLoopWithKey(
+				mgmtDynamicClient, dynamicClient,
+				execCtx.ClusterRef, ns, pubKeyPath,
+			)
+			if err != nil {
+				return fmt.Errorf("conductor agent: build packinstance pull loop with signing key: %w", err)
+			}
+		} else {
+			packInstancePullLoop = agent.NewPackInstancePullLoop(
+				mgmtDynamicClient, dynamicClient,
+				execCtx.ClusterRef, ns,
+			)
+		}
+		fmt.Printf("conductor agent: cluster=%q packinstance pull loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
 	}
 
@@ -179,7 +203,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -204,6 +228,7 @@ func onLeaderStart(
 	reconciler *agent.ReceiptReconciler,
 	signingLoop *agent.SigningLoop,
 	snapshotPullLoop *agent.SnapshotPullLoop,
+	packInstancePullLoop *agent.PackInstancePullLoop,
 ) {
 	// Publish capability manifest to RunnerConfig status (one-shot on leader start).
 	// Failure is logged but does not abort — the agent retries on the next leader
@@ -247,6 +272,14 @@ func onLeaderStart(
 	// local SnapshotStore for PermissionService. conductor-schema.md §10 step 8.
 	if snapshotPullLoop != nil {
 		go snapshotPullLoop.Run(leaderCtx, signingInterval)
+	}
+
+	// Start PackInstance pull loop (target clusters only).
+	// Pulls signed artifact Secrets from management cluster, verifies Ed25519
+	// signatures (INV-026), and writes PackReceipt CRs on the local cluster.
+	// Gap 28, conductor-schema.md §10.
+	if packInstancePullLoop != nil {
+		go packInstancePullLoop.Run(leaderCtx, signingInterval)
 	}
 
 	// Block until leadership is lost.
