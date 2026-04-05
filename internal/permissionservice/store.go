@@ -73,3 +73,16 @@ func (s *SnapshotStore) Get() (entries []PrincipalPermissionEntry, version, clus
 	defer s.mu.RUnlock()
 	return s.entries, s.version, s.cluster, s.ready
 }
+
+// Clear resets the snapshot store to the not-ready state. Called on receiving a
+// RevocationPush from the management Conductor to invalidate the local cache.
+// LocalService will return not-ready responses until the next snapshot pull.
+// conductor-schema.md §18.
+func (s *SnapshotStore) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = nil
+	s.version = ""
+	s.cluster = ""
+	s.ready = false
+}

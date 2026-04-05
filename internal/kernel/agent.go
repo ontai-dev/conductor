@@ -13,6 +13,7 @@ import (
 	"github.com/ontai-dev/conductor/internal/agent"
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
+	"github.com/ontai-dev/conductor/internal/federation"
 	"github.com/ontai-dev/conductor/internal/permissionservice"
 	"github.com/ontai-dev/conductor/internal/webhook"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
@@ -160,6 +161,49 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		}
 		fmt.Printf("conductor agent: cluster=%q packinstance pull loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
+	}
+
+	// Phase 3b — Start the federation channel listener/client.
+	// Management Conductor: start FederationServer when FEDERATION_CA_CERT_PATH,
+	// FEDERATION_SERVER_CERT_PATH, and FEDERATION_SERVER_KEY_PATH are all set.
+	// Tenant Conductor: start FederationClient when MGMT_FEDERATION_ADDR is set.
+	// conductor-schema.md §18.
+	fedCACertPath := os.Getenv("FEDERATION_CA_CERT_PATH")
+	fedServerCertPath := os.Getenv("FEDERATION_SERVER_CERT_PATH")
+	fedServerKeyPath := os.Getenv("FEDERATION_SERVER_KEY_PATH")
+	mgmtFedAddr := os.Getenv("MGMT_FEDERATION_ADDR")
+	fedClientCertPath := os.Getenv("FEDERATION_CLIENT_CERT_PATH")
+	fedClientKeyPath := os.Getenv("FEDERATION_CLIENT_KEY_PATH")
+
+	if fedCACertPath != "" && fedServerCertPath != "" && fedServerKeyPath != "" {
+		// Management Conductor: start the federation server.
+		fedServer, fedErr := federation.NewFederationServer(fedCACertPath, fedServerCertPath, fedServerKeyPath, nil)
+		if fedErr != nil {
+			return fmt.Errorf("conductor agent: build federation server: %w", fedErr)
+		}
+		fedPort := os.Getenv("FEDERATION_PORT")
+		if fedPort == "" {
+			fedPort = federation.DefaultFederationPort
+		}
+		go func() {
+			if err := fedServer.Start(goCtx, fedPort); err != nil {
+				fmt.Printf("conductor agent: cluster=%q federation server error: %v\n",
+					execCtx.ClusterRef, err)
+			}
+		}()
+		fmt.Printf("conductor agent: cluster=%q starting federation server on %s (management role)\n",
+			execCtx.ClusterRef, fedPort)
+	}
+
+	if mgmtFedAddr != "" && fedCACertPath != "" && fedClientCertPath != "" && fedClientKeyPath != "" {
+		// Tenant Conductor: start the federation client.
+		fedClient := federation.NewFederationClient(
+			mgmtFedAddr, fedClientCertPath, fedClientKeyPath, fedCACertPath,
+			execCtx.ClusterRef, snapshotStore,
+		)
+		go fedClient.Run(goCtx)
+		fmt.Printf("conductor agent: cluster=%q starting federation client → %s (tenant role)\n",
+			execCtx.ClusterRef, mgmtFedAddr)
 	}
 
 	// Phase 3 — Start the SealedCausalChain admission webhook server.
