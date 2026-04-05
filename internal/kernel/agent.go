@@ -196,11 +196,34 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	}
 
 	if mgmtFedAddr != "" && fedCACertPath != "" && fedClientCertPath != "" && fedClientKeyPath != "" {
-		// Tenant Conductor: start the federation client.
+		// Tenant Conductor: open the WAL and start the federation client.
+		walPath := os.Getenv("WAL_PATH")
+		if walPath == "" {
+			walPath = federation.DefaultWALPath
+		}
+		walMaxStr := os.Getenv("WAL_MAX_BYTES")
+		walMax := int64(federation.DefaultWALMaxBytes)
+		if walMaxStr != "" {
+			if n, err := fmt.Sscanf(walMaxStr, "%d", &walMax); n != 1 || err != nil {
+				fmt.Printf("conductor agent: invalid WAL_MAX_BYTES %q — using default\n", walMaxStr)
+				walMax = federation.DefaultWALMaxBytes
+			}
+		}
+
+		wal, walErr := federation.OpenWAL(walPath, walMax)
+		if walErr != nil {
+			// WAL failure is non-fatal — log and continue without WAL buffering.
+			fmt.Printf("conductor agent: cluster=%q WAL open failed: %v — proceeding without WAL\n",
+				execCtx.ClusterRef, walErr)
+		}
+
 		fedClient := federation.NewFederationClient(
 			mgmtFedAddr, fedClientCertPath, fedClientKeyPath, fedCACertPath,
 			execCtx.ClusterRef, snapshotStore,
 		)
+		if wal != nil {
+			fedClient.SetWAL(wal)
+		}
 		go fedClient.Run(goCtx)
 		fmt.Printf("conductor agent: cluster=%q starting federation client → %s (tenant role)\n",
 			execCtx.ClusterRef, mgmtFedAddr)

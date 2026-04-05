@@ -58,6 +58,10 @@ type FederationClient struct {
 
 	// sendCh is the internal channel used to pass outbound envelopes to the stream goroutine.
 	sendCh chan *Envelope
+
+	// wal is the write-ahead log used to buffer audit batches before transmission.
+	// May be nil (in-memory buffering only).
+	wal *WAL
 }
 
 // tlsClientConfig holds the raw paths for lazy config construction.
@@ -89,6 +93,16 @@ func NewFederationClient(
 	}
 }
 
+// SetWAL attaches a WAL to this FederationClient. Must be called before Run.
+// When a WAL is set, audit batches are written to the WAL before being queued
+// for transmission, and the WAL read pointer advances only after ACK.
+// conductor-schema.md §18.
+func (c *FederationClient) SetWAL(wal *WAL) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wal = wal
+}
+
 // IsDegraded returns true when the federation channel has been marked degraded
 // due to consecutive missed heartbeat ACKs. conductor-schema.md §18.
 func (c *FederationClient) IsDegraded() bool {
@@ -103,14 +117,34 @@ func (c *FederationClient) RevocationCh() <-chan RevocationPush {
 	return c.revocationCh
 }
 
-// SendAuditBatch queues an AuditEventBatch envelope for transmission on the stream.
-// The WAL layer calls this after writing the batch to the WAL.
-func (c *FederationClient) SendAuditBatch(env *Envelope) {
+// SendAuditBatch writes the batch to the WAL (if configured) then queues the
+// envelope for transmission on the stream. Write-before-send ordering is the
+// WAL guarantee: the envelope is never sent until it is durably written.
+//
+// If the WAL is full, the batch is dropped and the caller must emit AuditWALFull.
+// conductor-schema.md §18.
+func (c *FederationClient) SendAuditBatch(env *Envelope) error {
+	c.mu.Lock()
+	wal := c.wal
+	c.mu.Unlock()
+
+	if wal != nil {
+		entry := WALEntry{
+			SequenceNumber: env.SequenceNumber,
+			Data:           env.Data,
+		}
+		if err := wal.Write(entry); err != nil {
+			// WAL full — caller handles the AuditWALFull condition.
+			return err
+		}
+	}
+
 	select {
 	case c.pendingAuditBatches <- env:
 	default:
-		// Channel full — drop. WAL prevents loss (WAL_MAX_BYTES check is upstream).
+		// In-memory channel full — drop; WAL has the durable copy.
 	}
+	return nil
 }
 
 // Run connects to the management Conductor federation port and maintains the
@@ -141,6 +175,42 @@ func (c *FederationClient) Run(ctx context.Context) {
 	}
 }
 
+// replayWAL reads unacknowledged WAL entries and re-queues them as pending
+// audit batches for the new stream. Called at the start of each runOnce cycle.
+func (c *FederationClient) replayWAL(ctx context.Context) {
+	c.mu.Lock()
+	wal := c.wal
+	c.mu.Unlock()
+	if wal == nil {
+		return
+	}
+
+	entries, err := wal.Replay()
+	if err != nil {
+		fmt.Printf("federation client: cluster=%q WAL replay error: %v\n", c.clusterID, err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	fmt.Printf("federation client: cluster=%q WAL replay: %d unacknowledged entries\n",
+		c.clusterID, len(entries))
+	for _, e := range entries {
+		env := &Envelope{
+			Type:           TypeAuditEventBatch,
+			SequenceNumber: e.SequenceNumber,
+			ClusterID:      c.clusterID,
+			Data:           e.Data,
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case c.pendingAuditBatches <- env:
+		}
+	}
+}
+
 // runOnce establishes one connection + stream session. Returns when the stream
 // ends (cleanly or due to error).
 func (c *FederationClient) runOnce(ctx context.Context) error {
@@ -148,6 +218,11 @@ func (c *FederationClient) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build TLS config: %w", err)
 	}
+
+	// Replay unacknowledged WAL entries before re-establishing the stream.
+	// This ensures that entries written during degradation are not lost.
+	// conductor-schema.md §18.
+	c.replayWAL(ctx)
 
 	creds := credentials.NewTLS(tlsCfg)
 	conn, err := grpc.NewClient(c.mgmtAddr, grpc.WithTransportCredentials(creds))
@@ -157,10 +232,11 @@ func (c *FederationClient) runOnce(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	// Open the bidirectional stream.
+	// Open the bidirectional stream with the federation JSON codec.
 	stream, err := conn.NewStream(ctx,
 		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
 		"/conductor.federation.v1alpha1.FederationService/Stream",
+		ForceCodecOption(),
 	)
 	if err != nil {
 		c.markDegraded()
@@ -216,9 +292,15 @@ func (c *FederationClient) receiveLoop(ctx context.Context, stream grpc.ClientSt
 		case TypeAuditEventAck:
 			var ack AuditEventAck
 			if err := json.Unmarshal(env.Data, &ack); err == nil {
-				// WAL layer will advance read pointer past ack.AckedSequenceNumber.
-				// (Handled by WAL in WS3.)
-				_ = ack.AckedSequenceNumber
+				// Advance the WAL read pointer past the acknowledged sequence number.
+				// The WAL guarantees write-before-send; ack-before-advance ensures
+				// entries are only discarded after management confirms receipt.
+				c.mu.Lock()
+				wal := c.wal
+				c.mu.Unlock()
+				if wal != nil {
+					wal.Ack(ack.AckedSequenceNumber)
+				}
 			}
 
 		case TypeRevocationPush:
