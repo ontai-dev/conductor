@@ -116,6 +116,42 @@ spec:
                 description: SelfOperation is true when the Job execution cluster
                   and target cluster are the same. conductor-schema.md §13.
                 type: boolean
+              steps:
+                description: Steps is the ordered list of steps in this multi-step
+                  operation intent. conductor-schema.md §17.
+                items:
+                  description: RunnerConfigStep declares one step in a multi-step
+                    operation intent.
+                  properties:
+                    capability:
+                      description: Capability is the named capability identifier
+                        Conductor execute mode dispatches for this step.
+                      type: string
+                    dependsOn:
+                      description: DependsOn is an optional reference to a prior
+                        step name. The step is not eligible until the referenced
+                        step has reached Succeeded state.
+                      type: string
+                    haltOnFailure:
+                      description: HaltOnFailure controls sequencer behaviour when
+                        this step fails. When true, failure terminates the
+                        RunnerConfig with terminal condition Failed.
+                      type: boolean
+                    name:
+                      description: Name is the unique identifier for this step
+                        within the RunnerConfig.
+                      type: string
+                    parameters:
+                      additionalProperties:
+                        type: string
+                      description: Parameters is the input parameter map passed
+                        to the capability at Job materialisation time.
+                      type: object
+                  required:
+                  - capability
+                  - name
+                  type: object
+                type: array
             required:
             - clusterRef
             - runnerImage
@@ -157,6 +193,48 @@ spec:
                   required:
                   - name
                   - version
+                  type: object
+                type: array
+              stepResults:
+                description: StepResults is the ordered list of step result records
+                  written by Conductor execute mode as each step completes.
+                  conductor-schema.md §17.
+                items:
+                  description: RunnerConfigStepResult is the status record for one
+                    completed step.
+                  properties:
+                    outputRef:
+                      description: OutputRef is the reference to the ConfigMap in
+                        ont-system from which the OperationResult was harvested.
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      type: object
+                    phase:
+                      description: Phase is the terminal phase of this step.
+                      enum:
+                      - Pending
+                      - Running
+                      - Succeeded
+                      - Failed
+                      type: string
+                    result:
+                      description: Result is the raw JSON OperationResult payload
+                        harvested from the ConfigMap. Written verbatim.
+                      type: string
+                      format: byte
+                    stepName:
+                      description: StepName matches the Name field of the
+                        corresponding RunnerConfigStep in spec.
+                      type: string
+                  required:
+                  - phase
+                  - stepName
                   type: object
                 type: array
               conditions:

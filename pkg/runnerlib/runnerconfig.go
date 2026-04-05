@@ -1,6 +1,7 @@
 package runnerlib
 
 import (
+	"encoding/json"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,6 +53,91 @@ type RunnerConfigSpec struct {
 	// logic is skipped entirely — tenant-targeted operations are exempt.
 	// conductor-schema.md §13.
 	SelfOperation bool
+
+	// Steps is the ordered list of steps in this multi-step operation intent.
+	// The step sequencer in Conductor execute mode processes these in declared
+	// order, respecting DependsOn relationships and HaltOnFailure semantics.
+	// A RunnerConfig with a single step is the degenerate case — all RunnerConfigs
+	// use the steps list. conductor-schema.md §17.
+	Steps []RunnerConfigStep
+}
+
+// RunnerConfigStep declares one step in a multi-step operation intent.
+// Each step maps to exactly one named capability. The sequencer materialises
+// one Job per step in declared order.
+// conductor-schema.md §17.
+type RunnerConfigStep struct {
+	// Name is the unique identifier for this step within the RunnerConfig.
+	// Used as the key for DependsOn references and StepResult lookup.
+	Name string
+
+	// Capability is the named capability identifier Conductor execute mode
+	// dispatches for this step. Must match a registered capability name.
+	Capability string
+
+	// Parameters is the input parameter map passed to the capability at Job
+	// materialisation time.
+	Parameters map[string]string
+
+	// DependsOn is an optional reference to a prior step name. The step is
+	// not eligible for execution until the referenced step has reached
+	// Succeeded state. Empty means no dependency.
+	DependsOn string
+
+	// HaltOnFailure controls sequencer behaviour when this step fails.
+	// When true, failure terminates the RunnerConfig with terminal condition
+	// Failed and no further steps execute. When false, the sequencer records
+	// the failure and continues to eligible successor steps.
+	HaltOnFailure bool
+}
+
+// StepPhase is the lifecycle phase of a RunnerConfig step result.
+// conductor-schema.md §17.
+type StepPhase string
+
+const (
+	// StepPhasePending indicates the step has not yet been dispatched.
+	StepPhasePending StepPhase = "Pending"
+
+	// StepPhaseRunning indicates the step Job is currently in flight.
+	StepPhaseRunning StepPhase = "Running"
+
+	// StepPhaseSucceeded indicates the step Job completed successfully.
+	StepPhaseSucceeded StepPhase = "Succeeded"
+
+	// StepPhaseFailed indicates the step Job reached a failure terminal state.
+	StepPhaseFailed StepPhase = "Failed"
+)
+
+// ConfigMapRef is a reference to a Kubernetes ConfigMap by namespace and name.
+type ConfigMapRef struct {
+	// Namespace is the Kubernetes namespace containing the ConfigMap.
+	Namespace string
+
+	// Name is the Kubernetes ConfigMap name.
+	Name string
+}
+
+// RunnerConfigStepResult is the status record for one step written into
+// RunnerConfig status by Conductor execute mode after each step completes.
+// Conductor writes the result verbatim — it never interprets the payload.
+// conductor-schema.md §17.
+type RunnerConfigStepResult struct {
+	// StepName matches the Name field of the corresponding RunnerConfigStep
+	// in spec. Used to correlate results with the declared step list.
+	StepName string
+
+	// Phase is the terminal phase reached by this step.
+	Phase StepPhase
+
+	// OutputRef is the reference to the ConfigMap in ont-system from which the
+	// OperationResult payload was harvested. Garbage-collected after TTL.
+	OutputRef ConfigMapRef
+
+	// Result is the raw JSON OperationResult document harvested from the
+	// ConfigMap. Conductor writes this verbatim without semantic interpretation.
+	// The owning operator reads and interprets this field.
+	Result json.RawMessage
 }
 
 // PhaseConfig carries per-phase parameters for the runner's execution context.
@@ -113,7 +199,14 @@ type RunnerConfigStatus struct {
 
 	// Conditions is the standard Kubernetes condition list for RunnerConfig.
 	// Standard condition types: LaunchComplete, EnableComplete, BootstrapComplete,
-	// PhaseFailed, CapabilityUnavailable.
+	// PhaseFailed, CapabilityUnavailable, Completed, Failed.
 	Conditions []metav1.Condition
+
+	// StepResults is the ordered list of step result records written by Conductor
+	// execute mode as each step in the RunnerConfig's step list completes.
+	// Conductor writes each entry verbatim from the harvested ConfigMap payload.
+	// The owning operator reads this list after the terminal condition is set.
+	// conductor-schema.md §17.
+	StepResults []RunnerConfigStepResult
 }
 
