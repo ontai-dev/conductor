@@ -2,7 +2,7 @@
 IMAGE_REGISTRY ?= registry.ontai.dev/ontai-dev
 TAG            ?= dev
 
-.PHONY: build test lint lint-docs clean docker-build
+.PHONY: build test lint lint-docs install-hooks clean docker-build
 
 build:
 	go build ./...
@@ -10,7 +10,7 @@ build:
 test:
 	go test ./...
 
-lint: lint-docs
+lint: lint-docs install-hooks
 	golangci-lint run ./...
 
 lint-docs:
@@ -28,6 +28,12 @@ lint-docs:
 		exit 1; \
 	fi
 	@echo "PASS: no Co-Authored-By trailers in commit history"
+
+install-hooks:
+	@echo ">>> install-hooks: installing commit-msg hook"
+	@cp scripts/commit-msg .git/hooks/commit-msg
+	@chmod +x .git/hooks/commit-msg
+	@echo "PASS: commit-msg hook installed at .git/hooks/commit-msg"
 
 clean:
 	rm -rf bin/
