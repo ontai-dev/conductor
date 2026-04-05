@@ -317,6 +317,7 @@ func TestFederationServer_gRPC_AcceptsValidCert(t *testing.T) {
 	stream, err := conn.NewStream(ctx,
 		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
 		"/conductor.federation.v1alpha1.FederationService/Stream",
+		federation.ForceCodecOption(),
 	)
 	if err != nil {
 		t.Fatalf("open stream with valid cert: %v", err)
@@ -366,13 +367,14 @@ func TestFederationServer_gRPC_RejectsNoCert(t *testing.T) {
 	stream, streamErr := conn.NewStream(ctx,
 		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
 		"/conductor.federation.v1alpha1.FederationService/Stream",
+		federation.ForceCodecOption(),
 	)
 	if streamErr != nil {
 		// Expected — rejected.
 		return
 	}
 	// If stream opened, sending should fail.
-	sendErr := stream.SendMsg(&struct{}{})
+	sendErr := stream.SendMsg(&federation.Envelope{Type: federation.TypeHeartBeat})
 	if sendErr == nil {
 		t.Error("expected connection without client cert to be rejected")
 	}
@@ -427,12 +429,13 @@ func TestFederationServer_gRPC_RejectsWrongCA(t *testing.T) {
 	stream, streamErr := conn.NewStream(ctx,
 		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
 		"/conductor.federation.v1alpha1.FederationService/Stream",
+		federation.ForceCodecOption(),
 	)
 	if streamErr != nil {
 		// Expected — rogue cert rejected.
 		return
 	}
-	sendErr := stream.SendMsg(&struct{}{})
+	sendErr := stream.SendMsg(&federation.Envelope{Type: federation.TypeHeartBeat})
 	if sendErr == nil {
 		t.Error("expected rogue CA-signed client cert to be rejected by server")
 	}
@@ -487,6 +490,7 @@ func TestFederationClient_ClusterIDExtraction(t *testing.T) {
 	stream, err := conn.NewStream(ctx,
 		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
 		"/conductor.federation.v1alpha1.FederationService/Stream",
+		federation.ForceCodecOption(),
 	)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
