@@ -1,0 +1,26 @@
+# Dockerfile.agent — Conductor binary for agent mode (distroless).
+#
+# The agent is a long-running Deployment in ont-system on every cluster
+# (management and all targets). Distroless: no shell, no package manager,
+# no system tools. Zero attack surface on clusters. INV-022.
+# conductor-schema.md §14.
+#
+# gcr.io/distroless/base (not static) is required because the talos goclient
+# and gRPC stack require libc for certain TLS and crypto operations.
+# Verify at build time that the produced binary runs cleanly on this image.
+
+FROM golang:1.25 AS builder
+WORKDIR /build
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /bin/conductor \
+    ./cmd/conductor
+
+FROM gcr.io/distroless/base:nonroot
+COPY --from=builder /bin/conductor /usr/local/bin/conductor
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/conductor"]
+CMD ["agent"]

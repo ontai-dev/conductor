@@ -1,4 +1,8 @@
-.PHONY: build test lint lint-docs clean
+# Image tag default — override via environment: TAG=v1.9.3-r1 make docker-build
+IMAGE_REGISTRY ?= registry.ontai.dev/ontai-dev
+TAG            ?= dev
+
+.PHONY: build test lint lint-docs clean docker-build
 
 build:
 	go build ./...
@@ -27,3 +31,24 @@ lint-docs:
 
 clean:
 	rm -rf bin/
+
+# docker-build builds all three conductor images with distinct tags.
+# compiler: compile-mode tool (debian-slim, never deployed to cluster)
+# execute:  execute-mode Kueue Jobs (debian-slim + SOPS/Helm/Kustomize)
+# agent:    agent-mode Deployment (distroless, deployed to every cluster)
+#
+# Usage: make docker-build TAG=v1.9.3-r1
+#        make docker-build TAG=dev IMAGE_REGISTRY=10.20.0.1:5000/ontai-dev
+docker-build:
+	docker build \
+		-f Dockerfile.compiler \
+		-t $(IMAGE_REGISTRY)/compiler:$(TAG) \
+		.
+	docker build \
+		-f Dockerfile.execute \
+		-t $(IMAGE_REGISTRY)/conductor-execute:$(TAG) \
+		.
+	docker build \
+		-f Dockerfile.agent \
+		-t $(IMAGE_REGISTRY)/conductor:$(TAG) \
+		.
