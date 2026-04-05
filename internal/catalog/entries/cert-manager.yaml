@@ -1,0 +1,40 @@
+# cert-manager controller and webhook — RBACProfile catalog entry.
+# Catalog version: {{ .EntryVersion }}
+# conductor-schema.md §16.
+#
+# cert-manager is part of the Guardian enable phase (enable phase order step 2,
+# platform-schema.md §8). It provisions TLS certificates for all platform
+# webhooks and gRPC endpoints.
+#
+# cert-manager ServiceAccounts: cert-manager (controller), cert-manager-webhook
+# (admission webhook), cert-manager-cainjector (CA injector). Cluster-wide
+# Certificate, CertificateRequest, ClusterIssuer, Issuer CRD access required.
+#
+# spec.lineage is controller-managed — do not author this field manually.
+# The InfrastructureLineageController sets it after admission. CLAUDE.md §14.
+apiVersion: security.ontai.dev/v1alpha1
+kind: RBACProfile
+metadata:
+  name: {{ .RBACProfileName }}
+  namespace: {{ .Namespace }}
+  annotations:
+    ontai.dev/catalog-version: "{{ .EntryVersion }}"
+    ontai.dev/catalog-component: "{{ .EntryName }}"
+    ontai.dev/catalog-description: "{{ .EntryDescription }}"
+spec:
+  principalRef: cert-manager
+  targetClusters:
+{{- range .TargetClusters }}
+  - {{ . }}
+{{- end }}
+  rbacPolicyRef: {{ .RBACPolicyRef }}
+  permissionDeclarations:
+    # Cluster-wide certificate management: Certificate, CertificateRequest, ClusterIssuer.
+    - permissionSetRef: cert-manager-cluster-certs
+      scope: cluster
+    # Cluster-wide CA injection: MutatingWebhookConfiguration, ValidatingWebhookConfiguration.
+    - permissionSetRef: cert-manager-cainjector
+      scope: cluster
+    # Namespaced issuer management: Issuer, Secret (for private keys and CA bundles).
+    - permissionSetRef: cert-manager-namespaced
+      scope: namespaced

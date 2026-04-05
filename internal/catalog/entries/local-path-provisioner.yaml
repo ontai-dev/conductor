@@ -1,0 +1,37 @@
+# Rancher local-path-provisioner — RBACProfile catalog entry.
+# Catalog version: {{ .EntryVersion }}
+# conductor-schema.md §16.
+#
+# local-path-provisioner is part of the Guardian enable phase (enable phase step 8,
+# platform-schema.md §8). It provides dynamic PVC provisioning for clusters that
+# do not have a cloud-native storage class.
+#
+# ServiceAccount: local-path-provisioner-service-account (Deployment in
+# local-path-storage, or seam-system on management cluster). Requires
+# PersistentVolume, PersistentVolumeClaim, StorageClass, and ConfigMap access.
+#
+# spec.lineage is controller-managed — do not author this field manually.
+# The InfrastructureLineageController sets it after admission. CLAUDE.md §14.
+apiVersion: security.ontai.dev/v1alpha1
+kind: RBACProfile
+metadata:
+  name: {{ .RBACProfileName }}
+  namespace: {{ .Namespace }}
+  annotations:
+    ontai.dev/catalog-version: "{{ .EntryVersion }}"
+    ontai.dev/catalog-component: "{{ .EntryName }}"
+    ontai.dev/catalog-description: "{{ .EntryDescription }}"
+spec:
+  principalRef: local-path-provisioner-service-account
+  targetClusters:
+{{- range .TargetClusters }}
+  - {{ . }}
+{{- end }}
+  rbacPolicyRef: {{ .RBACPolicyRef }}
+  permissionDeclarations:
+    # Cluster-wide storage provisioning: PersistentVolume, StorageClass.
+    - permissionSetRef: local-path-cluster-storage
+      scope: cluster
+    # Namespaced PVC and ConfigMap access for provisioner configuration.
+    - permissionSetRef: local-path-namespaced
+      scope: namespaced
