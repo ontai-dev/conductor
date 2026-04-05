@@ -28,6 +28,30 @@ type RunnerConfigSpec struct {
 	// applied to this RunnerConfig. Entries are never deleted. Superseded entries
 	// are retained as historical record.
 	OperationalHistory []OperationalHistoryEntry
+
+	// MaintenanceTargetNodes is the list of node names that are the subject of
+	// the operation. Populated by the initiating operator at RunnerConfig creation
+	// time. Conductor execute mode uses this list to build NotIn node affinity
+	// constraints when SelfOperation is true.
+	// conductor-schema.md §13.
+	MaintenanceTargetNodes []string
+
+	// OperatorLeaderNode is the node currently hosting the leader pod of the
+	// initiating operator. Resolved at RunnerConfig creation time via the
+	// Kubernetes downward API (fieldRef: spec.nodeName on the operator's pod).
+	// Conductor execute mode excludes this node from Job scheduling when
+	// SelfOperation is true, preventing a potential scheduling deadlock if the
+	// node were cordoned during the operation.
+	// conductor-schema.md §13.
+	OperatorLeaderNode string
+
+	// SelfOperation is true when the Job's execution cluster and the target
+	// cluster are the same (management cluster self-operations). When true,
+	// Conductor execute mode applies NotIn node affinity constraints from
+	// MaintenanceTargetNodes and OperatorLeaderNode. When false, exclusion
+	// logic is skipped entirely — tenant-targeted operations are exempt.
+	// conductor-schema.md §13.
+	SelfOperation bool
 }
 
 // PhaseConfig carries per-phase parameters for the runner's execution context.

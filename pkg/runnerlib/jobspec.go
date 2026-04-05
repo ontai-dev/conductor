@@ -50,6 +50,13 @@ type JobSpecBuilder interface {
 	// garbage collected. Default is DefaultTTLSecondsAfterFinished (600s).
 	WithTTL(seconds int32) JobSpecBuilder
 
+	// WithNodeExclusions sets the list of node names that this Job must not be
+	// scheduled onto. Conductor execute mode calls this with the merged list of
+	// RunnerConfigSpec.MaintenanceTargetNodes and RunnerConfigSpec.OperatorLeaderNode
+	// when SelfOperation=true. When SelfOperation=false, callers must not set this.
+	// conductor-schema.md §13.
+	WithNodeExclusions(nodes []string) JobSpecBuilder
+
 	// Build validates all required fields and produces a JobSpec.
 	// Returns an error if RunnerImage, Capability, or Namespace is empty.
 	Build() (JobSpec, error)
@@ -91,6 +98,12 @@ type JobSpec struct {
 
 	// ServiceAccountName is the ServiceAccount the Job pod runs under.
 	ServiceAccountName string
+
+	// NodeExclusions is the list of node names this Job must not be scheduled
+	// onto. Populated by the operator (via ResolveNodeExclusionsFromRunnerConfig)
+	// when RunnerConfigSpec.SelfOperation=true. Empty for tenant-targeted operations.
+	// conductor-schema.md §13.
+	NodeExclusions []string
 }
 
 // SecretVolume declares a Secret to be mounted into the runner Job pod.
@@ -123,6 +136,7 @@ type jobSpecBuilder struct {
 	secretVolumes            []SecretVolume
 	ttl                      *int32
 	namespace                string
+	nodeExclusions           []string
 }
 
 // NewJobSpecBuilder returns a new JobSpecBuilder with all fields at zero value.
@@ -182,6 +196,36 @@ func (b *jobSpecBuilder) WithTTL(seconds int32) JobSpecBuilder {
 	return &c
 }
 
+func (b *jobSpecBuilder) WithNodeExclusions(nodes []string) JobSpecBuilder {
+	c := *b
+	if len(nodes) == 0 {
+		c.nodeExclusions = nil
+		return &c
+	}
+	// Copy the slice to maintain value semantics.
+	excl := make([]string, len(nodes))
+	copy(excl, nodes)
+	c.nodeExclusions = excl
+	return &c
+}
+
+// ResolveNodeExclusionsFromRunnerConfig derives the NotIn node exclusion list
+// from a RunnerConfigSpec. Returns a merged slice of MaintenanceTargetNodes and
+// OperatorLeaderNode when SelfOperation is true. Returns nil when SelfOperation
+// is false — tenant-targeted operations are exempt from exclusion logic.
+// conductor-schema.md §13.
+func ResolveNodeExclusionsFromRunnerConfig(spec RunnerConfigSpec) []string {
+	if !spec.SelfOperation {
+		return nil
+	}
+	var nodes []string
+	nodes = append(nodes, spec.MaintenanceTargetNodes...)
+	if spec.OperatorLeaderNode != "" {
+		nodes = append(nodes, spec.OperatorLeaderNode)
+	}
+	return nodes
+}
+
 // Build validates required fields and produces a JobSpec.
 // Returns an error if RunnerImage or Capability is empty.
 // Applies defaults: Namespace=ont-system if empty, TTL=600s, ServiceAccountName="conductor".
@@ -218,5 +262,6 @@ func (b *jobSpecBuilder) Build() (JobSpec, error) {
 		SecretVolumes:            vols,
 		TTLSecondsAfterFinished:  ttl,
 		ServiceAccountName:       ServiceAccountName,
+		NodeExclusions:           b.nodeExclusions,
 	}, nil
 }
