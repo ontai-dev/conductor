@@ -66,6 +66,9 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		}},
 		{"05-post-bootstrap", []string{
 			"phase-meta.yaml",
+			"dsns-zone-configmap.yaml",
+			"coredns-dsns-stanza.yaml",
+			"dsns-loadbalancer.yaml",
 			"leaderelection.yaml",
 		}},
 	}
@@ -250,6 +253,9 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"04-conductor", "conductor-rbacprofile.yaml"},
 		{"04-conductor", "conductor-deployment.yaml"},
 		{"05-post-bootstrap", "phase-meta.yaml"},
+		{"05-post-bootstrap", "dsns-zone-configmap.yaml"},
+		{"05-post-bootstrap", "coredns-dsns-stanza.yaml"},
+		{"05-post-bootstrap", "dsns-loadbalancer.yaml"},
 		{"05-post-bootstrap", "leaderelection.yaml"},
 	}
 
@@ -494,4 +500,43 @@ func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
 	assertContainsStr(t, content, "instances: 3")
 	assertContainsStr(t, content, "50Gi")
 	assertContainsStr(t, content, "guardian-db-credentials")
+}
+
+// --- Phase 05: post-bootstrap DSNS tests ---
+
+// TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations verifies that
+// dsns-zone-configmap.yaml carries the required label and owner annotation.
+// seam-core-schema.md §8 Decision 2.
+func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "05-post-bootstrap", "dsns-zone-configmap.yaml")
+
+	assertContainsStr(t, content, "name: dsns-zone")
+	assertContainsStr(t, content, "namespace: ont-system")
+	assertContainsStr(t, content, "seam.ontai.dev/dsns-zone")
+	assertContainsStr(t, content, "governance.infrastructure.ontai.dev/owner")
+	assertContainsStr(t, content, "seam-core")
+}
+
+// TestEnable_Phase05_DSNSLoadBalancerTargetsPort53 verifies that
+// dsns-loadbalancer.yaml is a LoadBalancer Service targeting port 53 UDP and TCP.
+// seam-core-schema.md §8 Decision 3.
+func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev"); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "05-post-bootstrap", "dsns-loadbalancer.yaml")
+
+	assertContainsStr(t, content, "kind: Service")
+	assertContainsStr(t, content, "type: LoadBalancer")
+	assertContainsStr(t, content, "loadBalancerIP: 10.20.0.10")
+	assertContainsStr(t, content, "port: 53")
+	assertContainsStr(t, content, "UDP")
+	assertContainsStr(t, content, "TCP")
 }
