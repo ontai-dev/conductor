@@ -18,11 +18,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
@@ -164,6 +167,23 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "conductor agent: flag error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Start the Prometheus metrics HTTP server on METRICS_ADDR (default :8080).
+	// Controller-runtime registers its default collectors on ctrlmetrics.Registry
+	// automatically. ServiceMonitor CRDs for Prometheus Operator scrape configuration
+	// are deferred to a post-e2e observability session.
+	metricsAddr := ":8080"
+	if v := os.Getenv("METRICS_ADDR"); v != "" {
+		metricsAddr = v
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}))
+	go func() {
+		server := &http.Server{Addr: metricsAddr, Handler: metricsMux}
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "conductor agent: metrics server: %v\n", err)
+		}
+	}()
 
 	execCtx, err := config.BuildAgentContext(*clusterRef)
 	if err != nil {

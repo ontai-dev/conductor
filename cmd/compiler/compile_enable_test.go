@@ -49,6 +49,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		{"02-guardian-deploy", []string{
 			"phase-meta.yaml",
 			"guardian-deployment.yaml",
+			"guardian-metrics-service.yaml",
 		}},
 		{"03-platform-wrapper", []string{
 			"phase-meta.yaml",
@@ -56,6 +57,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"platform-wrapper-rbac.yaml",
 			"platform-wrapper-rbacprofiles.yaml",
 			"platform-wrapper-deployments.yaml",
+			"platform-wrapper-metrics-services.yaml",
 		}},
 		{"04-conductor", []string{
 			"phase-meta.yaml",
@@ -63,6 +65,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"conductor-rbac.yaml",
 			"conductor-rbacprofile.yaml",
 			"conductor-deployment.yaml",
+			"conductor-metrics-service.yaml",
 		}},
 		{"05-post-bootstrap", []string{
 			"phase-meta.yaml",
@@ -242,16 +245,19 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"01-guardian-bootstrap", "guardian-rbacprofiles.yaml"},
 		{"02-guardian-deploy", "phase-meta.yaml"},
 		{"02-guardian-deploy", "guardian-deployment.yaml"},
+		{"02-guardian-deploy", "guardian-metrics-service.yaml"},
 		{"03-platform-wrapper", "phase-meta.yaml"},
 		{"03-platform-wrapper", "platform-wrapper-crds.yaml"},
 		{"03-platform-wrapper", "platform-wrapper-rbac.yaml"},
 		{"03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml"},
 		{"03-platform-wrapper", "platform-wrapper-deployments.yaml"},
+		{"03-platform-wrapper", "platform-wrapper-metrics-services.yaml"},
 		{"04-conductor", "phase-meta.yaml"},
 		{"04-conductor", "conductor-crds.yaml"},
 		{"04-conductor", "conductor-rbac.yaml"},
 		{"04-conductor", "conductor-rbacprofile.yaml"},
 		{"04-conductor", "conductor-deployment.yaml"},
+		{"04-conductor", "conductor-metrics-service.yaml"},
 		{"05-post-bootstrap", "phase-meta.yaml"},
 		{"05-post-bootstrap", "dsns-zone-configmap.yaml"},
 		{"05-post-bootstrap", "coredns-dsns-stanza.yaml"},
