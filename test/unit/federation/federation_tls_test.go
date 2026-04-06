@@ -445,7 +445,7 @@ func TestFederationServer_gRPC_RejectsWrongCA(t *testing.T) {
 // FederationClient is not degraded before any connection attempt.
 func TestFederationClient_IsDegraded_InitiallyFalse(t *testing.T) {
 	c := federation.NewFederationClient(
-		"localhost:9091", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
+		"localhost:9443", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
 	)
 	if c.IsDegraded() {
 		t.Error("expected new FederationClient to not be degraded")

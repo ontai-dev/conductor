@@ -240,7 +240,7 @@ func TestWAL_WriteBeforeSend(t *testing.T) {
 	wal := openTestWAL(t, 1024*1024)
 
 	client := federation.NewFederationClient(
-		"unused:9091", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
+		"unused:9443", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
 	)
 	client.SetWAL(wal)
 
@@ -275,7 +275,7 @@ func TestWAL_FullDropWithClient(t *testing.T) {
 	wal := openTestWAL(t, 64) // tiny max
 
 	client := federation.NewFederationClient(
-		"unused:9091", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
+		"unused:9443", "/no/cert", "/no/key", "/no/ca", "ccs-dev", nil,
 	)
 	client.SetWAL(wal)
 

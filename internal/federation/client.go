@@ -73,7 +73,7 @@ type tlsClientConfig struct {
 
 // NewFederationClient constructs a FederationClient.
 //
-// - mgmtAddr: management Conductor federation address (e.g. "10.20.0.10:9091")
+// - mgmtAddr: management Conductor federation address (e.g. "10.20.0.10:9443")
 // - clientCertPath, clientKeyPath: PEM files for this tenant's client cert/key
 // - caCertPath: PEM file for the management CA cert (verifies server)
 // - clusterID: this tenant's cluster ID (must match DNS SAN in client cert)

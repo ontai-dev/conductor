@@ -2,7 +2,7 @@
 // persistent bidirectional gRPC stream connecting tenant Conductor agents to
 // the management Conductor agent. conductor-schema.md §18.
 //
-// The federation port (FEDERATION_PORT, default :9091) is distinct from the
+// The federation port (FEDERATION_PORT, default :9443) is distinct from the
 // PermissionService internal port. Mutual TLS is enforced: every connection must
 // present a client certificate signed by the management CA. The connecting
 // cluster's ID is extracted from the client certificate Subject Alternative Name
@@ -20,7 +20,7 @@ import (
 
 // DefaultFederationPort is the TCP port the FederationServer listens on when
 // FEDERATION_PORT is not set. conductor-schema.md §18.
-const DefaultFederationPort = ":9091"
+const DefaultFederationPort = ":9443"
 
 // ClusterIDFromCert extracts the cluster ID from the first DNS Subject
 // Alternative Name of the given certificate.
