@@ -11,6 +11,12 @@
 //	    phase-meta.yaml         — phase metadata and apply order
 //	    cnpg-operator.yaml      — CNPG operator manifests (Namespace, CRDs, SA, RBAC, Deployment)
 //	    cnpg-cluster.yaml       — CNPG Cluster CR for Guardian database (guardian-db in seam-system)
+//	  00b-capi-prerequisites/   [emitted only when --capi flag is set]
+//	    phase-meta.yaml         — phase metadata and apply order
+//	    capi-core.yaml          — CAPI core operator (CRDs, RBAC, Deployment in capi-system)
+//	    capi-talos-bootstrap.yaml    — Talos CAPI bootstrap provider
+//	    capi-talos-controlplane.yaml — Talos CAPI control plane provider
+//	    seam-infrastructure-crds.yaml — SeamInfrastructureCluster and SeamInfrastructureMachine CRDs
 //	  01-guardian-bootstrap/
 //	    phase-meta.yaml         — phase metadata and apply order
 //	    namespace-labels.yaml   — seam-system and kube-system webhook-mode=exempt labels
@@ -59,6 +65,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
 
+	"github.com/ontai-dev/conductor/internal/catalog/capi"
 	"github.com/ontai-dev/conductor/internal/catalog/cnpg"
 )
 
@@ -149,18 +156,23 @@ func allOperators(version string) []operatorSpec {
 	return result
 }
 
-const enableHelp = `Usage: compiler enable --output <path> [--version <tag>] [--kubeconfig <path>]
+const enableHelp = `Usage: compiler enable --output <path> [--version <tag>] [--capi] [--kubeconfig <path>]
 
 Produce the phased deployment manifest bundle (conductor-schema.md §9 Steps 3–8).
 
 Input contract:
   --version     Conductor/Compiler image tag (default: dev).
+  --capi        Emit the 00b-capi-prerequisites phase containing CAPI core operator,
+                Talos bootstrap provider, Talos control plane provider, and Seam
+                Infrastructure CRDs. Required for clusters using the CAPI lifecycle
+                path. platform-schema.md §3.
   --kubeconfig  Path to kubeconfig (flag → $KUBECONFIG → ~/.kube/config).
                 Optional; reserved for compile-time readiness gate validation.
 
 Output contract:
-  --output  Directory receiving six phase subdirectories:
+  --output  Directory receiving phase subdirectories:
               00-infrastructure-dependencies/  — CNPG operator and cluster
+              00b-capi-prerequisites/          — CAPI providers (only when --capi set)
               01-guardian-bootstrap/           — Guardian CRDs, RBAC, RBACProfiles
               02-guardian-deploy/              — Guardian Deployment
               03-platform-wrapper/             — Platform, Wrapper, seam-core
@@ -180,6 +192,7 @@ func runEnableSubcommand(args []string) {
 	fs := flag.NewFlagSet("enable", flag.ExitOnError)
 	output := fs.String("output", "", "Output directory for manifest bundle (required)")
 	version := fs.String("version", "dev", "Operator image tag (e.g., v1.9.3-r1). Defaults to \"dev\".")
+	withCAPI := fs.Bool("capi", false, "Emit 00b-capi-prerequisites phase (CAPI core, Talos providers, Seam infra CRDs).")
 	_ = fs.String("kubeconfig", "", "Path to kubeconfig (unused in output-only mode; reserved for future validation)")
 
 	fs.Usage = func() {
@@ -197,7 +210,7 @@ func runEnableSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileEnableBundle(*output, *version); err != nil {
+	if err := compileEnableBundle(*output, *version, *withCAPI); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -205,8 +218,12 @@ func runEnableSubcommand(args []string) {
 
 // compileEnableBundle generates the phased management cluster deployment manifest
 // bundle and writes it to the output directory.
+//
+// When withCAPI is true the 00b-capi-prerequisites phase is emitted between phase 0
+// and phase 1. This phase is required for clusters using the CAPI lifecycle path.
+// platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version string) error {
+func compileEnableBundle(output, version string, withCAPI bool) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
@@ -217,6 +234,11 @@ func compileEnableBundle(output, version string) error {
 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
+	}
+	if withCAPI {
+		if err := writePhase00bCAPIPrerequisites(output); err != nil {
+			return fmt.Errorf("phase 00b capi-prerequisites: %w", err)
+		}
 	}
 	if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
 		return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
@@ -357,6 +379,106 @@ func writeCNPGClusterCR(dir string) error {
 	buf.Write(data)
 
 	return os.WriteFile(filepath.Join(dir, "cnpg-cluster.yaml"), buf.Bytes(), 0644)
+}
+
+// --- Phase 00b: capi-prerequisites ---
+
+// writePhase00bCAPIPrerequisites writes the 00b-capi-prerequisites phase directory.
+// This phase provisions the CAPI core operator, Talos bootstrap provider, Talos control
+// plane provider, and Seam Infrastructure CRDs. It is emitted only when the --capi flag
+// is set, and must be applied before phase 1 (guardian-bootstrap) so that CAPI controllers
+// are running before the Platform operator starts.
+//
+// Lexicographic ordering: "00b-" sorts after "00-" and before "01-" — the pipeline
+// applies phases in directory name order.
+//
+// platform-schema.md §3 CAPI composition model, conductor-schema.md §9.
+func writePhase00bCAPIPrerequisites(output string) error {
+	dir := filepath.Join(output, "00b-capi-prerequisites")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	files := []string{
+		"capi-core.yaml",
+		"capi-talos-bootstrap.yaml",
+		"capi-talos-controlplane.yaml",
+		"seam-infrastructure-crds.yaml",
+	}
+
+	// Write phase-meta.yaml directly — the order is the string "0b" to represent
+	// the fractional ordering between phase 0 and phase 1. This cannot be expressed
+	// as an integer so phase-meta.yaml is written as a raw template.
+	if err := writeCAPIPhaseMetaYAML(dir, files); err != nil {
+		return err
+	}
+
+	// capi-core.yaml — CAPI core operator (Namespace, CRDs, RBAC, Deployment).
+	var coreBuf bytes.Buffer
+	coreBuf.WriteString("# CAPI Core Operator — pinned to " + capi.CAPIVersion + "\n")
+	coreBuf.WriteString("# Generated by: compiler enable (phase 00b capi-prerequisites)\n")
+	coreBuf.WriteString("# Embedded at compile time from internal/catalog/capi/capi-core.yaml.\n")
+	coreBuf.WriteString("# platform-schema.md §3 CAPI composition model.\n")
+	coreBuf.Write(capi.CoreManifest)
+	if err := os.WriteFile(filepath.Join(dir, "capi-core.yaml"), coreBuf.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	// capi-talos-bootstrap.yaml — Talos CAPI bootstrap provider.
+	var bootstrapBuf bytes.Buffer
+	bootstrapBuf.WriteString("# Talos CAPI Bootstrap Provider — pinned to " + capi.TalosBootstrapVersion + "\n")
+	bootstrapBuf.WriteString("# Generated by: compiler enable (phase 00b capi-prerequisites)\n")
+	bootstrapBuf.WriteString("# Embedded at compile time from internal/catalog/capi/capi-talos-bootstrap.yaml.\n")
+	bootstrapBuf.Write(capi.TalosBootstrapManifest)
+	if err := os.WriteFile(filepath.Join(dir, "capi-talos-bootstrap.yaml"), bootstrapBuf.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	// capi-talos-controlplane.yaml — Talos CAPI control plane provider.
+	var cpBuf bytes.Buffer
+	cpBuf.WriteString("# Talos CAPI Control Plane Provider — pinned to " + capi.TalosControlPlaneVersion + "\n")
+	cpBuf.WriteString("# Generated by: compiler enable (phase 00b capi-prerequisites)\n")
+	cpBuf.WriteString("# Embedded at compile time from internal/catalog/capi/capi-talos-controlplane.yaml.\n")
+	cpBuf.Write(capi.TalosControlPlaneManifest)
+	if err := os.WriteFile(filepath.Join(dir, "capi-talos-controlplane.yaml"), cpBuf.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	// seam-infrastructure-crds.yaml — SeamInfrastructureCluster and SeamInfrastructureMachine CRDs.
+	var infraBuf bytes.Buffer
+	infraBuf.WriteString("# Seam Infrastructure Provider CRDs — from platform/config/crd/\n")
+	infraBuf.WriteString("# Generated by: compiler enable (phase 00b capi-prerequisites)\n")
+	infraBuf.WriteString("# Embedded at compile time from internal/catalog/capi/seam-infrastructure-crds.yaml.\n")
+	infraBuf.Write(capi.SeamInfrastructureCRDs)
+	if err := os.WriteFile(filepath.Join(dir, "seam-infrastructure-crds.yaml"), infraBuf.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// writeCAPIPhaseMetaYAML writes the phase-meta.yaml for the 00b-capi-prerequisites phase.
+// The order is the string "0b" — written directly rather than marshaling phaseMeta so that
+// the fractional order label is preserved verbatim in the output file.
+func writeCAPIPhaseMetaYAML(dir string, applyOrder []string) error {
+	var buf bytes.Buffer
+	buf.WriteString("# Phase metadata — do not edit manually.\n")
+	buf.WriteString("# Generated by: compiler enable\n")
+	buf.WriteString("phase: capi-prerequisites\n")
+	buf.WriteString("order: 0b\n")
+	buf.WriteString("readinessGate: |\n")
+	buf.WriteString("  Wait for all CAPI controller Deployments in capi-system to be Available\n")
+	buf.WriteString("  before applying phase 1 (guardian-bootstrap). CAPI controllers must be\n")
+	buf.WriteString("  running before the Platform operator starts so that SeamInfrastructureCluster\n")
+	buf.WriteString("  and SeamInfrastructureMachine CRDs are registered and CAPI reconcilers can\n")
+	buf.WriteString("  process Cluster and Machine objects created by TalosClusterReconciler.\n")
+	buf.WriteString("  Check: kubectl get deploy -n capi-system. All must be Available.\n")
+	buf.WriteString("  platform-schema.md §3 CAPI composition model.\n")
+	buf.WriteString("applyOrder:\n")
+	for _, f := range applyOrder {
+		buf.WriteString("- " + f + "\n")
+	}
+	return os.WriteFile(filepath.Join(dir, "phase-meta.yaml"), buf.Bytes(), 0644)
 }
 
 // --- Phase 1: guardian-bootstrap ---

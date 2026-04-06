@@ -26,7 +26,7 @@ func readPhaseFile(t *testing.T, outDir, phase, filename string) string {
 // phase subdirectories, each containing a phase-meta.yaml. conductor-schema.md §9 Step 3.
 func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 // This is the Role Declaration Contract stamped by compiler enable. §15.
 func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "v1.9.3-r1"); err != nil {
+	if err := compileEnableBundle(outDir, "v1.9.3-r1", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 // ont-system and other operators are in seam-system. CONTEXT.md §4 Namespace Model.
 func TestEnable_ConductorInOntSystem(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestEnable_ConductorInOntSystem(t *testing.T) {
 // Seam operators are present across the phase deployment files.
 func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 // ClusterRoleBinding exist for each operator across the phase RBAC files.
 func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 // contains Lease resources for all operators.
 func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 // guardian-schema.md §6 (Seam operator RBACProfiles).
 func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 // include the human-review annotation. guardian-schema.md §6.
 func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -224,10 +224,10 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 	out1 := t.TempDir()
 	out2 := t.TempDir()
 
-	if err := compileEnableBundle(out1, "dev"); err != nil {
+	if err := compileEnableBundle(out1, "dev", false); err != nil {
 		t.Fatalf("first compileEnableBundle: %v", err)
 	}
-	if err := compileEnableBundle(out2, "dev"); err != nil {
+	if err := compileEnableBundle(out2, "dev", false); err != nil {
 		t.Fatalf("second compileEnableBundle: %v", err)
 	}
 
@@ -277,7 +277,7 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 	outDir := t.TempDir()
 	const version = "v1.9.3-r5"
-	if err := compileEnableBundle(outDir, version); err != nil {
+	if err := compileEnableBundle(outDir, version, false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -296,7 +296,7 @@ func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 // are present across the phase CRD files. conductor-schema.md §9 Step 3.
 func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -325,7 +325,7 @@ func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 // guardian 25c9e93 WS3 CheckBootstrapLabels contract.
 func TestEnable_NamespaceLabels_BothNamespacesPresent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestEnable_NamespaceLabels_BothNamespacesPresent(t *testing.T) {
 // carries kind: Namespace and the correct seam.ontai.dev/webhook-mode=exempt label.
 func TestEnable_NamespaceLabels_CorrectKindAndLabel(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -355,7 +355,7 @@ func TestEnable_NamespaceLabels_CorrectKindAndLabel(t *testing.T) {
 // not a full Namespace manifest. INV-020, CS-INV-004.
 func TestEnable_NamespaceLabels_IsSSAPatchOnly(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -374,7 +374,7 @@ func TestEnable_NamespaceLabels_IsSSAPatchOnly(t *testing.T) {
 // in applyOrder.
 func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 // conductor-schema.md §9 phase 0.
 func TestEnable_Phase00_DirectoryExistsAndIsFirst(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestEnable_Phase00_DirectoryExistsAndIsFirst(t *testing.T) {
 // declares order: 0. conductor-schema.md §9 phase 0.
 func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -447,7 +447,7 @@ func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 // guardian-schema.md §16 CNPG Deployment Contract.
 func TestEnable_Phase00_CNPGOperatorYAMLPresent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -476,7 +476,7 @@ func TestEnable_Phase00_CNPGOperatorYAMLPresent(t *testing.T) {
 // guardian-schema.md §16 CNPG Deployment Contract.
 func TestEnable_Phase00_CNPGClusterCRNameAndNamespace(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -492,7 +492,7 @@ func TestEnable_Phase00_CNPGClusterCRNameAndNamespace(t *testing.T) {
 // guardian-schema.md §16 CNPG Deployment Contract.
 func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -509,7 +509,7 @@ func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
 // seam-core-schema.md §8 Decision 2.
 func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -527,7 +527,7 @@ func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
 // seam-core-schema.md §8 Decision 3.
 func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev"); err != nil {
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -539,4 +539,181 @@ func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
 	assertContainsStr(t, content, "port: 53")
 	assertContainsStr(t, content, "UDP")
 	assertContainsStr(t, content, "TCP")
+}
+
+// --- Phase 00b: capi-prerequisites tests ---
+
+// TestEnable_CAPIPhase_AbsentWithoutFlag verifies that the 00b-capi-prerequisites
+// directory is NOT emitted when --capi is not set.
+// conductor-schema.md §9, platform-schema.md §3.
+func TestEnable_CAPIPhase_AbsentWithoutFlag(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	capiDir := filepath.Join(outDir, "00b-capi-prerequisites")
+	if _, err := os.Stat(capiDir); err == nil {
+		t.Error("00b-capi-prerequisites directory must not be emitted when --capi is not set")
+	}
+}
+
+// TestEnable_CAPIPhase_PresentWithFlag verifies that the 00b-capi-prerequisites
+// directory IS emitted when --capi is set and contains all required files.
+// conductor-schema.md §9, platform-schema.md §3.
+func TestEnable_CAPIPhase_PresentWithFlag(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	capiDir := filepath.Join(outDir, "00b-capi-prerequisites")
+	info, err := os.Stat(capiDir)
+	if err != nil {
+		t.Fatalf("00b-capi-prerequisites directory missing when --capi set: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("00b-capi-prerequisites is not a directory")
+	}
+
+	for _, name := range []string{
+		"phase-meta.yaml",
+		"capi-core.yaml",
+		"capi-talos-bootstrap.yaml",
+		"capi-talos-controlplane.yaml",
+		"seam-infrastructure-crds.yaml",
+	} {
+		p := filepath.Join(capiDir, name)
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected file 00b-capi-prerequisites/%s not found: %v", name, err)
+		}
+	}
+}
+
+// TestEnable_CAPIPhase_PhaseMetaOrder verifies that the 00b-capi-prerequisites phase-meta.yaml
+// declares order 0b and sorts lexicographically between 00- and 01- phases.
+func TestEnable_CAPIPhase_PhaseMetaOrder(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00b-capi-prerequisites", "phase-meta.yaml")
+	assertContainsStr(t, content, "phase: capi-prerequisites")
+	assertContainsStr(t, content, "order: 0b")
+
+	// Lexicographic ordering: 00b- sorts after 00- and before 01-.
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	var idx00, idx00b, idx01 int = -1, -1, -1
+	for i, n := range names {
+		switch {
+		case n == "00-infrastructure-dependencies":
+			idx00 = i
+		case n == "00b-capi-prerequisites":
+			idx00b = i
+		case n == "01-guardian-bootstrap":
+			idx01 = i
+		}
+	}
+	if idx00b < 0 {
+		t.Fatal("00b-capi-prerequisites not found in directory listing")
+	}
+	if idx00 >= 0 && idx00b <= idx00 {
+		t.Errorf("00b-capi-prerequisites must sort after 00-infrastructure-dependencies")
+	}
+	if idx01 >= 0 && idx00b >= idx01 {
+		t.Errorf("00b-capi-prerequisites must sort before 01-guardian-bootstrap")
+	}
+}
+
+// TestEnable_CAPIPhase_CAPICoreContainsCRDs verifies that capi-core.yaml in the
+// 00b phase contains the expected CAPI core CRDs. platform-schema.md §3.
+func TestEnable_CAPIPhase_CAPICoreContainsCRDs(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00b-capi-prerequisites", "capi-core.yaml")
+
+	assertContainsStr(t, content, "cluster.x-k8s.io")
+	assertContainsStr(t, content, "kind: CustomResourceDefinition")
+	assertContainsStr(t, content, "clusters.cluster.x-k8s.io")
+	assertContainsStr(t, content, "machines.cluster.x-k8s.io")
+	assertContainsStr(t, content, "kind: Deployment")
+	assertContainsStr(t, content, "capi-system")
+}
+
+// TestEnable_CAPIPhase_TalosBootstrapContainsCRD verifies that capi-talos-bootstrap.yaml
+// contains the TalosConfig CRD. platform-schema.md §3.
+func TestEnable_CAPIPhase_TalosBootstrapContainsCRD(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00b-capi-prerequisites", "capi-talos-bootstrap.yaml")
+	assertContainsStr(t, content, "bootstrap.cluster.x-k8s.io")
+	assertContainsStr(t, content, "talosconfigs.bootstrap.cluster.x-k8s.io")
+	assertContainsStr(t, content, "kind: Deployment")
+}
+
+// TestEnable_CAPIPhase_TalosControlPlaneContainsCRD verifies that capi-talos-controlplane.yaml
+// contains the TalosControlPlane CRD. platform-schema.md §3.
+func TestEnable_CAPIPhase_TalosControlPlaneContainsCRD(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00b-capi-prerequisites", "capi-talos-controlplane.yaml")
+	assertContainsStr(t, content, "controlplane.cluster.x-k8s.io")
+	assertContainsStr(t, content, "taloscontrolplanes.controlplane.cluster.x-k8s.io")
+	assertContainsStr(t, content, "kind: Deployment")
+}
+
+// TestEnable_CAPIPhase_SeamInfrastructureCRDs verifies that seam-infrastructure-crds.yaml
+// contains SeamInfrastructureCluster and SeamInfrastructureMachine CRDs.
+// platform-schema.md §4 Seam Infrastructure Provider.
+func TestEnable_CAPIPhase_SeamInfrastructureCRDs(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00b-capi-prerequisites", "seam-infrastructure-crds.yaml")
+	assertContainsStr(t, content, "infrastructure.cluster.x-k8s.io")
+	assertContainsStr(t, content, "seaminfrastructureclusters.infrastructure.cluster.x-k8s.io")
+	assertContainsStr(t, content, "seaminfrastructuremachines.infrastructure.cluster.x-k8s.io")
+	assertContainsStr(t, content, "SeamInfrastructureCluster")
+	assertContainsStr(t, content, "SeamInfrastructureMachine")
+}
+
+// TestEnable_CAPIPhase_OtherPhasesStillPresent verifies that enabling --capi does not
+// remove any of the standard phases that are always present.
+func TestEnable_CAPIPhase_OtherPhasesStillPresent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", true); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	for _, phase := range []string{
+		"00-infrastructure-dependencies",
+		"01-guardian-bootstrap",
+		"02-guardian-deploy",
+		"03-platform-wrapper",
+		"04-conductor",
+		"05-post-bootstrap",
+	} {
+		if _, err := os.Stat(filepath.Join(outDir, phase)); err != nil {
+			t.Errorf("standard phase %q missing when --capi set: %v", phase, err)
+		}
+	}
 }
