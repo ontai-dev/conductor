@@ -23,12 +23,34 @@ import (
 	wrappercrd "github.com/ontai-dev/wrapper/config/crd"
 )
 
+const launchHelp = `Usage: compiler launch --output <path> [--kubeconfig <path>]
+
+Produce the CRD bundle for management cluster bootstrap (conductor-schema.md §9 Step 2).
+
+Input contract:
+  --kubeconfig  Path to kubeconfig (flag → $KUBECONFIG → ~/.kube/config).
+                Optional in output-only mode; reserved for future schema validation.
+
+Output contract:
+  --output  Directory receiving:
+              crds.yaml  — Multi-document YAML bundle of all Seam operator CRDs.
+                           Apply with: kubectl apply -f crds.yaml
+
+Compile-only: output is a manifest for human review and GitOps pipeline
+application — Compiler never applies, patches, or deletes any resource.
+`
+
 // runLaunchSubcommand parses launch-specific flags and calls compileLaunchBundle.
 // conductor-schema.md §9 Step 2.
 func runLaunchSubcommand(args []string) {
 	fs := flag.NewFlagSet("launch", flag.ExitOnError)
 	output := fs.String("output", "", "Output directory for crds.yaml (required)")
 	_ = fs.String("kubeconfig", "", "Path to kubeconfig (unused in output-only mode; reserved for future validation)")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, launchHelp)
+		fs.PrintDefaults()
+	}
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler launch: flag error: %v\n", err)

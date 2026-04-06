@@ -148,6 +148,31 @@ func allOperators(version string) []operatorSpec {
 	return result
 }
 
+const enableHelp = `Usage: compiler enable --output <path> [--version <tag>] [--kubeconfig <path>]
+
+Produce the phased deployment manifest bundle (conductor-schema.md §9 Steps 3–8).
+
+Input contract:
+  --version     Conductor/Compiler image tag (default: dev).
+  --kubeconfig  Path to kubeconfig (flag → $KUBECONFIG → ~/.kube/config).
+                Optional; reserved for compile-time readiness gate validation.
+
+Output contract:
+  --output  Directory receiving six phase subdirectories:
+              00-infrastructure-dependencies/  — CNPG operator and cluster
+              01-guardian-bootstrap/           — Guardian CRDs, RBAC, RBACProfiles
+              02-guardian-deploy/              — Guardian Deployment
+              03-platform-wrapper/             — Platform, Wrapper, seam-core
+              04-conductor/                    — Conductor CRDs, RBAC, Deployment
+              05-post-bootstrap/               — DSNS zone, CoreDNS stanza, leader election
+
+            Each phase directory contains phase-meta.yaml declaring apply order
+            and readiness gates before the next phase may proceed.
+
+Compile-only: output is a manifest bundle for human review and GitOps pipeline
+application — Compiler never applies, patches, or deletes any resource.
+`
+
 // runEnableSubcommand parses enable-specific flags and calls compileEnableBundle.
 // conductor-schema.md §9 Step 3.
 func runEnableSubcommand(args []string) {
@@ -155,6 +180,11 @@ func runEnableSubcommand(args []string) {
 	output := fs.String("output", "", "Output directory for manifest bundle (required)")
 	version := fs.String("version", "dev", "Operator image tag (e.g., v1.9.3-r1). Defaults to \"dev\".")
 	_ = fs.String("kubeconfig", "", "Path to kubeconfig (unused in output-only mode; reserved for future validation)")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, enableHelp)
+		fs.PrintDefaults()
+	}
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: flag error: %v\n", err)

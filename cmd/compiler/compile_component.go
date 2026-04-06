@@ -26,6 +26,34 @@ import (
 	"github.com/ontai-dev/conductor/internal/catalog"
 )
 
+const componentHelp = `Usage: compiler component [--component <name>...] [--descriptor <path>] [--discover] [flags]
+
+Produce RBACProfile CR YAML from the embedded catalog or a custom descriptor.
+
+Input contract:
+  Catalog mode (--component):
+    --component       Component name from the embedded catalog (repeatable).
+                      Known components: cilium, cnpg, kueue, cert-manager, local-path-provisioner
+    --namespace       Target namespace for RBACProfile CRs (required)
+    --target-clusters Comma-separated list of cluster names (required)
+    --rbac-policy-ref Name of the governing RBACPolicy (required)
+    --discover        Connect to the cluster to auto-detect deployed resources and
+                      report catalog coverage (optional; absent = fully offline)
+    --kubeconfig      Path to kubeconfig for --discover (flag → $KUBECONFIG → ~/.kube/config)
+
+  Custom mode (--descriptor):
+    --descriptor      Path to a component descriptor YAML file
+    --namespace       Target namespace for the RBACProfile CR (required)
+    --rbac-policy-ref Name of the governing RBACPolicy (required)
+
+Output contract:
+  --output  Catalog mode: directory receiving one RBACProfile YAML per component.
+            Custom mode: single file path, or stdout when --output is omitted.
+
+Compile-only: output is a manifest for human review and GitOps pipeline
+application — Compiler never applies, patches, or deletes any resource.
+`
+
 // runComponentSubcommand parses flags and dispatches to the appropriate mode.
 // conductor-schema.md §16.
 func runComponentSubcommand(args []string) {
@@ -53,6 +81,11 @@ func runComponentSubcommand(args []string) {
 		"Name of the governing RBACPolicy (required for catalog and descriptor modes)")
 	kubeconfig := fs.String("kubeconfig", "",
 		"Path to kubeconfig for --discover (default: $KUBECONFIG or ~/.kube/config)")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, componentHelp)
+		fs.PrintDefaults()
+	}
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler component: flag error: %v\n", err)

@@ -26,6 +26,30 @@ import (
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
 
+const maintenanceHelp = `Usage: compiler maintenance --operation <type> --cluster <name> --output <path> [flags]
+
+Compile a MaintenanceBundle CR with pre-resolved scheduling context.
+
+Input contract:
+  --operation   Maintenance operation type: drain, upgrade, etcd-backup, machineconfig-rotation
+  --cluster     TalosCluster resource name
+  --targets     Comma-separated list of target node names (optional)
+  --namespace   Namespace for the MaintenanceBundle CR (default: seam-system)
+  --kubeconfig  Path to kubeconfig (flag → $KUBECONFIG → ~/.kube/config).
+                Required: Compiler reads the live cluster to resolve the operator
+                leader node and validate target nodes at compile time.
+
+Output contract:
+  --output  Directory receiving:
+              <cluster>-<operation>.yaml  — MaintenanceBundle CR with pre-encoded
+                                            scheduling constraints. Neither Platform
+                                            nor Conductor perform cluster queries
+                                            at execution time.
+
+Compile-only: output is a manifest for human review and GitOps pipeline
+application — Compiler never applies, patches, or deletes any resource.
+`
+
 // runMaintenanceSubcommand parses maintenance-specific flags and calls compileMaintenance.
 func runMaintenanceSubcommand(args []string) {
 	fs := flag.NewFlagSet("maintenance", flag.ExitOnError)
@@ -35,6 +59,11 @@ func runMaintenanceSubcommand(args []string) {
 	namespace := fs.String("namespace", "seam-system", "Namespace for the MaintenanceBundle CR (default: seam-system)")
 	kubeconfig := fs.String("kubeconfig", "", "Path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 	output := fs.String("output", "", "Path to output directory (required)")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, maintenanceHelp)
+		fs.PrintDefaults()
+	}
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler maintenance: flag error: %v\n", err)
