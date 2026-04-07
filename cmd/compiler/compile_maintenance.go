@@ -101,15 +101,9 @@ func runMaintenanceSubcommand(args []string) {
 // compileMaintenance resolves cluster scheduling context and produces a
 // MaintenanceBundle CR YAML. conductor-schema.md §9.
 func compileMaintenance(operation string, targets []string, clusterName, namespace, kubeconfigPath, output string) error {
-	op := platformv1alpha1.MaintenanceBundleOperation(operation)
-	switch op {
-	case platformv1alpha1.MaintenanceBundleOperationDrain,
-		platformv1alpha1.MaintenanceBundleOperationUpgrade,
-		platformv1alpha1.MaintenanceBundleOperationEtcdBackup,
-		platformv1alpha1.MaintenanceBundleOperationMachineConfigRotation:
-		// valid
-	default:
-		return fmt.Errorf("unknown operation %q: must be one of drain, upgrade, etcd-backup, machineconfig-rotation", operation)
+	op, err := validateMaintenanceOperation(operation)
+	if err != nil {
+		return err
 	}
 
 	// Resolve kubeconfig path: flag → $KUBECONFIG → ~/.kube/config.
@@ -121,12 +115,40 @@ func compileMaintenance(operation string, targets []string, clusterName, namespa
 		return fmt.Errorf("build Kubernetes client: %w", err)
 	}
 
+	return compileMaintenanceCore(op, targets, clusterName, namespace, k8sClient, output)
+}
+
+// validateMaintenanceOperation validates the operation string and returns the typed constant.
+// Returns an error if the operation is not one of the four supported values.
+func validateMaintenanceOperation(operation string) (platformv1alpha1.MaintenanceBundleOperation, error) {
+	op := platformv1alpha1.MaintenanceBundleOperation(operation)
+	switch op {
+	case platformv1alpha1.MaintenanceBundleOperationDrain,
+		platformv1alpha1.MaintenanceBundleOperationUpgrade,
+		platformv1alpha1.MaintenanceBundleOperationEtcdBackup,
+		platformv1alpha1.MaintenanceBundleOperationMachineConfigRotation:
+		return op, nil
+	default:
+		return "", fmt.Errorf("unknown operation %q: must be one of drain, upgrade, etcd-backup, machineconfig-rotation", operation)
+	}
+}
+
+// compileMaintenanceCore is the testable core of compileMaintenance. It accepts an
+// injected kubernetes.Interface so tests can use a fake client without cluster access.
+// No API calls are made against any real cluster — all calls go through k8s.
+func compileMaintenanceCore(
+	op platformv1alpha1.MaintenanceBundleOperation,
+	targets []string,
+	clusterName, namespace string,
+	k8s kubernetes.Interface,
+	output string,
+) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve operator leader node from platform-leader Lease in seam-system.
 	// conductor-schema.md §13: Compiler fails fast if the Lease is absent or has no holder.
-	leaderNode, err := resolveLeaderNodeFromCluster(ctx, k8sClient)
+	leaderNode, err := resolveLeaderNodeFromCluster(ctx, k8s)
 	if err != nil {
 		return fmt.Errorf("resolve operator leader node: %w", err)
 	}
@@ -135,7 +157,7 @@ func compileMaintenance(operation string, targets []string, clusterName, namespa
 	// platform-schema.md §10: A MaintenanceBundle is never committed without a valid S3 reference.
 	var s3SecretRef *corev1.SecretReference
 	if op == platformv1alpha1.MaintenanceBundleOperationEtcdBackup {
-		s3SecretRef, err = resolveS3SecretForCompile(ctx, k8sClient)
+		s3SecretRef, err = resolveS3SecretForCompile(ctx, k8s)
 		if err != nil {
 			return fmt.Errorf("S3 config validation: %w", err)
 		}
@@ -143,7 +165,7 @@ func compileMaintenance(operation string, targets []string, clusterName, namespa
 
 	// Validate target nodes exist in the cluster.
 	if len(targets) > 0 {
-		if err := validateTargetNodes(ctx, k8sClient, targets); err != nil {
+		if err := validateTargetNodes(ctx, k8s, targets); err != nil {
 			return fmt.Errorf("target node validation: %w", err)
 		}
 	}
@@ -155,7 +177,7 @@ func compileMaintenance(operation string, targets []string, clusterName, namespa
 			Kind:       "MaintenanceBundle",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterName + "-" + operation,
+			Name:      clusterName + "-" + string(op),
 			Namespace: namespace,
 		},
 		Spec: platformv1alpha1.MaintenanceBundleSpec{
@@ -203,7 +225,7 @@ func buildK8sClient(kubeconfigPath string) (*kubernetes.Clientset, error) {
 // resolves the holder pod, and returns the pod's node name.
 // Fails fast if the Lease is absent or has no holder — a safety gate.
 // conductor-schema.md §9, CP-INV-007.
-func resolveLeaderNodeFromCluster(ctx context.Context, k8s *kubernetes.Clientset) (string, error) {
+func resolveLeaderNodeFromCluster(ctx context.Context, k8s kubernetes.Interface) (string, error) {
 	lease, err := k8s.CoordinationV1().Leases("seam-system").Get(ctx, "platform-leader", metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -237,7 +259,7 @@ func resolveLeaderNodeFromCluster(ctx context.Context, k8s *kubernetes.Clientset
 // exists in seam-system. Returns the SecretReference to embed in the MaintenanceBundle.
 // Fails fast if the Secret is absent — a MaintenanceBundle for etcd-backup must have
 // a valid S3 reference. platform-schema.md §10.
-func resolveS3SecretForCompile(ctx context.Context, k8s *kubernetes.Clientset) (*corev1.SecretReference, error) {
+func resolveS3SecretForCompile(ctx context.Context, k8s kubernetes.Interface) (*corev1.SecretReference, error) {
 	const secretName = "seam-etcd-backup-config"
 	const secretNS = "seam-system"
 	_, err := k8s.CoreV1().Secrets(secretNS).Get(ctx, secretName, metav1.GetOptions{})
@@ -252,7 +274,7 @@ func resolveS3SecretForCompile(ctx context.Context, k8s *kubernetes.Clientset) (
 
 // validateTargetNodes checks that each listed node name exists in the cluster.
 // Compile-time validation per conductor-schema.md §9.
-func validateTargetNodes(ctx context.Context, k8s *kubernetes.Clientset, targets []string) error {
+func validateTargetNodes(ctx context.Context, k8s kubernetes.Interface, targets []string) error {
 	for _, nodeName := range targets {
 		_, err := k8s.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
