@@ -299,6 +299,32 @@ bootstrap:
 	assertContainsStr(t, content, "ghcr.io/siderolabs/installer:v1.7.0")
 }
 
+// WS2 — Bootstrap malformed input validation tests.
+
+// TestBootstrap_MissingNameFieldYieldsDescriptiveError verifies that a
+// ClusterInput without a name field produces an error that mentions "name".
+// conductor-schema.md §9: Compiler fails fast on missing required fields.
+func TestBootstrap_MissingNameFieldYieldsDescriptiveError(t *testing.T) {
+	const input = `
+mode: bootstrap
+bootstrap:
+  controlPlaneEndpoint: 10.20.0.10
+  talosVersion: v1.7.0
+  nodes:
+    - hostname: cp-0
+      ip: 10.20.0.11
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	err := compileBootstrap(inputPath, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for missing name field; got nil")
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Errorf("error %q does not mention 'name'", err.Error())
+	}
+}
+
 // writeInputFile writes YAML content to a temp file and returns its path.
 func writeInputFile(t *testing.T, content string) string {
 	t.Helper()

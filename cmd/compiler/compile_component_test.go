@@ -333,3 +333,66 @@ func assertContainsStr(t *testing.T, s, substr string) {
 		t.Errorf("output does not contain %q\nactual output:\n%s", substr, s)
 	}
 }
+
+// WS2 — Component malformed input validation tests.
+
+// TestComponent_BothComponentAndDescriptorFails verifies that specifying both
+// --component and --descriptor returns an error. The two flags are mutually
+// exclusive: catalog mode and descriptor mode cannot be combined.
+// conductor-schema.md §16.
+func TestComponent_BothComponentAndDescriptorFails(t *testing.T) {
+	err := validateComponentFlagConflict([]string{"cilium"}, "/some/descriptor.yaml")
+	if err == nil {
+		t.Fatal("expected error for combined --component + --descriptor; got nil")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error %q does not mention 'mutually exclusive'", err.Error())
+	}
+}
+
+// TestComponent_ComponentAloneNoConflict verifies that --component alone
+// passes the mutual exclusion check.
+func TestComponent_ComponentAloneNoConflict(t *testing.T) {
+	if err := validateComponentFlagConflict([]string{"cilium"}, ""); err != nil {
+		t.Errorf("expected nil for --component alone; got: %v", err)
+	}
+}
+
+// TestComponent_DescriptorAloneNoConflict verifies that --descriptor alone
+// passes the mutual exclusion check.
+func TestComponent_DescriptorAloneNoConflict(t *testing.T) {
+	if err := validateComponentFlagConflict(nil, "/some/descriptor.yaml"); err != nil {
+		t.Errorf("expected nil for --descriptor alone; got: %v", err)
+	}
+}
+
+// WS2 — Unwritable output path tests.
+
+// TestAnySubcommand_UnwritableOutputPathFails verifies that a subcommand fails
+// with a filesystem error (not a panic) when the output path is unwritable.
+// Uses compilePackBuild with a valid input but an output path where the parent
+// is itself a regular file (ENOTDIR) — reliable across root and non-root.
+func TestAnySubcommand_UnwritableOutputPathFails(t *testing.T) {
+	// Create a regular file that will serve as the "parent directory".
+	dir := t.TempDir()
+	blockingFile := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blockingFile, []byte("blocking"), 0644); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+
+	// Output path inside the blocking file (impossible on all POSIX systems).
+	unwritableOutput := filepath.Join(blockingFile, "subdir")
+
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/my-pack
+digest: sha256:abc123
+`
+	inputPath := writePackBuildInput(t, input)
+	err := compilePackBuild(inputPath, unwritableOutput)
+	if err == nil {
+		t.Fatal("expected error for unwritable output path; got nil")
+	}
+	// Must be a filesystem error, not a panic. Error is non-nil — that's the contract.
+}

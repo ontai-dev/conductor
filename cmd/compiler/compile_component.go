@@ -92,6 +92,12 @@ func runComponentSubcommand(args []string) {
 		os.Exit(1)
 	}
 
+	// Reject mutually exclusive flag combinations before dispatching.
+	if err := validateComponentFlagConflict(componentFlags, *descriptor); err != nil {
+		fmt.Fprintf(os.Stderr, "compiler component: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Dispatch to operating mode.
 	switch {
 	case *discover:
@@ -386,6 +392,16 @@ func parseClusters(raw string) []string {
 }
 
 // multiStringFlag is a flag.Value that collects multiple --flag values into a slice.
+// validateComponentFlagConflict returns an error when --component and --descriptor
+// are both specified. The two flags select mutually exclusive modes.
+// conductor-schema.md §16.
+func validateComponentFlagConflict(components []string, descriptor string) error {
+	if len(components) > 0 && descriptor != "" {
+		return fmt.Errorf("--component and --descriptor are mutually exclusive: use one or the other")
+	}
+	return nil
+}
+
 type multiStringFlag []string
 
 func (f *multiStringFlag) String() string {
