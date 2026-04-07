@@ -213,11 +213,31 @@ func (l *SnapshotPullLoop) patchLocalDegradedSecurityState(ctx context.Context, 
 	return nil
 }
 
-// parseSnapshotSpec extracts the version string and principalPermissions from
-// a PermissionSnapshot spec map. Returns store-typed entries via JSON round-trip.
+// parseSnapshotSpec extracts the version string and permission entries from a
+// PermissionSnapshot spec map.
+//
+// Priority:
+//  1. spec.subjects (formal CRD field, guardian schema §7) — preferred path.
+//  2. spec.principalPermissions (legacy compat field) — fallback.
+//
+// Returns store-typed entries via JSON round-trip.
 func (l *SnapshotPullLoop) parseSnapshotSpec(spec map[string]interface{}) ([]permissionservice.PrincipalPermissionEntry, string, error) {
 	version, _ := spec["version"].(string)
 
+	// Prefer spec.subjects — the formal CRD field introduced in guardian schema §7.
+	// Each SubjectEntry maps to one PrincipalPermissionEntry:
+	//   subjectName → PrincipalRef
+	//   permissions[] × (apiGroups × resources) → AllowedOperation
+	if rawSubjects, ok := spec["subjects"]; ok && rawSubjects != nil {
+		entries, err := parseSubjectsField(rawSubjects)
+		if err != nil {
+			return nil, version, fmt.Errorf("parse spec.subjects: %w", err)
+		}
+		return entries, version, nil
+	}
+
+	// Fallback: spec.principalPermissions for snapshots generated before the
+	// formal SubjectEntry schema was adopted.
 	raw, ok := spec["principalPermissions"]
 	if !ok {
 		return nil, version, nil
@@ -233,4 +253,65 @@ func (l *SnapshotPullLoop) parseSnapshotSpec(spec map[string]interface{}) ([]per
 		return nil, version, fmt.Errorf("unmarshal principalPermissions: %w", err)
 	}
 	return entries, version, nil
+}
+
+// parseSubjectsField converts the unstructured spec.subjects value from a
+// PermissionSnapshot CR into store-typed PrincipalPermissionEntry values.
+//
+// Formal CRD schema (guardian schema §7):
+//
+//	spec.subjects[].subjectName     → PrincipalRef
+//	spec.subjects[].permissions[].apiGroups  ([]string, "" = core group)
+//	spec.subjects[].permissions[].resources  ([]string)
+//	spec.subjects[].permissions[].verbs      ([]string)
+//
+// Each (apiGroup, resource) pair in a PermissionEntry becomes one AllowedOperation.
+// If apiGroups is empty, the empty string "" (core API group) is used.
+func parseSubjectsField(raw interface{}) ([]permissionservice.PrincipalPermissionEntry, error) {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("marshal subjects: %w", err)
+	}
+
+	type permEntry struct {
+		APIGroups     []string `json:"apiGroups"`
+		Resources     []string `json:"resources"`
+		Verbs         []string `json:"verbs"`
+		ResourceNames []string `json:"resourceNames"`
+	}
+	type subjectEntry struct {
+		SubjectName string      `json:"subjectName"`
+		SubjectKind string      `json:"subjectKind"`
+		Namespace   string      `json:"namespace"`
+		Permissions []permEntry `json:"permissions"`
+	}
+	var subjects []subjectEntry
+	if err := json.Unmarshal(encoded, &subjects); err != nil {
+		return nil, fmt.Errorf("unmarshal subjects: %w", err)
+	}
+
+	entries := make([]permissionservice.PrincipalPermissionEntry, 0, len(subjects))
+	for _, s := range subjects {
+		entry := permissionservice.PrincipalPermissionEntry{
+			PrincipalRef: s.SubjectName,
+		}
+		for _, perm := range s.Permissions {
+			apiGroups := perm.APIGroups
+			if len(apiGroups) == 0 {
+				apiGroups = []string{""}
+			}
+			for _, apiGroup := range apiGroups {
+				for _, resource := range perm.Resources {
+					entry.AllowedOperations = append(entry.AllowedOperations,
+						permissionservice.AllowedOperation{
+							APIGroup: apiGroup,
+							Resource: resource,
+							Verbs:    perm.Verbs,
+						})
+				}
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
