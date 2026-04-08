@@ -2,7 +2,7 @@
 IMAGE_REGISTRY ?= registry.ontai.dev/ontai-dev
 TAG            ?= dev
 
-.PHONY: build test e2e lint lint-docs install-hooks clean docker-build
+.PHONY: build test e2e lint lint-docs lint-images install-hooks clean docker-build docker-push
 
 build:
 	go build ./...
@@ -16,7 +16,7 @@ e2e:
 	TENANT_CLUSTER_NAME=$(TENANT_CLUSTER_NAME) \
 	go test ./test/e2e/... -v -timeout 30m
 
-lint: lint-docs install-hooks
+lint: lint-docs lint-images install-hooks
 	golangci-lint run ./...
 
 lint-docs:
@@ -53,14 +53,36 @@ clean:
 #        make docker-build TAG=dev IMAGE_REGISTRY=10.20.0.1:5000/ontai-dev
 docker-build:
 	docker build \
+		--platform linux/amd64 \
 		-f Dockerfile.compiler \
 		-t $(IMAGE_REGISTRY)/compiler:$(TAG) \
 		.
 	docker build \
+		--platform linux/amd64 \
 		-f Dockerfile.execute \
 		-t $(IMAGE_REGISTRY)/conductor-execute:$(TAG) \
 		.
 	docker build \
+		--platform linux/amd64 \
 		-f Dockerfile.agent \
 		-t $(IMAGE_REGISTRY)/conductor:$(TAG) \
 		.
+
+# docker-push pushes all three already-built conductor images to the registry.
+docker-push:
+	docker push $(IMAGE_REGISTRY)/compiler:$(TAG)
+	docker push $(IMAGE_REGISTRY)/conductor-execute:$(TAG)
+	docker push $(IMAGE_REGISTRY)/conductor:$(TAG)
+
+# lint-images verifies all three conductor images exist in the local OCI registry.
+lint-images:
+	@echo ">>> lint-images: checking conductor images in registry"
+	@for img in compiler conductor-execute conductor; do \
+		status=$$(curl -fsS -o /dev/null -w "%{http_code}" \
+			"http://10.20.0.1:5000/v2/ontai-dev/$$img/manifests/$(TAG)" 2>/dev/null); \
+		if [ "$$status" != "200" ]; then \
+			echo "FAIL: 10.20.0.1:5000/ontai-dev/$$img:$(TAG) not found in registry (HTTP $$status)"; \
+			exit 1; \
+		fi; \
+		echo "PASS: 10.20.0.1:5000/ontai-dev/$$img:$(TAG) present in registry"; \
+	done
