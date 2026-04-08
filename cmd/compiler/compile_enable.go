@@ -104,38 +104,43 @@ type phaseMeta struct {
 	ApplyOrder []string `json:"applyOrder" yaml:"applyOrder"`
 }
 
+// defaultRegistry is the default OCI registry prefix for all operator images
+// produced by compiler enable. Points to the local lab registry. Override via
+// the --registry flag to target a different registry (e.g., registry.ontai.dev/ontai-dev).
+const defaultRegistry = "10.20.0.1:5000/ontai-dev"
+
 // guardianOp returns the operatorSpec for the Guardian operator.
-func guardianOp(version string) operatorSpec {
+func guardianOp(version, registry string) operatorSpec {
 	return operatorSpec{
 		Name:                "guardian",
 		Namespace:           "seam-system",
-		Image:               "registry.ontai.dev/ontai-dev/guardian:" + version,
+		Image:               registry + "/guardian:" + version,
 		ServiceAccount:      "guardian",
 		LeaderElectionLease: "guardian-leader",
 	}
 }
 
 // platformWrapperOps returns operatorSpecs for Platform, Wrapper, and seam-core.
-func platformWrapperOps(version string) []operatorSpec {
+func platformWrapperOps(version, registry string) []operatorSpec {
 	return []operatorSpec{
 		{
 			Name:                "platform",
 			Namespace:           "seam-system",
-			Image:               "registry.ontai.dev/ontai-dev/platform:" + version,
+			Image:               registry + "/ont-platform:" + version,
 			ServiceAccount:      "platform",
 			LeaderElectionLease: "platform-leader",
 		},
 		{
 			Name:                "wrapper",
 			Namespace:           "seam-system",
-			Image:               "registry.ontai.dev/ontai-dev/wrapper:" + version,
+			Image:               registry + "/ont-infra:" + version,
 			ServiceAccount:      "wrapper",
 			LeaderElectionLease: "wrapper-leader",
 		},
 		{
 			Name:                "seam-core",
 			Namespace:           "seam-system",
-			Image:               "registry.ontai.dev/ontai-dev/seam-core:" + version,
+			Image:               registry + "/seam-core:" + version,
 			ServiceAccount:      "seam-core",
 			LeaderElectionLease: "seam-core-leader",
 		},
@@ -143,11 +148,11 @@ func platformWrapperOps(version string) []operatorSpec {
 }
 
 // conductorOp returns the operatorSpec for the Conductor operator.
-func conductorOp(version string) operatorSpec {
+func conductorOp(version, registry string) operatorSpec {
 	return operatorSpec{
 		Name:                "conductor",
 		Namespace:           "ont-system",
-		Image:               "registry.ontai.dev/ontai-dev/conductor:" + version,
+		Image:               registry + "/conductor:" + version,
 		ServiceAccount:      "conductor",
 		LeaderElectionLease: "conductor-management",
 	}
@@ -155,18 +160,21 @@ func conductorOp(version string) operatorSpec {
 
 // allOperators returns all operator specs in their original flat order (used
 // for leader election leases in phase 5 which covers all operators).
-func allOperators(version string) []operatorSpec {
-	result := []operatorSpec{conductorOp(version), guardianOp(version)}
-	result = append(result, platformWrapperOps(version)...)
+func allOperators(version, registry string) []operatorSpec {
+	result := []operatorSpec{conductorOp(version, registry), guardianOp(version, registry)}
+	result = append(result, platformWrapperOps(version, registry)...)
 	return result
 }
 
-const enableHelp = `Usage: compiler enable --output <path> [--version <tag>] [--capi] [--kubeconfig <path>]
+const enableHelp = `Usage: compiler enable --output <path> [--version <tag>] [--registry <prefix>] [--capi] [--kubeconfig <path>]
 
 Produce the phased deployment manifest bundle (conductor-schema.md §9 Steps 3–8).
 
 Input contract:
   --version     Conductor/Compiler image tag (default: dev).
+  --registry    OCI registry prefix for all operator images (default: 10.20.0.1:5000/ontai-dev).
+                Images are constructed as {registry}/{operator}:{version}.
+                Override for production: --registry registry.ontai.dev/ontai-dev
   --capi        Emit the 00b-capi-prerequisites phase containing CAPI core operator,
                 Talos bootstrap provider, Talos control plane provider, and Seam
                 Infrastructure CRDs. Required for clusters using the CAPI lifecycle
@@ -198,6 +206,7 @@ func runEnableSubcommand(args []string) {
 	fs := flag.NewFlagSet("enable", flag.ExitOnError)
 	output := fs.String("output", "", "Output directory for manifest bundle (required)")
 	version := fs.String("version", "dev", "Operator image tag (e.g., v1.9.3-r1). Defaults to \"dev\".")
+	registry := fs.String("registry", defaultRegistry, "OCI registry prefix for operator images (default: 10.20.0.1:5000/ontai-dev).")
 	withCAPI := fs.Bool("capi", false, "Emit 00b-capi-prerequisites phase (CAPI core, Talos providers, Seam infra CRDs).")
 	_ = fs.String("kubeconfig", "", "Path to kubeconfig (unused in output-only mode; reserved for future validation)")
 
@@ -216,7 +225,7 @@ func runEnableSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileEnableBundle(*output, *version, *withCAPI); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *withCAPI); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -225,18 +234,22 @@ func runEnableSubcommand(args []string) {
 // compileEnableBundle generates the phased management cluster deployment manifest
 // bundle and writes it to the output directory.
 //
+// registry is the OCI registry prefix for all operator images (e.g.,
+// "10.20.0.1:5000/ontai-dev"). Images are constructed as {registry}/{operator}:{version}.
+// Pass defaultRegistry to use the default local lab registry.
+//
 // When withCAPI is true the 00b-capi-prerequisites phase is emitted between phase 0
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version string, withCAPI bool) error {
+func compileEnableBundle(output, version, registry string, withCAPI bool) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	gdn := guardianOp(version)
-	pwOps := platformWrapperOps(version)
-	cdt := conductorOp(version)
+	gdn := guardianOp(version, registry)
+	pwOps := platformWrapperOps(version, registry)
+	cdt := conductorOp(version, registry)
 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
@@ -261,7 +274,7 @@ func compileEnableBundle(output, version string, withCAPI bool) error {
 	if err := writePhase4Conductor(output, cdt); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
-	if err := writePhase5PostBootstrap(output, allOperators(version)); err != nil {
+	if err := writePhase5PostBootstrap(output, allOperators(version, registry)); err != nil {
 		return fmt.Errorf("phase 5 post-bootstrap: %w", err)
 	}
 
