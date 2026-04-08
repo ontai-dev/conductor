@@ -9,8 +9,7 @@
 //	<output>/
 //	  00-infrastructure-dependencies/
 //	    phase-meta.yaml         — phase metadata and apply order
-//	    cnpg-operator.yaml      — CNPG operator manifests (Namespace, CRDs, SA, RBAC, Deployment)
-//	    cnpg-cluster.yaml       — CNPG Cluster CR for Guardian database (guardian-db in seam-system)
+//	    prerequisites.yaml      — ConfigMap listing what the operator must provision before phase 1
 //	  00a-namespaces/
 //	    phase-meta.yaml         — phase metadata and apply order
 //	    namespaces.yaml         — seam-system (webhook-mode=exempt, privileged PSA) and ont-system (privileged PSA)
@@ -49,14 +48,12 @@
 // Conductor Deployment carries CONDUCTOR_ROLE=management per §15.
 //
 // conductor-schema.md §9 Step 3, §15 Role Declaration Contract.
-// guardian-schema.md §6 (Seam operator RBACProfiles), §16 CNPG Deployment Contract.
+// guardian-schema.md §6 (Seam operator RBACProfiles).
 // guardian 25c9e93 WS3: namespace-labels.yaml satisfies CheckBootstrapLabels contract.
 package main
 
 import (
 	"bytes"
-	crand "crypto/rand"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -71,7 +68,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/internal/catalog/capi"
-	"github.com/ontai-dev/conductor/internal/catalog/cnpg"
 )
 
 // operatorSpec declares one Seam operator for enable-phase manifest generation.
@@ -284,187 +280,92 @@ func compileEnableBundle(output, version, registry string, withCAPI bool) error 
 // --- Phase 0: infrastructure-dependencies ---
 
 // writePhase0InfrastructureDependencies writes the 00-infrastructure-dependencies
-// phase directory. This phase provisions the CNPG operator and the guardian-db
-// CNPG Cluster CR before any Seam operator is deployed.
+// phase directory. This phase declares the prerequisites the operator must satisfy
+// before the enable bundle pipeline may proceed to phase 1.
 //
-// Phase 0 is the prerequisite that resolves the CNPG dependency: Guardian's startup
-// migration runner connects to CNPG before registering any controller. Phase 0 must
-// reach readiness (CNPG Cluster ready) before phase 1 may begin.
-// guardian-schema.md §16 CNPG Deployment Contract, conductor-schema.md §9.
+// The compiler does not provision these dependencies — that is the operator's
+// responsibility. This phase produces a human-readable declaration of what must
+// exist and be healthy before Guardian can start.
+//
+// conductor-schema.md §9.
 func writePhase0InfrastructureDependencies(output string) error {
 	dir := filepath.Join(output, "00-infrastructure-dependencies")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	// guardian-db-credentials.yaml must precede cnpg-cluster.yaml — the CNPG
-	// Cluster CR references it as the superuserSecret.name. The credentials
-	// Secret must exist in seam-system before CNPG reconciles the Cluster CR.
-	files := []string{"cnpg-operator.yaml", "guardian-db-credentials.yaml", "cnpg-cluster.yaml"}
+	files := []string{"prerequisites.yaml"}
 
 	meta := phaseMeta{
 		Phase: "infrastructure-dependencies",
 		Order: 0,
-		ReadinessGate: "Wait for the CNPG Cluster 'guardian-db' in seam-system to reach " +
-			"Ready status before applying phase 1 " +
-			"(kubectl get cluster guardian-db -n seam-system). " +
-			"The CNPG operator Deployment must be Available in cnpg-system. " +
-			"Guardian's startup migration runner connects to CNPG before registering " +
-			"any controller — phase 0 must be fully operational before Guardian starts. " +
-			"guardian-schema.md §16 CNPG Deployment Contract.",
+		ReadinessGate: "All prerequisites listed in prerequisites.yaml must be satisfied " +
+			"by the operator before applying phase 1 (01-guardian-bootstrap). " +
+			"Verify: CNPG operator running in cnpg-system, guardian-db Cluster Ready " +
+			"in seam-system, guardian-db-credentials Secret present in seam-system, " +
+			"Kueue ClusterQueue and LocalQueue CRDs registered, default StorageClass present.",
 		ApplyOrder: files,
 	}
 	if err := writePhaseMeta(dir, meta); err != nil {
 		return err
 	}
 
-	// cnpg-operator.yaml — embedded CNPG v1.24.0 operator manifests.
-	if err := writeCNPGOperatorManifest(dir); err != nil {
-		return err
-	}
-
-	// guardian-db-credentials.yaml — CNPG superuser Secret (fresh password per run).
-	if err := writeGuardianDBCredentials(dir); err != nil {
-		return err
-	}
-
-	// cnpg-cluster.yaml — CNPG Cluster CR for Guardian's database.
-	if err := writeCNPGClusterCR(dir); err != nil {
-		return err
-	}
-
-	return nil
+	return writePrerequisitesConfigMap(dir)
 }
 
-// writeGuardianDBCredentials writes guardian-db-credentials.yaml — the CNPG
-// superuser Secret for the guardian-db cluster. A cryptographically random
-// 32-byte password is generated fresh on each compiler enable run and
-// base64url-encoded. The operator must store the output Secret securely
-// before applying it to the cluster — the password is not recoverable after
-// the enable run completes.
+// writePrerequisitesConfigMap writes prerequisites.yaml — a ConfigMap in seam-system
+// named seam-platform-prerequisites that documents what the operator must provision
+// before phase 1 (01-guardian-bootstrap) may be applied.
 //
-// The Secret must be applied to seam-system BEFORE the CNPG Cluster CR
-// (cnpg-cluster.yaml) because the Cluster CR references it as superuserSecret.
+// The ConfigMap is informational: the pipeline applies it as a record of operator
+// intent and verifies it exists before advancing. It does not create the listed
+// resources — that is the operator's responsibility.
 //
-// guardian-schema.md §16 CNPG Deployment Contract.
-func writeGuardianDBCredentials(dir string) error {
-	// Generate cryptographically random 32-byte password.
-	raw := make([]byte, 32)
-	if _, err := crand.Read(raw); err != nil {
-		return fmt.Errorf("generate random password for guardian-db-credentials: %w", err)
-	}
-	password := base64.RawURLEncoding.EncodeToString(raw)
-
-	secret := map[string]interface{}{
+// conductor-schema.md §9.
+func writePrerequisitesConfigMap(dir string) error {
+	cm := map[string]interface{}{
 		"apiVersion": "v1",
-		"kind":       "Secret",
+		"kind":       "ConfigMap",
 		"metadata": map[string]interface{}{
-			"name":      "guardian-db-credentials",
+			"name":      "seam-platform-prerequisites",
 			"namespace": "seam-system",
 			"labels": map[string]string{
-				"app.kubernetes.io/name":      "guardian-db",
-				"app.kubernetes.io/component": "database",
-				"ontai.dev/managed-by":        "compiler",
-			},
-		},
-		"type": "Opaque",
-		"stringData": map[string]string{
-			"username": "postgres",
-			"password": password,
-		},
-	}
-
-	data, err := yaml.Marshal(secret)
-	if err != nil {
-		return fmt.Errorf("marshal guardian-db-credentials Secret: %w", err)
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString("# CNPG superuser Secret — guardian-db-credentials in seam-system\n")
-	buf.WriteString("# Generated by: compiler enable (phase 0 infrastructure-dependencies)\n")
-	buf.WriteString("# Password generated fresh on each compiler enable run via crypto/rand.\n")
-	buf.WriteString("# Store this Secret securely before applying — it is not recoverable after this run.\n")
-	buf.WriteString("# Apply BEFORE cnpg-cluster.yaml: the Cluster CR references this Secret as superuserSecret.\n")
-	buf.WriteString("# guardian-schema.md §16 CNPG Deployment Contract.\n")
-	buf.WriteString("---\n")
-	buf.Write(data)
-
-	return os.WriteFile(filepath.Join(dir, "guardian-db-credentials.yaml"), buf.Bytes(), 0644)
-}
-
-// writeCNPGOperatorManifest writes the embedded CNPG operator manifest to
-// cnpg-operator.yaml in the phase directory. The manifest is pinned to
-// cnpg.Version and embedded at compile time — no runtime fetch occurs.
-// conductor-schema.md §9, guardian-schema.md §16.
-func writeCNPGOperatorManifest(dir string) error {
-	var buf bytes.Buffer
-	buf.WriteString("# CloudNativePG Operator Manifests — pinned to " + cnpg.Version + "\n")
-	buf.WriteString("# Generated by: compiler enable (phase 0 infrastructure-dependencies)\n")
-	buf.WriteString("# Embedded at compile time from internal/catalog/cnpg/operator.yaml.\n")
-	buf.WriteString("# conductor-schema.md §9, guardian-schema.md §16 CNPG Deployment Contract.\n")
-	buf.Write(cnpg.OperatorManifest)
-	return os.WriteFile(filepath.Join(dir, "cnpg-operator.yaml"), buf.Bytes(), 0644)
-}
-
-// writeCNPGClusterCR writes the CNPG Cluster CR for Guardian's database to
-// cnpg-cluster.yaml in the phase directory.
-//
-// The Cluster CR:
-//   - name: guardian-db, namespace: seam-system (Guardian's operating namespace)
-//   - instances: 3 (HA deployment for management Guardian)
-//   - storage size: 50Gi per instance
-//   - superuserSecret.name: guardian-db-credentials (read by Guardian startup migration runner)
-//   - annotation: governance.infrastructure.ontai.dev/owner=seam-platform
-//
-// guardian-schema.md §16 CNPG Deployment Contract.
-func writeCNPGClusterCR(dir string) error {
-	cluster := map[string]interface{}{
-		"apiVersion": "postgresql.cnpg.io/v1",
-		"kind":       "Cluster",
-		"metadata": map[string]interface{}{
-			"name":      "guardian-db",
-			"namespace": "seam-system",
-			"labels": map[string]string{
-				"app.kubernetes.io/name":      "guardian-db",
-				"app.kubernetes.io/component": "database",
-				"ontai.dev/managed-by":        "compiler",
+				"seam.ontai.dev/phase": "prerequisites",
 			},
 			"annotations": map[string]string{
-				"governance.infrastructure.ontai.dev/owner": "seam-platform",
+				"seam.ontai.dev/apply-before": "01-guardian-bootstrap",
+				"seam.ontai.dev/description":  "Prerequisites that must be satisfied by the operator before applying phase 01-guardian-bootstrap.",
 			},
 		},
-		"spec": map[string]interface{}{
-			"instances": 3,
-			"storage": map[string]interface{}{
-				"size": "50Gi",
-			},
-			"superuserSecret": map[string]interface{}{
-				"name": "guardian-db-credentials",
-			},
-			"bootstrap": map[string]interface{}{
-				"initdb": map[string]interface{}{
-					"database": "guardian",
-					"owner":    "guardian",
-				},
-			},
+		"data": map[string]string{
+			"database": "CNPG v1.25 or later. " +
+				"CRD clusters.postgresql.cnpg.io must exist. " +
+				"One Cluster named guardian-db in seam-system must be Ready. " +
+				"A Secret named guardian-db-credentials must exist in seam-system " +
+				"with keys username and password.",
+			"job-scheduler": "Kueue v0.16.2 or later. " +
+				"ClusterQueue and LocalQueue CRDs must exist and be registered.",
+			"certificate-manager": "cert-manager v1.13 or later if webhook TLS is managed externally. " +
+				"Optional if self-signed certificates are used.",
+			"storage": "A default StorageClass must exist for CNPG PVCs.",
 		},
 	}
 
-	data, err := yaml.Marshal(cluster)
+	data, err := yaml.Marshal(cm)
 	if err != nil {
-		return fmt.Errorf("marshal CNPG Cluster CR: %w", err)
+		return fmt.Errorf("marshal prerequisites ConfigMap: %w", err)
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString("# CNPG Cluster CR — Guardian database (guardian-db in seam-system)\n")
+	buf.WriteString("# Platform prerequisites declaration — seam-platform-prerequisites ConfigMap\n")
 	buf.WriteString("# Generated by: compiler enable (phase 0 infrastructure-dependencies)\n")
-	buf.WriteString("# guardian-schema.md §16 CNPG Deployment Contract.\n")
-	buf.WriteString("# Three instances, 50Gi each. guardian-db-credentials Secret must\n")
-	buf.WriteString("# exist in seam-system before applying this CR.\n")
+	buf.WriteString("# The operator must provision all listed prerequisites before applying\n")
+	buf.WriteString("# phase 01-guardian-bootstrap. The compiler does not create these resources.\n")
+	buf.WriteString("# conductor-schema.md §9.\n")
 	buf.WriteString("---\n")
 	buf.Write(data)
 
-	return os.WriteFile(filepath.Join(dir, "cnpg-cluster.yaml"), buf.Bytes(), 0644)
+	return os.WriteFile(filepath.Join(dir, "prerequisites.yaml"), buf.Bytes(), 0644)
 }
 
 // --- Phase 00a: namespaces ---

@@ -36,9 +36,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 	}{
 		{"00-infrastructure-dependencies", []string{
 			"phase-meta.yaml",
-			"cnpg-operator.yaml",
-			"guardian-db-credentials.yaml",
-			"cnpg-cluster.yaml",
+			"prerequisites.yaml",
 		}},
 		{"00a-namespaces", []string{
 			"phase-meta.yaml",
@@ -293,8 +291,7 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 
 	checks := []struct{ phase, file string }{
 		{"00-infrastructure-dependencies", "phase-meta.yaml"},
-		{"00-infrastructure-dependencies", "cnpg-operator.yaml"},
-		{"00-infrastructure-dependencies", "cnpg-cluster.yaml"},
+		{"00-infrastructure-dependencies", "prerequisites.yaml"},
 		{"00a-namespaces", "phase-meta.yaml"},
 		{"00a-namespaces", "namespaces.yaml"},
 		{"01-guardian-bootstrap", "phase-meta.yaml"},
@@ -507,111 +504,68 @@ func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 	assertContainsStr(t, content, "order: 0")
 }
 
-// TestEnable_Phase00_CNPGOperatorYAMLPresent verifies that cnpg-operator.yaml is
-// present and non-empty in 00-infrastructure-dependencies.
-// guardian-schema.md §16 CNPG Deployment Contract.
-func TestEnable_Phase00_CNPGOperatorYAMLPresent(t *testing.T) {
+// TestEnable_Phase00_PrerequisitesIsConfigMap verifies that prerequisites.yaml in
+// 00-infrastructure-dependencies is a ConfigMap named seam-platform-prerequisites
+// in seam-system with the required label and all four prerequisite categories.
+// conductor-schema.md §9.
+func TestEnable_Phase00_PrerequisitesIsConfigMap(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-operator.yaml")
-	if len(strings.TrimSpace(content)) == 0 {
-		t.Fatal("cnpg-operator.yaml is empty")
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "prerequisites.yaml")
+	assertContainsStr(t, content, "kind: ConfigMap")
+	assertContainsStr(t, content, "name: seam-platform-prerequisites")
+	assertContainsStr(t, content, "namespace: seam-system")
+	assertContainsStr(t, content, "seam.ontai.dev/phase: prerequisites")
+}
+
+// TestEnable_Phase00_PrerequisitesFourCategories verifies that prerequisites.yaml
+// lists all four required prerequisite categories in the ConfigMap data.
+// conductor-schema.md §9.
+func TestEnable_Phase00_PrerequisitesFourCategories(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	// Must contain the CNPG operator namespace and CRDs.
-	assertContainsStr(t, content, "cnpg-system")
-	assertContainsStr(t, content, "postgresql.cnpg.io")
-	assertContainsStr(t, content, "kind: CustomResourceDefinition")
-	assertContainsStr(t, content, "kind: Deployment")
-
-	// Must carry the four standard CNPG CRDs.
-	for _, crd := range []string{"clusters.postgresql.cnpg.io", "backups.postgresql.cnpg.io",
-		"scheduledbackups.postgresql.cnpg.io", "poolers.postgresql.cnpg.io"} {
-		if !strings.Contains(content, crd) {
-			t.Errorf("cnpg-operator.yaml missing CRD %q", crd)
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "prerequisites.yaml")
+	for _, category := range []string{"database", "job-scheduler", "certificate-manager", "storage"} {
+		if !strings.Contains(content, category) {
+			t.Errorf("prerequisites.yaml missing category %q", category)
 		}
 	}
 }
 
-// TestEnable_Phase00_CNPGClusterCRNameAndNamespace verifies that cnpg-cluster.yaml
-// contains a CNPG Cluster CR named guardian-db in seam-system.
-// guardian-schema.md §16 CNPG Deployment Contract.
-func TestEnable_Phase00_CNPGClusterCRNameAndNamespace(t *testing.T) {
+// TestEnable_Phase00_PrerequisitesDatabaseDetails verifies that the database
+// prerequisite describes CNPG version, required CRD, guardian-db Cluster, and
+// guardian-db-credentials Secret with required keys.
+// conductor-schema.md §9.
+func TestEnable_Phase00_PrerequisitesDatabaseDetails(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-cluster.yaml")
-	assertContainsStr(t, content, "kind: Cluster")
-	assertContainsStr(t, content, "name: guardian-db")
-	assertContainsStr(t, content, "namespace: seam-system")
-	assertContainsStr(t, content, "postgresql.cnpg.io/v1")
-}
-
-// TestEnable_Phase00_CNPGClusterThreeInstances verifies that cnpg-cluster.yaml
-// declares instances: 3 (HA deployment for management Guardian).
-// guardian-schema.md §16 CNPG Deployment Contract.
-func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
-	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
-		t.Fatalf("compileEnableBundle error: %v", err)
-	}
-
-	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "cnpg-cluster.yaml")
-	assertContainsStr(t, content, "instances: 3")
-	assertContainsStr(t, content, "50Gi")
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "prerequisites.yaml")
+	assertContainsStr(t, content, "CNPG v1.25")
+	assertContainsStr(t, content, "clusters.postgresql.cnpg.io")
+	assertContainsStr(t, content, "guardian-db")
 	assertContainsStr(t, content, "guardian-db-credentials")
 }
 
-// TestEnable_Phase00_GuardianDBCredentialsPresent verifies that
-// guardian-db-credentials.yaml is generated in 00-infrastructure-dependencies
-// with the correct Secret shape: kind Secret, name guardian-db-credentials,
-// namespace seam-system, type Opaque, username postgres.
-// The password is non-deterministic (crypto/rand) and is not asserted here.
-// guardian-schema.md §16 CNPG Deployment Contract.
-func TestEnable_Phase00_GuardianDBCredentialsPresent(t *testing.T) {
-	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
-		t.Fatalf("compileEnableBundle error: %v", err)
-	}
-
-	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "guardian-db-credentials.yaml")
-	assertContainsStr(t, content, "kind: Secret")
-	assertContainsStr(t, content, "name: guardian-db-credentials")
-	assertContainsStr(t, content, "namespace: seam-system")
-	assertContainsStr(t, content, "type: Opaque")
-	assertContainsStr(t, content, "username: postgres")
-	// Password field must be present (non-empty value).
-	assertContainsStr(t, content, "password:")
-}
-
-// TestEnable_Phase00_GuardianDBCredentialsPrecedesCNPGCluster verifies that
-// guardian-db-credentials.yaml precedes cnpg-cluster.yaml in the apply order
-// declared in phase-meta.yaml. The CNPG Cluster CR references the credentials
-// Secret as superuserSecret, so it must exist before the Cluster CR is applied.
-// guardian-schema.md §16 CNPG Deployment Contract.
-func TestEnable_Phase00_GuardianDBCredentialsPrecedesCNPGCluster(t *testing.T) {
+// TestEnable_Phase00_PrerequisitesApplyOrderListsPrerequisites verifies that
+// phase-meta.yaml lists prerequisites.yaml in applyOrder.
+// conductor-schema.md §9.
+func TestEnable_Phase00_PrerequisitesApplyOrderListsPrerequisites(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
 	meta := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "phase-meta.yaml")
-	credIdx := strings.Index(meta, "guardian-db-credentials.yaml")
-	clusterIdx := strings.Index(meta, "cnpg-cluster.yaml")
-	if credIdx < 0 {
-		t.Fatal("phase-meta.yaml missing guardian-db-credentials.yaml")
-	}
-	if clusterIdx < 0 {
-		t.Fatal("phase-meta.yaml missing cnpg-cluster.yaml")
-	}
-	if credIdx > clusterIdx {
-		t.Error("guardian-db-credentials.yaml must appear before cnpg-cluster.yaml in applyOrder")
-	}
+	assertContainsStr(t, meta, "prerequisites.yaml")
 }
 
 // TestEnable_Phase02_GuardianDeploymentCarriesCNPGEnvVars verifies that
