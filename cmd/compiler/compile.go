@@ -74,6 +74,30 @@ type BootstrapSection struct {
 // ClusterInput is the human-authored spec format for bootstrap, launch, and enable
 // subcommands. Humans write this file; Compiler reads it and emits a TalosCluster CR.
 // Fields map directly to TalosClusterSpec. conductor-schema.md §9.
+//
+// Cilium native routing on Talos — required machine config patches:
+//
+// Every node's machine config produced by the bootstrap subcommand MUST include
+// the following kernel modules and sysctls for Cilium native routing to function.
+// These cannot be applied after boot; they must be present in the initial machine
+// config delivered on port 50000.
+//
+//	machine.kernel.modules:
+//	  - name: br_netfilter
+//	  - name: xt_socket
+//
+//	machine.sysctls:
+//	  net.ipv4.conf.all.rp_filter:     "0"
+//	  net.ipv4.conf.default.rp_filter: "0"
+//
+// br_netfilter: required for bridge traffic to traverse netfilter rules (eBPF hooks).
+// xt_socket:    required for transparent proxy / socket-based load balancing in Cilium.
+// rp_filter=0:  disables reverse-path filtering — mandatory for native routing mode
+//               because pod traffic arrives on an interface other than the default route.
+//
+// Without these, Cilium installs but pod-to-pod routing silently drops packets.
+// The Compiler does not inject these automatically; the Lab Operator must include
+// them as patches in the ClusterInput or apply them as talosctl machine config patches.
 type ClusterInput struct {
 	// Name is the TalosCluster resource name. Used as metadata.name.
 	Name string `yaml:"name"`
