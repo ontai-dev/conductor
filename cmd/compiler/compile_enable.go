@@ -11,6 +11,9 @@
 //	    phase-meta.yaml         — phase metadata and apply order
 //	    cnpg-operator.yaml      — CNPG operator manifests (Namespace, CRDs, SA, RBAC, Deployment)
 //	    cnpg-cluster.yaml       — CNPG Cluster CR for Guardian database (guardian-db in seam-system)
+//	  00a-namespaces/
+//	    phase-meta.yaml         — phase metadata and apply order
+//	    namespaces.yaml         — seam-system (webhook-mode=exempt, privileged PSA) and ont-system (privileged PSA)
 //	  00b-capi-prerequisites/   [emitted only when --capi flag is set]
 //	    phase-meta.yaml         — phase metadata and apply order
 //	    capi-core.yaml          — CAPI core operator (CRDs, RBAC, Deployment in capi-system)
@@ -172,6 +175,7 @@ Input contract:
 Output contract:
   --output  Directory receiving phase subdirectories:
               00-infrastructure-dependencies/  — CNPG operator and cluster
+              00a-namespaces/                  — seam-system and ont-system Namespace objects
               00b-capi-prerequisites/          — CAPI providers (only when --capi set)
               01-guardian-bootstrap/           — Guardian CRDs, RBAC, RBACProfiles
               02-guardian-deploy/              — Guardian Deployment
@@ -234,6 +238,9 @@ func compileEnableBundle(output, version string, withCAPI bool) error {
 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
+	}
+	if err := writePhase00aNamespaces(output); err != nil {
+		return fmt.Errorf("phase 00a namespaces: %w", err)
 	}
 	if withCAPI {
 		if err := writePhase00bCAPIPrerequisites(output); err != nil {
@@ -379,6 +386,122 @@ func writeCNPGClusterCR(dir string) error {
 	buf.Write(data)
 
 	return os.WriteFile(filepath.Join(dir, "cnpg-cluster.yaml"), buf.Bytes(), 0644)
+}
+
+// --- Phase 00a: namespaces ---
+
+// writePhase00aNamespaces writes the 00a-namespaces phase directory.
+// This phase creates the two canonical Seam namespaces before any operator is
+// deployed. Namespaces must exist before guardian-bootstrap can apply
+// namespace-labels.yaml. CONTEXT.md §4 Namespace Model (locked 2026-04-05).
+//
+// Namespaces created:
+//   - seam-system: operator namespace. Labels: seam.ontai.dev/webhook-mode=exempt
+//     (Guardian CheckBootstrapLabels gate) and pod-security.kubernetes.io/enforce=privileged.
+//   - ont-system: Conductor agent namespace. Label: pod-security.kubernetes.io/enforce=privileged.
+//
+// seam-tenant-{cluster-name} namespaces are NOT pre-created here — they are
+// created by the Platform operator at target cluster formation time (CP-INV-004).
+//
+// Lexicographic ordering: "00a-" sorts after "00-" and before "00b-" and "01-"
+// — the pipeline applies phases in directory name order.
+//
+// conductor-schema.md §9, CONTEXT.md §4.
+func writePhase00aNamespaces(output string) error {
+	dir := filepath.Join(output, "00a-namespaces")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	if err := writeNamespacesPhaseMetaYAML(dir); err != nil {
+		return err
+	}
+	return writeNamespacesManifest(dir)
+}
+
+// writeNamespacesPhaseMetaYAML writes the phase-meta.yaml for the 00a-namespaces phase.
+// The order label is "0a" (string, not integer) for the same reason as 00b-capi-prerequisites.
+func writeNamespacesPhaseMetaYAML(dir string) error {
+	content := `# phase-meta.yaml — 00a-namespaces
+# Canonical Seam namespaces. Must be applied before 01-guardian-bootstrap
+# so that namespace-labels.yaml in phase 01 has a namespace to annotate.
+# CONTEXT.md §4 Namespace Model (locked 2026-04-05).
+phase: namespaces
+order: "0a"
+readinessGate: >
+  Verify that seam-system and ont-system namespaces exist before applying
+  phase 01-guardian-bootstrap. guardian-bootstrap's namespace-labels.yaml
+  patches labels onto seam-system — the namespace must pre-exist for the
+  patch to succeed.
+  kubectl get ns seam-system ont-system
+applyOrder:
+  - namespaces.yaml
+`
+	return os.WriteFile(filepath.Join(dir, "phase-meta.yaml"), []byte(content), 0644)
+}
+
+// writeNamespacesManifest writes namespaces.yaml containing the two canonical
+// Seam namespace objects. seam-tenant-{cluster-name} namespaces are created
+// by the Platform operator at cluster formation time and are NOT pre-created here.
+func writeNamespacesManifest(dir string) error {
+	seam := corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "seam-system",
+			Labels: map[string]string{
+				// Guardian CheckBootstrapLabels startup gate: seam-system must carry
+				// webhook-mode=exempt before Guardian's admission webhook registers.
+				// guardian-schema.md §4 Bootstrap RBAC Window, guardian 25c9e93 WS3.
+				"seam.ontai.dev/webhook-mode": "exempt",
+				// Privileged PSA: Seam operators run with elevated capabilities (leader
+				// election, CRD management). Namespace-wide privileged enforcement is
+				// required to avoid Pod admission failures on operator startup.
+				"pod-security.kubernetes.io/enforce": "privileged",
+			},
+		},
+	}
+	ont := corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ont-system",
+			Labels: map[string]string{
+				// Privileged PSA: Conductor agent runs with host network access and
+				// eBPF capabilities for the PermissionService gRPC server.
+				"pod-security.kubernetes.io/enforce": "privileged",
+			},
+		},
+	}
+
+	seamData, err := yaml.Marshal(seam)
+	if err != nil {
+		return fmt.Errorf("marshal seam-system Namespace: %w", err)
+	}
+	ontData, err := yaml.Marshal(ont)
+	if err != nil {
+		return fmt.Errorf("marshal ont-system Namespace: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Canonical Seam namespaces — 00a-namespaces phase\n")
+	buf.WriteString("# Generated by: compiler enable (phase 00a namespaces)\n")
+	buf.WriteString("# conductor-schema.md §9, CONTEXT.md §4 Namespace Model (locked 2026-04-05).\n")
+	buf.WriteString("#\n")
+	buf.WriteString("# seam-system: operator namespace for all Seam operator managers.\n")
+	buf.WriteString("#   webhook-mode=exempt: Guardian CheckBootstrapLabels startup gate.\n")
+	buf.WriteString("#   privileged PSA: required for operator containers.\n")
+	buf.WriteString("#\n")
+	buf.WriteString("# ont-system: Conductor agent namespace (management and target clusters).\n")
+	buf.WriteString("#   privileged PSA: required for Conductor eBPF/host-network capabilities.\n")
+	buf.WriteString("#\n")
+	buf.WriteString("# NOTE: Per-cluster tenant namespaces (CONTEXT.md §4) are NOT pre-created here.\n")
+	buf.WriteString("# They are created by the Platform operator at target cluster formation time\n")
+	buf.WriteString("# (CP-INV-004). Do not create them manually.\n")
+	buf.WriteString("---\n")
+	buf.Write(seamData)
+	buf.WriteString("---\n")
+	buf.Write(ontData)
+
+	return os.WriteFile(filepath.Join(dir, "namespaces.yaml"), buf.Bytes(), 0644)
 }
 
 // --- Phase 00b: capi-prerequisites ---

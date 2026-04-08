@@ -46,7 +46,7 @@ func TestBootstrap_ProducesExpectedOutputFiles(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, bootstrapInputYAML)
 
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestBootstrap_SecretHasCorrectStructure(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, bootstrapInputYAML)
 
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestBootstrap_TalosClusterHasCorrectSpec(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, bootstrapInputYAML)
 
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestBootstrap_SequenceDocumentsApplyOrder(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, bootstrapInputYAML)
 
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestBootstrap_SecretNamingConvention(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, bootstrapInputYAML)
 
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -187,7 +187,7 @@ capi:
   enabled: false
 `
 	inputPath := writeInputFile(t, inputYAML)
-	err := compileBootstrap(inputPath, t.TempDir())
+	err := compileBootstrap(inputPath, t.TempDir(), "")
 	if err == nil {
 		t.Error("expected error for missing bootstrap section, got nil")
 	}
@@ -209,7 +209,7 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, inputYAML)
-	err := compileBootstrap(inputPath, t.TempDir())
+	err := compileBootstrap(inputPath, t.TempDir(), "")
 	if err == nil {
 		t.Error("expected error for missing controlPlaneEndpoint, got nil")
 	}
@@ -235,7 +235,7 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, inputYAML)
-	err := compileBootstrap(inputPath, t.TempDir())
+	err := compileBootstrap(inputPath, t.TempDir(), "")
 	if err == nil {
 		t.Error("expected error for multiple init nodes, got nil")
 	}
@@ -263,7 +263,7 @@ bootstrap:
       role: not-a-real-role
 `
 	inputPath := writeInputFile(t, inputYAML)
-	err := compileBootstrap(inputPath, t.TempDir())
+	err := compileBootstrap(inputPath, t.TempDir(), "")
 	if err == nil {
 		t.Error("expected error for invalid node role, got nil")
 	}
@@ -287,7 +287,7 @@ bootstrap:
 `
 	inputPath := writeInputFile(t, inputYAML)
 	outDir := t.TempDir()
-	if err := compileBootstrap(inputPath, outDir); err != nil {
+	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -316,7 +316,7 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, input)
-	err := compileBootstrap(inputPath, t.TempDir())
+	err := compileBootstrap(inputPath, t.TempDir(), "")
 	if err == nil {
 		t.Fatal("expected error for missing name field; got nil")
 	}

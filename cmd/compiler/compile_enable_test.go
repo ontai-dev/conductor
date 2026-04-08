@@ -39,6 +39,10 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"cnpg-operator.yaml",
 			"cnpg-cluster.yaml",
 		}},
+		{"00a-namespaces", []string{
+			"phase-meta.yaml",
+			"namespaces.yaml",
+		}},
 		{"01-guardian-bootstrap", []string{
 			"phase-meta.yaml",
 			"namespace-labels.yaml",
@@ -100,6 +104,58 @@ func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 	// Conductor Deployment must have CONDUCTOR_ROLE=management. §15.
 	assertContainsStr(t, content, "CONDUCTOR_ROLE")
 	assertContainsStr(t, content, "management")
+}
+
+// TestEnable_Phase00aNamespacesContent verifies that 00a-namespaces/namespaces.yaml
+// contains both canonical Seam namespaces with the required labels.
+// CONTEXT.md §4 Namespace Model (locked 2026-04-05).
+func TestEnable_Phase00aNamespacesContent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00a-namespaces", "namespaces.yaml")
+
+	// Both canonical namespaces must be present.
+	assertContainsStr(t, content, "name: seam-system")
+	assertContainsStr(t, content, "name: ont-system")
+
+	// seam-system must carry the Guardian CheckBootstrapLabels gate label.
+	assertContainsStr(t, content, "seam.ontai.dev/webhook-mode: exempt")
+
+	// Both namespaces must carry privileged PSA enforcement.
+	assertContainsStr(t, content, "pod-security.kubernetes.io/enforce: privileged")
+
+	// seam-tenant namespaces must NOT be pre-created — they are Platform's domain.
+	if containsStr(content, "seam-tenant") {
+		t.Error("namespaces.yaml must not pre-create seam-tenant-* namespaces — Platform creates them")
+	}
+
+	// Phase-meta must declare the readiness gate.
+	meta := readPhaseFile(t, outDir, "00a-namespaces", "phase-meta.yaml")
+	assertContainsStr(t, meta, "namespaces")
+	assertContainsStr(t, meta, "guardian-bootstrap")
+}
+
+// TestEnable_Phase00aLexicographicOrder verifies that 00a-namespaces directory
+// sorts after 00-infrastructure-dependencies and before 00b-capi-prerequisites
+// and 01-guardian-bootstrap — the pipeline applies phases in directory name order.
+func TestEnable_Phase00aLexicographicOrder(t *testing.T) {
+	// Verify that the directory naming convention produces the correct sort order.
+	// "00-" < "00a" < "00b" < "01" lexicographically.
+	dirs := []string{
+		"00-infrastructure-dependencies",
+		"00a-namespaces",
+		"00b-capi-prerequisites",
+		"01-guardian-bootstrap",
+	}
+	for i := 1; i < len(dirs); i++ {
+		if dirs[i-1] >= dirs[i] {
+			t.Errorf("phase directory %q must sort before %q for pipeline ordering",
+				dirs[i-1], dirs[i])
+		}
+	}
 }
 
 // TestEnable_ConductorInOntSystem verifies that the Conductor Deployment is in
@@ -238,6 +294,8 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"00-infrastructure-dependencies", "phase-meta.yaml"},
 		{"00-infrastructure-dependencies", "cnpg-operator.yaml"},
 		{"00-infrastructure-dependencies", "cnpg-cluster.yaml"},
+		{"00a-namespaces", "phase-meta.yaml"},
+		{"00a-namespaces", "namespaces.yaml"},
 		{"01-guardian-bootstrap", "phase-meta.yaml"},
 		{"01-guardian-bootstrap", "namespace-labels.yaml"},
 		{"01-guardian-bootstrap", "guardian-crds.yaml"},

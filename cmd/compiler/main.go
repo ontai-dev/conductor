@@ -31,7 +31,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "bootstrap":
-		runSubcommand("bootstrap", os.Args[2:], bootstrapHelp, compileBootstrap)
+		runBootstrapSubcommand(os.Args[2:])
 	case "launch":
 		runLaunchSubcommand(os.Args[2:])
 	case "enable":
@@ -53,24 +53,69 @@ func main() {
 }
 
 // bootstrapHelp is the authored per-subcommand help for 'compiler bootstrap'.
-const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path>
+const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path> [--talosconfig <path>]
 
-Compile a cluster declaration YAML into machine configs and bootstrap CRs.
+Compile a cluster declaration YAML into Talos machine config Secrets and bootstrap CRs.
 
 Input contract:
-  --input   Path to a cluster declaration YAML file (human-authored TalosCluster spec).
-            This is not a kubeconfig. It is the cluster spec file that declares the
-            desired cluster topology, VIP, and infrastructure provider.
+  --input       Path to a cluster declaration YAML file (ClusterInput schema).
+                Declares cluster name, mode, node list, and optional patches.
+
+  --talosconfig Path to the Talos secrets bundle file (flag → $TALOSCONFIG → ./talos/config).
+                Required only when importExistingCluster: true in the input file.
+                The secrets bundle is the YAML produced by compiler bootstrap on first
+                cluster creation — not the talosctl client config.
 
 Output contract:
   --output  Directory receiving:
-              machine-config-<node>.yaml  — Talos machine config Secret per node
-              taloscluster.yaml           — TalosCluster CR ready to apply
-              bootstrap-sequence.yaml     — Ordered bootstrap step manifest
+              seam-mc-{cluster}-{hostname}.yaml — Talos machine config Secret per node.
+                Each Secret embeds the full Talos machine config, including all patches
+                declared via the patches, registryMirrors, and ciliumPrerequisites fields.
+              {cluster-name}.yaml               — TalosCluster CR ready to apply.
+              bootstrap-sequence.yaml           — Ordered bootstrap step manifest.
+
+ClusterInput optional fields (set in the --input YAML):
+  patches:               []string  — YAML patches deep-merged into every node's machine config.
+  ciliumPrerequisites:   bool      — Inject br_netfilter, xt_socket, and rp_filter sysctls.
+  registryMirrors:       []        — registry/endpoints pairs injected into registries.mirrors.
+  importExistingCluster: bool      — Load existing secrets bundle instead of generating fresh PKI.
 
 Compile-only: output is a manifest set for human review and GitOps pipeline
 application — Compiler never applies, patches, or deletes any resource.
 `
+
+// runBootstrapSubcommand parses bootstrap-specific flags and calls compileBootstrap.
+// Handles the --talosconfig flag needed for importExistingCluster mode in addition
+// to the standard --input and --output flags. conductor-schema.md §9 Step 1.
+func runBootstrapSubcommand(args []string) {
+	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
+	input := fs.String("input", "", "Path to cluster declaration YAML (required)")
+	output := fs.String("output", "", "Output directory for manifests (required)")
+	taloscfg := fs.String("talosconfig", "", "Talos secrets bundle path for importExistingCluster mode (flag → $TALOSCONFIG → ./talos/config)")
+
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, bootstrapHelp)
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "compiler bootstrap: flag error: %v\n", err)
+		os.Exit(1)
+	}
+	if *input == "" {
+		fmt.Fprintln(os.Stderr, "compiler bootstrap: --input is required")
+		os.Exit(1)
+	}
+	if *output == "" {
+		fmt.Fprintln(os.Stderr, "compiler bootstrap: --output is required")
+		os.Exit(1)
+	}
+
+	if err := compileBootstrap(*input, *output, *taloscfg); err != nil {
+		fmt.Fprintf(os.Stderr, "compiler bootstrap: %v\n", err)
+		os.Exit(1)
+	}
+}
 
 // packbuildHelp is the authored per-subcommand help for 'compiler packbuild'.
 const packbuildHelp = `Usage: compiler packbuild --input <path> --output <path>

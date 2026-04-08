@@ -23,6 +23,139 @@ import (
 	wrapperv1alpha1 "github.com/ontai-dev/wrapper/api/v1alpha1"
 )
 
+// RegistryMirror configures one registry mirror entry in Talos machine config
+// registries.mirrors. The Registry field is the upstream registry hostname;
+// Endpoints is the list of mirror URLs. The http:// prefix is preserved exactly
+// as provided — do not add TLS config for http:// endpoints.
+// lab/CLAUDE.md §Cilium, Talos machine config registries.mirrors spec.
+type RegistryMirror struct {
+	// Registry is the upstream registry hostname (e.g., "docker.io", "ghcr.io").
+	Registry string `yaml:"registry"`
+	// Endpoints is the list of mirror endpoint URLs.
+	// The http:// prefix is preserved exactly — do not add insecureSkipVerify.
+	Endpoints []string `yaml:"endpoints"`
+}
+
+// ciliumPrerequisitesPatch returns the Talos machine config YAML patch that enables
+// Cilium native routing. Applied when ClusterInput.CiliumPrerequisites=true.
+//
+// Required kernel modules:
+//   - br_netfilter: bridge traffic must traverse netfilter rules for eBPF hooks.
+//   - xt_socket:    required for transparent proxy / socket-based load balancing.
+//
+// Required sysctls:
+//   - net.ipv4.conf.all.rp_filter=0:     disable reverse-path filtering on all ifaces.
+//   - net.ipv4.conf.default.rp_filter=0: disable rp_filter for newly created ifaces.
+//
+// Without these, Cilium installs but pod-to-pod routing silently drops packets.
+// lab/CLAUDE.md §Cilium Deployment Invariants, compile.go ClusterInput comment.
+func ciliumPrerequisitesPatch() string {
+	return `machine:
+  kernel:
+    modules:
+      - name: br_netfilter
+      - name: xt_socket
+  sysctls:
+    net.ipv4.conf.all.rp_filter: "0"
+    net.ipv4.conf.default.rp_filter: "0"
+`
+}
+
+// buildRegistryMirrorsPatch builds the Talos machine config YAML patch that injects
+// the provided registry mirrors into machine.registries.mirrors. The http:// prefix
+// on endpoints is preserved exactly — no TLS config is added.
+func buildRegistryMirrorsPatch(mirrors []RegistryMirror) (string, error) {
+	type mirrorSpec struct {
+		Endpoints []string `yaml:"endpoints"`
+	}
+	type registriesSpec struct {
+		Mirrors map[string]mirrorSpec `yaml:"mirrors"`
+	}
+	type machineSpec struct {
+		Registries registriesSpec `yaml:"registries"`
+	}
+	type patchSpec struct {
+		Machine machineSpec `yaml:"machine"`
+	}
+
+	mirrorMap := make(map[string]mirrorSpec, len(mirrors))
+	for _, m := range mirrors {
+		mirrorMap[m.Registry] = mirrorSpec{Endpoints: m.Endpoints}
+	}
+	data, err := yaml.Marshal(patchSpec{
+		Machine: machineSpec{
+			Registries: registriesSpec{Mirrors: mirrorMap},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal registry mirrors patch: %w", err)
+	}
+	return string(data), nil
+}
+
+// deepMerge recursively merges src into dst in-place.
+//
+//   - Map values are merged recursively.
+//   - Slice values are appended (useful for kernel modules, DNS search lists, etc.).
+//   - Scalar values override the dst value.
+func deepMerge(dst, src map[string]interface{}) {
+	for k, srcVal := range src {
+		switch sv := srcVal.(type) {
+		case map[string]interface{}:
+			if dv, ok := dst[k].(map[string]interface{}); ok {
+				deepMerge(dv, sv)
+			} else {
+				dst[k] = srcVal
+			}
+		case []interface{}:
+			if dv, ok := dst[k].([]interface{}); ok {
+				dst[k] = append(dv, sv...)
+			} else {
+				dst[k] = srcVal
+			}
+		default:
+			dst[k] = srcVal
+		}
+	}
+}
+
+// applyYAMLPatch applies a YAML deep-merge patch to configBytes and returns the
+// merged YAML. Maps are merged recursively; slices are appended; scalars override.
+// Used to inject kernel modules, sysctls, registry mirrors, and custom patches
+// into Talos machine configs without discarding existing fields.
+func applyYAMLPatch(configBytes []byte, patch string) ([]byte, error) {
+	var base map[string]interface{}
+	if err := yaml.Unmarshal(configBytes, &base); err != nil {
+		return nil, fmt.Errorf("unmarshal base config: %w", err)
+	}
+	var overlay map[string]interface{}
+	if err := yaml.Unmarshal([]byte(patch), &overlay); err != nil {
+		return nil, fmt.Errorf("unmarshal patch: %w", err)
+	}
+	if base == nil {
+		base = make(map[string]interface{})
+	}
+	deepMerge(base, overlay)
+	result, err := yaml.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("marshal patched config: %w", err)
+	}
+	return result, nil
+}
+
+// resolveTalosconfigPath resolves the talosconfig/secrets-bundle path using the
+// standard Talos resolution order: flag value → TALOSCONFIG env → ./talos/config.
+// Returns the resolved path (which may not exist; callers must check).
+func resolveTalosconfigPath(flagPath string) string {
+	if flagPath != "" {
+		return flagPath
+	}
+	if env := os.Getenv("TALOSCONFIG"); env != "" {
+		return env
+	}
+	return filepath.Join(".", "talos", "config")
+}
+
 // BootstrapNode declares a single Talos node for management cluster bootstrap.
 // Each node maps to one Talos machine configuration and one Kubernetes Secret.
 type BootstrapNode struct {
@@ -96,8 +229,8 @@ type BootstrapSection struct {
 //               because pod traffic arrives on an interface other than the default route.
 //
 // Without these, Cilium installs but pod-to-pod routing silently drops packets.
-// The Compiler does not inject these automatically; the Lab Operator must include
-// them as patches in the ClusterInput or apply them as talosctl machine config patches.
+// Set ciliumPrerequisites: true to have the Compiler inject these automatically,
+// or include them explicitly in the patches list.
 type ClusterInput struct {
 	// Name is the TalosCluster resource name. Used as metadata.name.
 	Name string `yaml:"name"`
@@ -119,6 +252,40 @@ type ClusterInput struct {
 	// the compiler bootstrap subcommand.
 	// +optional
 	Bootstrap *BootstrapSection `yaml:"bootstrap,omitempty"`
+
+	// Patches is an optional list of Talos machine config patch YAML strings.
+	// Each patch is applied to every node's generated machine config in order,
+	// after CiliumPrerequisites and RegistryMirrors patches (if set). Patches use
+	// deep-merge semantics: maps are merged recursively, slices are appended,
+	// scalars override. Use for kernel modules, sysctls, and any other node-level
+	// customization that must be present at first boot.
+	// +optional
+	Patches []string `yaml:"patches,omitempty"`
+
+	// ImportExistingCluster, when true, loads the Talos secrets bundle from the
+	// path resolved via --talosconfig flag (flag → TALOSCONFIG env → ./talos/config)
+	// rather than generating a fresh PKI bundle. Generated machine configs use the
+	// existing cluster's CA material so new nodes can join a cluster previously
+	// bootstrapped by other means.
+	// The secrets bundle is the YAML file produced by compiler bootstrap on first
+	// cluster creation — not the talosctl client config.
+	// +optional
+	ImportExistingCluster bool `yaml:"importExistingCluster,omitempty"`
+
+	// RegistryMirrors configures registry mirrors injected into every node's machine
+	// config registries.mirrors section. Applied before user-provided Patches.
+	// The http:// prefix on endpoints is preserved exactly — do not add TLS config.
+	// Required in lab environments where containerd must use the local OCI registry.
+	// +optional
+	RegistryMirrors []RegistryMirror `yaml:"registryMirrors,omitempty"`
+
+	// CiliumPrerequisites, when true, injects the kernel modules (br_netfilter,
+	// xt_socket) and sysctls (net.ipv4.conf.all.rp_filter=0,
+	// net.ipv4.conf.default.rp_filter=0) required for Cilium native routing on Talos.
+	// Applied first, before RegistryMirrors and user Patches.
+	// lab/CLAUDE.md §Cilium Deployment Invariants.
+	// +optional
+	CiliumPrerequisites bool `yaml:"ciliumPrerequisites,omitempty"`
 }
 
 // CAPIInput is the CAPI configuration section of ClusterInput.
@@ -308,9 +475,14 @@ func validateBootstrapInput(b *BootstrapSection) error {
 //   - {cluster-name}.yaml — TalosCluster CR with mode=bootstrap, capi.enabled=false.
 //   - bootstrap-sequence.yaml — documents the apply order.
 //
+// talosconfigPath is the resolved path to the Talos secrets bundle, used only when
+// in.ImportExistingCluster=true. Pass empty string to use the default resolution chain
+// (TALOSCONFIG env → ./talos/config).
+//
 // Uses the Talos machinery library to generate machine configurations.
-// No cluster connection required. conductor-schema.md §9.
-func compileBootstrap(input, output string) error {
+// No cluster connection is required in the default (fresh PKI) path.
+// conductor-schema.md §9.
+func compileBootstrap(input, output, talosconfigPath string) error {
 	in, err := readClusterInput(input)
 	if err != nil {
 		return err
@@ -344,14 +516,25 @@ func compileBootstrap(input, output string) error {
 		}
 	}
 
-	// Generate the cluster secrets bundle once. This is the source of all
-	// cryptographic material (CA certs, bootstrap tokens, etc.).
-	secretsBundle, err := secrets.NewBundle(
-		secrets.NewFixedClock(time.Now()),
-		versionContract,
-	)
-	if err != nil {
-		return fmt.Errorf("generate secrets bundle: %w", err)
+	// Resolve the secrets bundle. When importExistingCluster=true, load the bundle
+	// from the resolved talosconfig path rather than generating fresh PKI material.
+	// The secrets bundle is the YAML file produced by compiler bootstrap on first
+	// cluster creation — not the talosctl client config.
+	var secretsBundle *secrets.Bundle
+	if in.ImportExistingCluster {
+		bundlePath := resolveTalosconfigPath(talosconfigPath)
+		secretsBundle, err = secrets.LoadBundle(bundlePath)
+		if err != nil {
+			return fmt.Errorf("importExistingCluster: load secrets bundle from %q: %w", bundlePath, err)
+		}
+	} else {
+		secretsBundle, err = secrets.NewBundle(
+			secrets.NewFixedClock(time.Now()),
+			versionContract,
+		)
+		if err != nil {
+			return fmt.Errorf("generate secrets bundle: %w", err)
+		}
 	}
 
 	// Build the generate input with cluster-wide settings.
@@ -378,6 +561,23 @@ func compileBootstrap(input, output string) error {
 		ns = "seam-system"
 	}
 
+	// Build the ordered patch list:
+	//   1. CiliumPrerequisites (built-in, applied first)
+	//   2. RegistryMirrors (injected next)
+	//   3. User Patches (applied last, in order)
+	var patches []string
+	if in.CiliumPrerequisites {
+		patches = append(patches, ciliumPrerequisitesPatch())
+	}
+	if len(in.RegistryMirrors) > 0 {
+		mirrorPatch, err := buildRegistryMirrorsPatch(in.RegistryMirrors)
+		if err != nil {
+			return fmt.Errorf("build registry mirrors patch: %w", err)
+		}
+		patches = append(patches, mirrorPatch)
+	}
+	patches = append(patches, in.Patches...)
+
 	// Generate machine configuration for each node and write as a Secret.
 	var secretNames []string
 	for _, node := range b.Nodes {
@@ -394,6 +594,14 @@ func compileBootstrap(input, output string) error {
 		cfgBytes, err := cfg.Bytes()
 		if err != nil {
 			return fmt.Errorf("marshal config for node %q: %w", node.Hostname, err)
+		}
+
+		// Apply all patches in order (CiliumPrerequisites → RegistryMirrors → user Patches).
+		for i, patch := range patches {
+			cfgBytes, err = applyYAMLPatch(cfgBytes, patch)
+			if err != nil {
+				return fmt.Errorf("apply patch %d to node %q: %w", i, node.Hostname, err)
+			}
 		}
 
 		secretName := "seam-mc-" + in.Name + "-" + node.Hostname
