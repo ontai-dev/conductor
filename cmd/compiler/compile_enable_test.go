@@ -37,6 +37,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		{"00-infrastructure-dependencies", []string{
 			"phase-meta.yaml",
 			"cnpg-operator.yaml",
+			"guardian-db-credentials.yaml",
 			"cnpg-cluster.yaml",
 		}},
 		{"00a-namespaces", []string{
@@ -564,6 +565,72 @@ func TestEnable_Phase00_CNPGClusterThreeInstances(t *testing.T) {
 	assertContainsStr(t, content, "instances: 3")
 	assertContainsStr(t, content, "50Gi")
 	assertContainsStr(t, content, "guardian-db-credentials")
+}
+
+// TestEnable_Phase00_GuardianDBCredentialsPresent verifies that
+// guardian-db-credentials.yaml is generated in 00-infrastructure-dependencies
+// with the correct Secret shape: kind Secret, name guardian-db-credentials,
+// namespace seam-system, type Opaque, username postgres.
+// The password is non-deterministic (crypto/rand) and is not asserted here.
+// guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase00_GuardianDBCredentialsPresent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "guardian-db-credentials.yaml")
+	assertContainsStr(t, content, "kind: Secret")
+	assertContainsStr(t, content, "name: guardian-db-credentials")
+	assertContainsStr(t, content, "namespace: seam-system")
+	assertContainsStr(t, content, "type: Opaque")
+	assertContainsStr(t, content, "username: postgres")
+	// Password field must be present (non-empty value).
+	assertContainsStr(t, content, "password:")
+}
+
+// TestEnable_Phase00_GuardianDBCredentialsPrecedesCNPGCluster verifies that
+// guardian-db-credentials.yaml precedes cnpg-cluster.yaml in the apply order
+// declared in phase-meta.yaml. The CNPG Cluster CR references the credentials
+// Secret as superuserSecret, so it must exist before the Cluster CR is applied.
+// guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase00_GuardianDBCredentialsPrecedesCNPGCluster(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	meta := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "phase-meta.yaml")
+	credIdx := strings.Index(meta, "guardian-db-credentials.yaml")
+	clusterIdx := strings.Index(meta, "cnpg-cluster.yaml")
+	if credIdx < 0 {
+		t.Fatal("phase-meta.yaml missing guardian-db-credentials.yaml")
+	}
+	if clusterIdx < 0 {
+		t.Fatal("phase-meta.yaml missing cnpg-cluster.yaml")
+	}
+	if credIdx > clusterIdx {
+		t.Error("guardian-db-credentials.yaml must appear before cnpg-cluster.yaml in applyOrder")
+	}
+}
+
+// TestEnable_Phase02_GuardianDeploymentCarriesCNPGEnvVars verifies that
+// guardian-deployment.yaml carries the CNPG connection env vars and GUARDIAN_ROLE.
+// These are required for Guardian to connect to its database after CNPG creates
+// the guardian-db-app Secret. guardian-schema.md §16 CNPG Deployment Contract.
+func TestEnable_Phase02_GuardianDeploymentCarriesCNPGEnvVars(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", false); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "02-guardian-deploy", "guardian-deployment.yaml")
+	assertContainsStr(t, content, "CNPG_SECRET_NAME")
+	assertContainsStr(t, content, "guardian-db-app")
+	assertContainsStr(t, content, "CNPG_SECRET_NAMESPACE")
+	assertContainsStr(t, content, "seam-system")
+	assertContainsStr(t, content, "GUARDIAN_ROLE")
+	assertContainsStr(t, content, "management")
 }
 
 // --- Phase 05: post-bootstrap DSNS tests ---
