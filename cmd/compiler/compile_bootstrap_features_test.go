@@ -388,34 +388,35 @@ func TestApplyYAMLPatch_AppendsSlices(t *testing.T) {
 	}
 }
 
-// ── resolveTalosconfigPath unit tests ─────────────────────────────────────────
+// ── resolveKubeconfigPath unit tests ──────────────────────────────────────────
 
-// TestResolveTalosconfigPath_FlagTakesPriority verifies that the flag value is
+// TestResolveKubeconfigPath_FlagTakesPriority verifies that the flag value is
 // returned when non-empty, regardless of environment variables.
-func TestResolveTalosconfigPath_FlagTakesPriority(t *testing.T) {
-	t.Setenv("TALOSCONFIG", "/env/path")
-	got := resolveTalosconfigPath("/flag/path")
+func TestResolveKubeconfigPath_FlagTakesPriority(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/env/path")
+	got := resolveKubeconfigPath("/flag/path")
 	if got != "/flag/path" {
 		t.Errorf("expected /flag/path; got %q", got)
 	}
 }
 
-// TestResolveTalosconfigPath_EnvFallback verifies that TALOSCONFIG env is used
+// TestResolveKubeconfigPath_EnvFallback verifies that KUBECONFIG env is used
 // when the flag is empty.
-func TestResolveTalosconfigPath_EnvFallback(t *testing.T) {
-	t.Setenv("TALOSCONFIG", "/env/path")
-	got := resolveTalosconfigPath("")
+func TestResolveKubeconfigPath_EnvFallback(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/env/path")
+	got := resolveKubeconfigPath("")
 	if got != "/env/path" {
-		t.Errorf("expected /env/path from TALOSCONFIG env; got %q", got)
+		t.Errorf("expected /env/path from KUBECONFIG env; got %q", got)
 	}
 }
 
-// TestResolveTalosconfigPath_DefaultWhenBothEmpty verifies that the default
-// ./talos/config path is returned when both flag and env are empty.
-func TestResolveTalosconfigPath_DefaultWhenBothEmpty(t *testing.T) {
-	t.Setenv("TALOSCONFIG", "")
-	got := resolveTalosconfigPath("")
-	want := filepath.Join(".", "talos", "config")
+// TestResolveKubeconfigPath_DefaultWhenBothEmpty verifies that the default
+// ~/.kube/config path is returned when both flag and env are empty.
+func TestResolveKubeconfigPath_DefaultWhenBothEmpty(t *testing.T) {
+	t.Setenv("KUBECONFIG", "")
+	got := resolveKubeconfigPath("")
+	home, _ := os.UserHomeDir()
+	want := filepath.Join(home, ".kube", "config")
 	if got != want {
 		t.Errorf("expected default %q; got %q", want, got)
 	}
@@ -423,10 +424,10 @@ func TestResolveTalosconfigPath_DefaultWhenBothEmpty(t *testing.T) {
 
 // ── ImportExistingCluster ─────────────────────────────────────────────────────
 
-// TestBootstrap_ImportExistingCluster_MissingBundleReturnsError verifies that
-// importExistingCluster: true with a non-existent secrets bundle path returns an
-// error rather than generating fresh PKI material silently.
-func TestBootstrap_ImportExistingCluster_MissingBundleReturnsError(t *testing.T) {
+// TestBootstrap_ImportExistingCluster_MissingKubeconfigReturnsError verifies that
+// importExistingCluster: true with a non-existent kubeconfig path returns an error
+// rather than silently generating fresh PKI material.
+func TestBootstrap_ImportExistingCluster_MissingKubeconfigReturnsError(t *testing.T) {
 	input := `
 name: test-cluster
 namespace: seam-system
@@ -445,10 +446,10 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, input)
-	// Pass a path that does not exist.
-	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/secrets.yaml")
+	// Pass a kubeconfig path that does not exist — connection must fail with an error.
+	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/kubeconfig.yaml")
 	if err == nil {
-		t.Fatal("expected error for missing secrets bundle; got nil")
+		t.Fatal("expected error for missing kubeconfig; got nil")
 	}
 }
 

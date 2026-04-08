@@ -53,18 +53,19 @@ func main() {
 }
 
 // bootstrapHelp is the authored per-subcommand help for 'compiler bootstrap'.
-const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path> [--talosconfig <path>]
+const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path> [--kubeconfig <path>]
 
 Compile a cluster declaration YAML into Talos machine config Secrets and bootstrap CRs.
 
 Input contract:
-  --input       Path to a cluster declaration YAML file (ClusterInput schema).
-                Declares cluster name, mode, node list, and optional patches.
+  --input      Path to a cluster declaration YAML file (ClusterInput schema).
+               Declares cluster name, mode, node list, and optional patches.
 
-  --talosconfig Path to the Talos secrets bundle file (flag → $TALOSCONFIG → ./talos/config).
-                Required only when importExistingCluster: true in the input file.
-                The secrets bundle is the YAML produced by compiler bootstrap on first
-                cluster creation — not the talosctl client config.
+  --kubeconfig Path to a kubeconfig file (flag → $KUBECONFIG → ~/.kube/config).
+               Required only when importExistingCluster: true in the input file.
+               When importExistingCluster=true, Compiler connects to the cluster
+               Kubernetes API, reads the init-node machine config Secret from
+               seam-system, and derives the PKI bundle from the existing CAs.
 
 Output contract:
   --output  Directory receiving:
@@ -78,20 +79,20 @@ ClusterInput optional fields (set in the --input YAML):
   patches:               []string  — YAML patches deep-merged into every node's machine config.
   ciliumPrerequisites:   bool      — Inject br_netfilter, xt_socket, and rp_filter sysctls.
   registryMirrors:       []        — registry/endpoints pairs injected into registries.mirrors.
-  importExistingCluster: bool      — Load existing secrets bundle instead of generating fresh PKI.
+  importExistingCluster: bool      — Extract PKI from the running cluster instead of generating fresh.
 
 Compile-only: output is a manifest set for human review and GitOps pipeline
 application — Compiler never applies, patches, or deletes any resource.
 `
 
 // runBootstrapSubcommand parses bootstrap-specific flags and calls compileBootstrap.
-// Handles the --talosconfig flag needed for importExistingCluster mode in addition
+// Handles the --kubeconfig flag needed for importExistingCluster mode in addition
 // to the standard --input and --output flags. conductor-schema.md §9 Step 1.
 func runBootstrapSubcommand(args []string) {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	input := fs.String("input", "", "Path to cluster declaration YAML (required)")
 	output := fs.String("output", "", "Output directory for manifests (required)")
-	taloscfg := fs.String("talosconfig", "", "Talos secrets bundle path for importExistingCluster mode (flag → $TALOSCONFIG → ./talos/config)")
+	kubecfg := fs.String("kubeconfig", "", "Path to kubeconfig for importExistingCluster mode (flag → $KUBECONFIG → ~/.kube/config)")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, bootstrapHelp)
@@ -111,7 +112,7 @@ func runBootstrapSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileBootstrap(*input, *output, *taloscfg); err != nil {
+	if err := compileBootstrap(*input, *output, *kubecfg); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler bootstrap: %v\n", err)
 		os.Exit(1)
 	}

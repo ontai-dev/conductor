@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
@@ -143,18 +145,6 @@ func applyYAMLPatch(configBytes []byte, patch string) ([]byte, error) {
 	return result, nil
 }
 
-// resolveTalosconfigPath resolves the talosconfig/secrets-bundle path using the
-// standard Talos resolution order: flag value → TALOSCONFIG env → ./talos/config.
-// Returns the resolved path (which may not exist; callers must check).
-func resolveTalosconfigPath(flagPath string) string {
-	if flagPath != "" {
-		return flagPath
-	}
-	if env := os.Getenv("TALOSCONFIG"); env != "" {
-		return env
-	}
-	return filepath.Join(".", "talos", "config")
-}
 
 // BootstrapNode declares a single Talos node for management cluster bootstrap.
 // Each node maps to one Talos machine configuration and one Kubernetes Secret.
@@ -262,13 +252,14 @@ type ClusterInput struct {
 	// +optional
 	Patches []string `yaml:"patches,omitempty"`
 
-	// ImportExistingCluster, when true, loads the Talos secrets bundle from the
-	// path resolved via --talosconfig flag (flag → TALOSCONFIG env → ./talos/config)
-	// rather than generating a fresh PKI bundle. Generated machine configs use the
-	// existing cluster's CA material so new nodes can join a cluster previously
-	// bootstrapped by other means.
-	// The secrets bundle is the YAML file produced by compiler bootstrap on first
-	// cluster creation — not the talosctl client config.
+	// ImportExistingCluster, when true, extracts PKI material from the running
+	// cluster's Kubernetes API rather than generating a fresh PKI bundle. The
+	// kubeconfig is resolved via --kubeconfig flag → KUBECONFIG env → ~/.kube/config.
+	// The Compiler reads the Secret seam-mc-{cluster-name}-{init-node} from
+	// seam-system, parses machineconfig.yaml, and derives a secrets.Bundle from the
+	// existing CA material. Generated machine configs use the existing cluster's CAs
+	// so new nodes join without PKI divergence.
+	// Fails fast if the kubeconfig is unreachable or the Secret is missing.
 	// +optional
 	ImportExistingCluster bool `yaml:"importExistingCluster,omitempty"`
 
@@ -475,14 +466,20 @@ func validateBootstrapInput(b *BootstrapSection) error {
 //   - {cluster-name}.yaml — TalosCluster CR with mode=bootstrap, capi.enabled=false.
 //   - bootstrap-sequence.yaml — documents the apply order.
 //
-// talosconfigPath is the resolved path to the Talos secrets bundle, used only when
-// in.ImportExistingCluster=true. Pass empty string to use the default resolution chain
-// (TALOSCONFIG env → ./talos/config).
+// kubeconfigPath is the optional path to a kubeconfig file, used only when
+// in.ImportExistingCluster=true. Pass empty string to use the standard resolution
+// chain (KUBECONFIG env → ~/.kube/config).
+//
+// When importExistingCluster=true, Compiler connects to the cluster Kubernetes API
+// via kubeconfig, reads the init-node machine config Secret from seam-system, parses
+// it, and derives the secrets bundle from existing CA material so new configs are
+// signed with the same PKI. Fails fast if the kubeconfig is unreachable or the
+// Secret or its machineconfig.yaml field is missing.
 //
 // Uses the Talos machinery library to generate machine configurations.
 // No cluster connection is required in the default (fresh PKI) path.
 // conductor-schema.md §9.
-func compileBootstrap(input, output, talosconfigPath string) error {
+func compileBootstrap(input, output, kubeconfigPath string) error {
 	in, err := readClusterInput(input)
 	if err != nil {
 		return err
@@ -516,16 +513,50 @@ func compileBootstrap(input, output, talosconfigPath string) error {
 		}
 	}
 
-	// Resolve the secrets bundle. When importExistingCluster=true, load the bundle
-	// from the resolved talosconfig path rather than generating fresh PKI material.
-	// The secrets bundle is the YAML file produced by compiler bootstrap on first
-	// cluster creation — not the talosctl client config.
+	// Resolve the secrets bundle. When importExistingCluster=true, extract PKI from
+	// the running cluster's Kubernetes API rather than generating fresh material.
+	// Connect via kubeconfig, read the init-node machine config Secret from seam-system,
+	// parse it with configloader, and derive the bundle from the existing CAs.
 	var secretsBundle *secrets.Bundle
 	if in.ImportExistingCluster {
-		bundlePath := resolveTalosconfigPath(talosconfigPath)
-		secretsBundle, err = secrets.LoadBundle(bundlePath)
+		// Find the init node hostname (guaranteed present by validateBootstrapInput).
+		var initHostname string
+		for _, n := range b.Nodes {
+			if n.Role == "init" {
+				initHostname = n.Hostname
+				break
+			}
+		}
+
+		// Connect to the management cluster API.
+		resolvedKubeconfig := resolveKubeconfigPath(kubeconfigPath)
+		k8sClient, err := buildK8sClient(resolvedKubeconfig)
 		if err != nil {
-			return fmt.Errorf("importExistingCluster: load secrets bundle from %q: %w", bundlePath, err)
+			return fmt.Errorf("importExistingCluster: connect to cluster via kubeconfig %q: %w", resolvedKubeconfig, err)
+		}
+
+		// Read the init-node machine config Secret.
+		secretName := "seam-mc-" + in.Name + "-" + initHostname
+		mcSecret, err := k8sClient.CoreV1().Secrets("seam-system").Get(
+			context.Background(), secretName, metav1.GetOptions{},
+		)
+		if err != nil {
+			return fmt.Errorf("importExistingCluster: read secret %q from seam-system: %w", secretName, err)
+		}
+
+		mcBytes, ok := mcSecret.Data["machineconfig.yaml"]
+		if !ok {
+			return fmt.Errorf("importExistingCluster: secret %q is missing machineconfig.yaml field", secretName)
+		}
+
+		// Parse the machine config and derive the secrets bundle from existing CAs.
+		provider, err := configloader.NewFromBytes(mcBytes)
+		if err != nil {
+			return fmt.Errorf("importExistingCluster: parse machineconfig from secret %q: %w", secretName, err)
+		}
+		secretsBundle = secrets.NewBundleFromConfig(secrets.NewClock(), provider)
+		if err := secretsBundle.Validate(); err != nil {
+			return fmt.Errorf("importExistingCluster: secrets bundle derived from %q is incomplete: %w", secretName, err)
 		}
 	} else {
 		secretsBundle, err = secrets.NewBundle(
