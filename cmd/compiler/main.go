@@ -76,10 +76,17 @@ Output contract:
               bootstrap-sequence.yaml           — Ordered bootstrap step manifest.
 
 ClusterInput optional fields (set in the --input YAML):
-  patches:               []string  — YAML patches deep-merged into every node's machine config.
-  ciliumPrerequisites:   bool      — Inject br_netfilter, xt_socket, and rp_filter sysctls.
-  registryMirrors:       []        — registry/endpoints pairs injected into registries.mirrors.
-  importExistingCluster: bool      — Extract PKI from the running cluster instead of generating fresh.
+  patches:               []string      — YAML patches deep-merged into every node's machine config.
+  ciliumPrerequisites:   bool          — Inject br_netfilter, xt_socket, and rp_filter sysctls.
+  registryMirrors:       []            — registry/endpoints pairs injected into registries.mirrors.
+  importExistingCluster: bool          — Extract PKI from the running cluster instead of generating fresh.
+  machineConfigPaths:    map[str]str   — Hostname to local Talos machine config YAML file path.
+                                         When non-empty with importExistingCluster=true, reads CA from
+                                         local files instead of querying the Kubernetes API. Init node
+                                         entry required. Use for pre-Seam clusters (no seam-mc Secrets).
+                                         Example:
+                                           machineConfigPaths:
+                                             ccs-mgmt-cp1: /path/to/controlplane.yaml
 
 Compile-only: output is a manifest set for human review and GitOps pipeline
 application — Compiler never applies, patches, or deletes any resource.

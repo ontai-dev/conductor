@@ -146,6 +146,26 @@ func applyYAMLPatch(configBytes []byte, patch string) ([]byte, error) {
 }
 
 
+// extractCAFromMachineConfig parses machineConfigBytes as a Talos machine config
+// and derives a secrets.Bundle from the existing CA material. Used by both the
+// local file path and the Kubernetes Secret path when importExistingCluster=true.
+//
+// Returns an error if parsing fails or the derived bundle fails validation.
+// Validation failure indicates that the machine config lacks required PKI fields
+// (e.g., machine.security.ca, cluster.ca, cluster.etcd.ca) — this would happen
+// if the bytes are a worker config or a pre-PKI stub, not a control-plane config.
+func extractCAFromMachineConfig(machineConfigBytes []byte) (*secrets.Bundle, error) {
+	provider, err := configloader.NewFromBytes(machineConfigBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse machineconfig: %w", err)
+	}
+	bundle := secrets.NewBundleFromConfig(secrets.NewClock(), provider)
+	if err := bundle.Validate(); err != nil {
+		return nil, fmt.Errorf("secrets bundle derived from machineconfig is incomplete (init node config required): %w", err)
+	}
+	return bundle, nil
+}
+
 // BootstrapNode declares a single Talos node for management cluster bootstrap.
 // Each node maps to one Talos machine configuration and one Kubernetes Secret.
 type BootstrapNode struct {
@@ -253,15 +273,45 @@ type ClusterInput struct {
 	Patches []string `yaml:"patches,omitempty"`
 
 	// ImportExistingCluster, when true, extracts PKI material from the running
-	// cluster's Kubernetes API rather than generating a fresh PKI bundle. The
-	// kubeconfig is resolved via --kubeconfig flag → KUBECONFIG env → ~/.kube/config.
-	// The Compiler reads the Secret seam-mc-{cluster-name}-{init-node} from
-	// seam-system, parses machineconfig.yaml, and derives a secrets.Bundle from the
-	// existing CA material. Generated machine configs use the existing cluster's CAs
-	// so new nodes join without PKI divergence.
-	// Fails fast if the kubeconfig is unreachable or the Secret is missing.
+	// cluster rather than generating a fresh PKI bundle. Two extraction paths exist:
+	//
+	//   machineConfigPaths non-empty — local file path (pre-Seam clusters):
+	//     Reads CA material from local Talos machine config YAML files. The init
+	//     node entry must be present in the map. Use this for clusters bootstrapped
+	//     before Seam, where no seam-mc Secrets exist in the management cluster.
+	//
+	//   machineConfigPaths absent or empty — Kubernetes API path (Seam clusters):
+	//     Connects to the management cluster API (kubeconfig resolved via
+	//     --kubeconfig flag → KUBECONFIG env → ~/.kube/config), reads the init-node
+	//     Secret seam-mc-{cluster-name}-{init-node} from seam-system, and extracts
+	//     CA material. Use for clusters previously bootstrapped via compiler bootstrap.
+	//
+	// In both paths, the same CA material extraction logic is used; only the source
+	// of the machine config bytes differs.
 	// +optional
 	ImportExistingCluster bool `yaml:"importExistingCluster,omitempty"`
+
+	// MachineConfigPaths is an optional map from node hostname to local file path of
+	// the raw Talos machine config YAML for that node. When importExistingCluster=true
+	// and this map is non-empty, Compiler reads CA material from local files instead
+	// of querying the Kubernetes API. Only the init node entry is used for CA
+	// extraction — the derived bundle is reused for all node configs in this run.
+	//
+	// The file must be the raw Talos machine config YAML (not a Kubernetes Secret).
+	// If the map is non-empty but the init node hostname is absent, Compiler returns
+	// an error — the init node entry is required for CA extraction.
+	//
+	// Example for ccs-mgmt (five-node management cluster):
+	//   machineConfigPaths:
+	//     ccs-mgmt-cp1: /path/to/controlplane.yaml
+	//     ccs-mgmt-cp2: /path/to/controlplane.yaml
+	//     ccs-mgmt-cp3: /path/to/controlplane.yaml
+	//     ccs-mgmt-w1:  /path/to/worker.yaml
+	//     ccs-mgmt-w2:  /path/to/worker.yaml
+	//
+	// Ignored when importExistingCluster=false.
+	// +optional
+	MachineConfigPaths map[string]string `yaml:"machineConfigPaths,omitempty"`
 
 	// RegistryMirrors configures registry mirrors injected into every node's machine
 	// config registries.mirrors section. Applied before user-provided Patches.
@@ -514,9 +564,17 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 	}
 
 	// Resolve the secrets bundle. When importExistingCluster=true, extract PKI from
-	// the running cluster's Kubernetes API rather than generating fresh material.
-	// Connect via kubeconfig, read the init-node machine config Secret from seam-system,
-	// parse it with configloader, and derive the bundle from the existing CAs.
+	// an existing cluster. Two paths are available:
+	//
+	//   machineConfigPaths non-empty — local file path (pre-Seam clusters):
+	//     Read the init node entry from the map, load the raw machine config file,
+	//     and extract CA material via extractCAFromMachineConfig.
+	//
+	//   machineConfigPaths absent — Kubernetes API path (Seam clusters):
+	//     Connect to the cluster API via kubeconfig, read the seam-mc-{cluster}-{init}
+	//     Secret from seam-system, extract machineconfig.yaml, and extract CA material.
+	//
+	// Both paths share extractCAFromMachineConfig for the final CA extraction step.
 	var secretsBundle *secrets.Bundle
 	if in.ImportExistingCluster {
 		// Find the init node hostname (guaranteed present by validateBootstrapInput).
@@ -528,35 +586,46 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 			}
 		}
 
-		// Connect to the management cluster API.
-		resolvedKubeconfig := resolveKubeconfigPath(kubeconfigPath)
-		k8sClient, err := buildK8sClient(resolvedKubeconfig)
-		if err != nil {
-			return fmt.Errorf("importExistingCluster: connect to cluster via kubeconfig %q: %w", resolvedKubeconfig, err)
-		}
+		if len(in.MachineConfigPaths) > 0 {
+			// Local file path: read CA from user-provided machine config file.
+			// Only the init node entry is required; the same bundle is used for all nodes.
+			mcPath, ok := in.MachineConfigPaths[initHostname]
+			if !ok {
+				return fmt.Errorf("importExistingCluster: machineConfigPaths is non-empty but init node %q has no entry", initHostname)
+			}
+			mcBytes, err := os.ReadFile(mcPath)
+			if err != nil {
+				return fmt.Errorf("importExistingCluster: read machineconfig for init node %q from %q: %w", initHostname, mcPath, err)
+			}
+			secretsBundle, err = extractCAFromMachineConfig(mcBytes)
+			if err != nil {
+				return fmt.Errorf("importExistingCluster: extract CA from local file %q: %w", mcPath, err)
+			}
+		} else {
+			// Kubernetes API path: read CA from seam-mc Secret in seam-system.
+			resolvedKubeconfig := resolveKubeconfigPath(kubeconfigPath)
+			k8sClient, err := buildK8sClient(resolvedKubeconfig)
+			if err != nil {
+				return fmt.Errorf("importExistingCluster: connect to cluster via kubeconfig %q: %w", resolvedKubeconfig, err)
+			}
 
-		// Read the init-node machine config Secret.
-		secretName := "seam-mc-" + in.Name + "-" + initHostname
-		mcSecret, err := k8sClient.CoreV1().Secrets("seam-system").Get(
-			context.Background(), secretName, metav1.GetOptions{},
-		)
-		if err != nil {
-			return fmt.Errorf("importExistingCluster: read secret %q from seam-system: %w", secretName, err)
-		}
+			secretName := "seam-mc-" + in.Name + "-" + initHostname
+			mcSecret, err := k8sClient.CoreV1().Secrets("seam-system").Get(
+				context.Background(), secretName, metav1.GetOptions{},
+			)
+			if err != nil {
+				return fmt.Errorf("importExistingCluster: read secret %q from seam-system: %w", secretName, err)
+			}
 
-		mcBytes, ok := mcSecret.Data["machineconfig.yaml"]
-		if !ok {
-			return fmt.Errorf("importExistingCluster: secret %q is missing machineconfig.yaml field", secretName)
-		}
+			mcBytes, ok := mcSecret.Data["machineconfig.yaml"]
+			if !ok {
+				return fmt.Errorf("importExistingCluster: secret %q is missing machineconfig.yaml field", secretName)
+			}
 
-		// Parse the machine config and derive the secrets bundle from existing CAs.
-		provider, err := configloader.NewFromBytes(mcBytes)
-		if err != nil {
-			return fmt.Errorf("importExistingCluster: parse machineconfig from secret %q: %w", secretName, err)
-		}
-		secretsBundle = secrets.NewBundleFromConfig(secrets.NewClock(), provider)
-		if err := secretsBundle.Validate(); err != nil {
-			return fmt.Errorf("importExistingCluster: secrets bundle derived from %q is incomplete: %w", secretName, err)
+			secretsBundle, err = extractCAFromMachineConfig(mcBytes)
+			if err != nil {
+				return fmt.Errorf("importExistingCluster: extract CA from secret %q: %w", secretName, err)
+			}
 		}
 	} else {
 		secretsBundle, err = secrets.NewBundle(
