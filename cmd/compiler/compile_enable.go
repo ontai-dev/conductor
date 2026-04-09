@@ -1739,7 +1739,13 @@ func operatorClusterRules(operatorName string) []rbacv1.PolicyRule {
 	case "guardian":
 		return append(common,
 			// core API group — ConfigMaps (audit batch staging), Secrets (CNPG creds),
-			// Namespaces (webhook-mode label inspection and patching).
+			// Namespaces (webhook-mode label inspection and patching),
+			// ServiceAccounts (Step J RBAC materialisation). INV-004.
+			rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"serviceaccounts"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
 			rbacv1.PolicyRule{
 				APIGroups: []string{""},
 				Resources: []string{"configmaps"},
