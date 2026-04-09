@@ -54,6 +54,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -66,6 +67,8 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/internal/catalog/capi"
@@ -205,7 +208,7 @@ func runEnableSubcommand(args []string) {
 	version := fs.String("version", "dev", "Operator image tag (e.g., v1.9.3-r1). Defaults to \"dev\".")
 	registry := fs.String("registry", defaultRegistry, "OCI registry prefix for operator images (default: 10.20.0.1:5000/ontai-dev).")
 	withCAPI := fs.Bool("capi", false, "Emit 00b-capi-prerequisites phase (CAPI core, Talos providers, Seam infra CRDs).")
-	_ = fs.String("kubeconfig", "", "Path to kubeconfig (unused in output-only mode; reserved for future validation)")
+	kubeconfig := fs.String("kubeconfig", "", "Path to kubeconfig for reading guardian-ca-secret at compile time. Optional — omit to emit with empty caBundle.")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, enableHelp)
@@ -222,7 +225,7 @@ func runEnableSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileEnableBundle(*output, *version, *registry, *withCAPI); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -239,7 +242,7 @@ func runEnableSubcommand(args []string) {
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version, registry string, withCAPI bool) error {
+func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
@@ -247,6 +250,11 @@ func compileEnableBundle(output, version, registry string, withCAPI bool) error 
 	gdn := guardianOp(version, registry)
 	pwOps := platformWrapperOps(version, registry)
 	cdt := conductorOp(version, registry)
+
+	// Read the Guardian CA bundle from the cluster at compile time.
+	// Returns nil when kubeconfig is empty or the Secret is unreachable —
+	// the emitted VWC will have an empty caBundle in that case.
+	caBundle := readGuardianCABundle(kubeconfig)
 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
@@ -262,7 +270,7 @@ func compileEnableBundle(output, version, registry string, withCAPI bool) error 
 	if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
 		return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
 	}
-	if err := writePhase2GuardianDeploy(output, gdn); err != nil {
+	if err := writePhase2GuardianDeploy(output, gdn, caBundle); err != nil {
 		return fmt.Errorf("phase 2 guardian-deploy: %w", err)
 	}
 	if err := writePhase3PlatformWrapper(output, pwOps); err != nil {
@@ -869,7 +877,7 @@ func writeGuardianCRDs(dir string) error {
 
 // --- Phase 2: guardian-deploy ---
 
-func writePhase2GuardianDeploy(output string, gdn operatorSpec) error {
+func writePhase2GuardianDeploy(output string, gdn operatorSpec, caBundle []byte) error {
 	dir := filepath.Join(output, "02-guardian-deploy")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -877,8 +885,11 @@ func writePhase2GuardianDeploy(output string, gdn operatorSpec) error {
 
 	files := []string{
 		"guardian-webhook-cert.yaml",
+		"guardian-service.yaml",
 		"guardian-deployment.yaml",
 		"guardian-metrics-service.yaml",
+		"guardian-rbac-webhook.yaml",
+		"guardian-lineage-webhook.yaml",
 	}
 
 	meta := phaseMeta{
@@ -897,8 +908,13 @@ func writePhase2GuardianDeploy(output string, gdn operatorSpec) error {
 	}
 
 	// guardian-webhook-cert.yaml — cert-manager Certificate CR for the admission webhook TLS.
-	// Must be applied before the Deployment so the Secret exists when Guardian starts.
+	// Must be applied before the Service and Deployment so the Secret exists when Guardian starts.
 	if err := writeGuardianWebhookCert(dir); err != nil {
+		return err
+	}
+
+	// guardian-service.yaml — multi-port Service for Guardian webhook, gRPC, and metrics.
+	if err := writeGuardianService(dir, gdn.Namespace); err != nil {
 		return err
 	}
 
@@ -908,6 +924,16 @@ func writePhase2GuardianDeploy(output string, gdn operatorSpec) error {
 
 	// guardian-metrics-service.yaml — Prometheus metrics Service for Guardian.
 	if err := writeMetricsServiceFile(dir, "guardian-metrics-service.yaml", gdn.Name, gdn.Namespace); err != nil {
+		return err
+	}
+
+	// guardian-rbac-webhook.yaml — ValidatingWebhookConfiguration for RBAC resources.
+	if err := writeGuardianRBACWebhook(dir, caBundle); err != nil {
+		return err
+	}
+
+	// guardian-lineage-webhook.yaml — ValidatingWebhookConfiguration for lineage immutability.
+	if err := writeGuardianLineageWebhook(dir, caBundle); err != nil {
 		return err
 	}
 
@@ -964,6 +990,237 @@ func writeGuardianWebhookCert(dir string) error {
 	buf.Write(data)
 
 	return os.WriteFile(filepath.Join(dir, "guardian-webhook-cert.yaml"), buf.Bytes(), 0644)
+}
+
+// readGuardianCABundle reads the ca.crt field from the guardian-ca-secret Secret in seam-system.
+// Returns nil when kubeconfig is empty, the Secret is unreachable, or the field is absent.
+// A nil return is safe: caBundle fields are emitted as empty strings in the YAML output.
+func readGuardianCABundle(kubeconfig string) []byte {
+	if kubeconfig == "" {
+		return nil
+	}
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil
+	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil
+	}
+	secret, err := clientset.CoreV1().Secrets("seam-system").Get(
+		context.Background(), "guardian-ca-secret", metav1.GetOptions{})
+	if err != nil {
+		return nil
+	}
+	return secret.Data["ca.crt"]
+}
+
+// writeGuardianService writes guardian-service.yaml to dir.
+// Emits a multi-port Service for Guardian: webhook (443→9443), gRPC (9090→9090),
+// and metrics (8080→8080). Selects pods labelled app.kubernetes.io/name=guardian.
+// guardian-schema.md §3.
+func writeGuardianService(dir, namespace string) error {
+	svc := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name":      "guardian",
+			"namespace": namespace,
+			"labels": map[string]string{
+				"app.kubernetes.io/name":      "guardian",
+				"app.kubernetes.io/component": "webhook",
+				"ontai.dev/managed-by":        "compiler",
+			},
+			"annotations": map[string]string{
+				"ontai.dev/managed-by": "compiler",
+			},
+		},
+		"spec": map[string]interface{}{
+			"selector": map[string]string{
+				"app.kubernetes.io/name": "guardian",
+			},
+			"ports": []map[string]interface{}{
+				{
+					"name":       "webhook",
+					"port":       443,
+					"targetPort": 9443,
+					"protocol":   "TCP",
+				},
+				{
+					"name":       "grpc",
+					"port":       9090,
+					"targetPort": 9090,
+					"protocol":   "TCP",
+				},
+				{
+					"name":       "metrics",
+					"port":       8080,
+					"targetPort": 8080,
+					"protocol":   "TCP",
+				},
+			},
+		},
+	}
+
+	data, err := yaml.Marshal(svc)
+	if err != nil {
+		return fmt.Errorf("marshal guardian Service: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Guardian Service\n")
+	buf.WriteString("# Generated by: compiler enable (phase 2 guardian-deploy)\n")
+	buf.WriteString("# Multi-port Service: webhook (443→9443), gRPC (9090→9090), metrics (8080→8080).\n")
+	buf.WriteString("# caBundle in ValidatingWebhookConfigurations references this Service.\n")
+	buf.WriteString("# guardian-schema.md §3.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+
+	return os.WriteFile(filepath.Join(dir, "guardian-service.yaml"), buf.Bytes(), 0644)
+}
+
+// writeGuardianRBACWebhook writes guardian-rbac-webhook.yaml to dir.
+// Emits a ValidatingWebhookConfiguration that gates all RBAC resource writes
+// across all non-exempt namespaces. caBundle is the PEM-encoded CA cert for
+// the guardian-ca-issuer; may be nil when running without a live cluster.
+// guardian-schema.md §5. CS-INV-001.
+func writeGuardianRBACWebhook(dir string, caBundle []byte) error {
+	vwc := map[string]interface{}{
+		"apiVersion": "admissionregistration.k8s.io/v1",
+		"kind":       "ValidatingWebhookConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "guardian-rbac-webhook",
+			"annotations": map[string]string{
+				"ontai.dev/managed-by": "compiler",
+			},
+		},
+		"webhooks": []map[string]interface{}{
+			{
+				"name":                    "validate-rbac.security.ontai.dev",
+				"admissionReviewVersions": []string{"v1"},
+				"sideEffects":             "None",
+				// FailurePolicy: Fail — policy without enforcement is decoration. CS-INV-001.
+				"failurePolicy": "Fail",
+				// Namespaces labelled seam.ontai.dev/webhook-mode=exempt are excluded
+				// (seam-system, kube-system). All other namespaces are subject to RBAC enforcement.
+				// guardian-schema.md §5.
+				"namespaceSelector": map[string]interface{}{
+					"matchExpressions": []map[string]interface{}{
+						{
+							"key":      "seam.ontai.dev/webhook-mode",
+							"operator": "NotIn",
+							"values":   []string{"exempt"},
+						},
+					},
+				},
+				"rules": []map[string]interface{}{
+					{
+						"apiGroups":   []string{"rbac.authorization.k8s.io"},
+						"apiVersions": []string{"v1"},
+						"operations":  []string{"CREATE", "UPDATE"},
+						"resources":   []string{"roles", "clusterroles", "rolebindings", "clusterrolebindings"},
+						"scope":       "*",
+					},
+					{
+						"apiGroups":   []string{""},
+						"apiVersions": []string{"v1"},
+						"operations":  []string{"CREATE", "UPDATE"},
+						"resources":   []string{"serviceaccounts"},
+						"scope":       "*",
+					},
+				},
+				"clientConfig": map[string]interface{}{
+					"caBundle": caBundle,
+					"service": map[string]interface{}{
+						"name":      "guardian",
+						"namespace": "seam-system",
+						"path":      "/validate-rbac",
+						"port":      443,
+					},
+				},
+			},
+		},
+	}
+
+	data, err := yaml.Marshal(vwc)
+	if err != nil {
+		return fmt.Errorf("marshal guardian RBAC ValidatingWebhookConfiguration: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Guardian RBAC ValidatingWebhookConfiguration\n")
+	buf.WriteString("# Generated by: compiler enable (phase 2 guardian-deploy)\n")
+	buf.WriteString("# Gates all RBAC writes in non-exempt namespaces.\n")
+	buf.WriteString("# Exempt namespaces carry seam.ontai.dev/webhook-mode=exempt label.\n")
+	buf.WriteString("# caBundle populated from guardian-ca-secret at compile time.\n")
+	buf.WriteString("# guardian-schema.md §5. CS-INV-001.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+
+	return os.WriteFile(filepath.Join(dir, "guardian-rbac-webhook.yaml"), buf.Bytes(), 0644)
+}
+
+// writeGuardianLineageWebhook writes guardian-lineage-webhook.yaml to dir.
+// Emits a ValidatingWebhookConfiguration that enforces lineage immutability on
+// all security.ontai.dev root declaration CRDs. caBundle is the PEM-encoded CA
+// cert for the guardian-ca-issuer; may be nil when running without a live cluster.
+// CLAUDE.md §14 Decision 1. guardian-schema.md §5.
+func writeGuardianLineageWebhook(dir string, caBundle []byte) error {
+	vwc := map[string]interface{}{
+		"apiVersion": "admissionregistration.k8s.io/v1",
+		"kind":       "ValidatingWebhookConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "guardian-lineage-immutability-webhook",
+			"annotations": map[string]string{
+				"ontai.dev/managed-by": "compiler",
+			},
+		},
+		"webhooks": []map[string]interface{}{
+			{
+				"name":                    "validate-lineage.security.ontai.dev",
+				"admissionReviewVersions": []string{"v1"},
+				"sideEffects":             "None",
+				// FailurePolicy: Fail — a missing lineage check is a security breach.
+				// CLAUDE.md §14 Decision 1. guardian-schema.md §5.
+				"failurePolicy": "Fail",
+				"rules": []map[string]interface{}{
+					{
+						"apiGroups":   []string{"security.ontai.dev"},
+						"apiVersions": []string{"v1alpha1"},
+						"operations":  []string{"UPDATE"},
+						"resources":   []string{"rbacpolicies", "rbacprofiles", "identitybindings", "identityproviders", "permissionsets"},
+						"scope":       "*",
+					},
+				},
+				"clientConfig": map[string]interface{}{
+					"caBundle": caBundle,
+					"service": map[string]interface{}{
+						"name":      "guardian",
+						"namespace": "seam-system",
+						"path":      "/validate-lineage",
+						"port":      443,
+					},
+				},
+			},
+		},
+	}
+
+	data, err := yaml.Marshal(vwc)
+	if err != nil {
+		return fmt.Errorf("marshal guardian lineage ValidatingWebhookConfiguration: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Guardian Lineage Immutability ValidatingWebhookConfiguration\n")
+	buf.WriteString("# Generated by: compiler enable (phase 2 guardian-deploy)\n")
+	buf.WriteString("# Enforces spec.lineage immutability on all security.ontai.dev root declarations.\n")
+	buf.WriteString("# Rejects any UPDATE that attempts to alter a lineage field after creation.\n")
+	buf.WriteString("# caBundle populated from guardian-ca-secret at compile time.\n")
+	buf.WriteString("# CLAUDE.md §14 Decision 1. guardian-schema.md §5.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+
+	return os.WriteFile(filepath.Join(dir, "guardian-lineage-webhook.yaml"), buf.Bytes(), 0644)
 }
 
 // --- Phase 3: platform-wrapper ---
