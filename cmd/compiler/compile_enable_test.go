@@ -443,7 +443,7 @@ func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "phase-meta.yaml")
 
 	assertContainsStr(t, content, "phase: guardian-bootstrap")
-	assertContainsStr(t, content, "order: 1")
+	assertContainsStr(t, content, `order: "1"`)
 	// namespace-labels.yaml must be the first entry in applyOrder.
 	namespaceIdx := strings.Index(content, "namespace-labels.yaml")
 	guardianCRDsIdx := strings.Index(content, "guardian-crds.yaml")
@@ -501,7 +501,7 @@ func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 
 	content := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "phase-meta.yaml")
 	assertContainsStr(t, content, "phase: infrastructure-dependencies")
-	assertContainsStr(t, content, "order: 0")
+	assertContainsStr(t, content, `order: "0"`)
 }
 
 // TestEnable_Phase00_PrerequisitesIsConfigMap verifies that prerequisites.yaml in
