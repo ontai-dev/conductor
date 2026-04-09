@@ -198,25 +198,55 @@ func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 	}
 }
 
-// TestEnable_RBACYAMLContainsAllOperators verifies that SA, ClusterRole, and
-// ClusterRoleBinding exist for each operator across the phase RBAC files.
+// TestEnable_RBACYAMLContainsAllOperators verifies that ServiceAccounts exist for all
+// operators and that ClusterRole/ClusterRoleBinding exist ONLY for Guardian.
+//
+// Non-guardian operators (platform, wrapper, seam-core, conductor) receive their RBAC
+// exclusively via Guardian's RBACProfile provisioning mechanism — not via static
+// ClusterRole/ClusterRoleBinding. Emitting those for non-guardian operators would
+// bypass INV-004 (Guardian owns all RBAC). guardian-schema.md §6.
 func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, false); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
-	// Collect all RBAC content across phases 1, 3, 4.
-	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbac.yaml") +
-		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbac.yaml") +
-		readPhaseFile(t, outDir, "04-conductor", "conductor-rbac.yaml")
+	guardianRBAC := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbac.yaml")
+	platformRBAC := readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbac.yaml")
+	conductorRBAC := readPhaseFile(t, outDir, "04-conductor", "conductor-rbac.yaml")
 
-	assertContainsStr(t, content, "kind: ServiceAccount")
-	assertContainsStr(t, content, "kind: ClusterRole")
-	assertContainsStr(t, content, "kind: ClusterRoleBinding")
-	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
-		if !strings.Contains(content, name+"-manager-role") {
-			t.Errorf("RBAC files do not contain ClusterRole for %q", name)
+	allContent := guardianRBAC + platformRBAC + conductorRBAC
+
+	// All files together must contain ServiceAccount resources.
+	assertContainsStr(t, allContent, "kind: ServiceAccount")
+
+	// Guardian must have a ClusterRole and ClusterRoleBinding (bootstrap window static RBAC).
+	assertContainsStr(t, guardianRBAC, "kind: ClusterRole")
+	assertContainsStr(t, guardianRBAC, "kind: ClusterRoleBinding")
+	assertContainsStr(t, guardianRBAC, "guardian-manager-role")
+
+	// Non-guardian operators must NOT have static ClusterRole/ClusterRoleBinding —
+	// they are governed by Guardian's RBACProfile provisioning (INV-004).
+	for _, name := range []string{"conductor", "platform", "wrapper", "seam-core"} {
+		if strings.Contains(allContent, name+"-manager-role") {
+			t.Errorf("RBAC files must not contain static ClusterRole for %q — use RBACProfile provisioning (INV-004)", name)
+		}
+	}
+
+	// Non-guardian files must have ServiceAccounts but no ClusterRole/ClusterRoleBinding.
+	for _, content := range []struct {
+		name    string
+		content string
+	}{
+		{"platform-wrapper-rbac.yaml", platformRBAC},
+		{"conductor-rbac.yaml", conductorRBAC},
+	} {
+		assertContainsStr(t, content.content, "kind: ServiceAccount")
+		if strings.Contains(content.content, "kind: ClusterRole") {
+			t.Errorf("%s must not contain kind: ClusterRole — non-guardian RBAC is provisioned via RBACProfile", content.name)
+		}
+		if strings.Contains(content.content, "kind: ClusterRoleBinding") {
+			t.Errorf("%s must not contain kind: ClusterRoleBinding — non-guardian RBAC is provisioned via RBACProfile", content.name)
 		}
 	}
 }
