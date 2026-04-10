@@ -27,6 +27,22 @@ var packInstanceGVR = schema.GroupVersionResource{
 	Resource: "packinstances",
 }
 
+// clusterPackGVR is the GroupVersionResource for ClusterPack CRs.
+// Defined by the Wrapper operator in infra.ontai.dev. conductor-schema.md §10.
+// The management cluster Conductor signs ClusterPacks so the wrapper
+// ClusterPackReconciler can transition Status.Signed=true and Available.
+var clusterPackGVR = schema.GroupVersionResource{
+	Group:    "infra.ontai.dev",
+	Version:  "v1alpha1",
+	Resource: "clusterpacks",
+}
+
+// clusterPackSignatureAnnotation is the annotation key read by the wrapper
+// ClusterPackReconciler to detect that conductor has signed the ClusterPack.
+// Defined in wrapper/internal/controller/clusterpack_reconciler.go as
+// packSignatureAnnotation. Must remain in sync with that constant.
+const clusterPackSignatureAnnotation = "ontai.dev/pack-signature"
+
 // permissionSnapshotGVR is the GroupVersionResource for PermissionSnapshot CRs.
 // Defined by the Guardian operator in security.ontai.dev. conductor-schema.md §10.
 var permissionSnapshotGVR = schema.GroupVersionResource{
@@ -121,12 +137,14 @@ func (l *SigningLoop) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// signAll iterates over PackInstance and PermissionSnapshot CRs and signs any
-// that are missing the management-signature annotation. PackInstances also have
-// their signed artifact stored as a Secret on the management cluster (Gap 28).
+// signAll iterates over PackInstance, PermissionSnapshot, and ClusterPack CRs
+// and signs any that are missing their respective signature annotations.
+// PackInstances also have their signed artifact stored as a Secret on the
+// management cluster (Gap 28).
 func (l *SigningLoop) signAll(ctx context.Context) {
 	l.signPackInstances(ctx)
-	l.signGVR(ctx, permissionSnapshotGVR)
+	l.signGVR(ctx, permissionSnapshotGVR, managementSignatureAnnotation)
+	l.signGVR(ctx, clusterPackGVR, clusterPackSignatureAnnotation)
 }
 
 // signPackInstances handles the full signing cycle for PackInstance CRs:
@@ -288,9 +306,12 @@ func (l *SigningLoop) storeSignedArtifactSecret(ctx context.Context, packInstanc
 	}
 }
 
-// signGVR lists all CRs of the given GVR and patches the management-signature
-// annotation on any that do not yet have it. Used for PermissionSnapshot CRs.
-func (l *SigningLoop) signGVR(ctx context.Context, gvr schema.GroupVersionResource) {
+// signGVR lists all CRs of the given GVR and patches the given annotationKey
+// on any that do not yet have it. Used for PermissionSnapshot and ClusterPack CRs.
+// Each caller passes the annotation key appropriate for the CR type — the wrapper
+// ClusterPackReconciler reads "ontai.dev/pack-signature" while PermissionSnapshot
+// consumers read "runner.ontai.dev/management-signature".
+func (l *SigningLoop) signGVR(ctx context.Context, gvr schema.GroupVersionResource, annotationKey string) {
 	// List across all namespaces.
 	list, err := l.client.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -301,7 +322,7 @@ func (l *SigningLoop) signGVR(ctx context.Context, gvr schema.GroupVersionResour
 	for _, item := range list.Items {
 		annotations := item.GetAnnotations()
 		if annotations != nil {
-			if _, signed := annotations[managementSignatureAnnotation]; signed {
+			if _, signed := annotations[annotationKey]; signed {
 				// Already signed — skip.
 				continue
 			}
@@ -321,7 +342,7 @@ func (l *SigningLoop) signGVR(ctx context.Context, gvr schema.GroupVersionResour
 		patch := map[string]interface{}{
 			"metadata": map[string]interface{}{
 				"annotations": map[string]interface{}{
-					managementSignatureAnnotation: sigB64,
+					annotationKey: sigB64,
 				},
 			},
 		}
