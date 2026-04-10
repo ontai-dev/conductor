@@ -221,6 +221,32 @@ func TestOCIRef_DigestRef(t *testing.T) {
 	}
 }
 
+// TestOCIRef_TagAndDigestRef verifies that a reference containing both a tag and
+// a digest (url:tag@digest format) strips the tag and fetches by digest alone.
+// The tag must not appear in the registry URL path. conductor-schema.md §9.
+func TestOCIRef_TagAndDigestRef(t *testing.T) {
+	digest := "sha256:deadbeef"
+	requested := ""
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = r.URL.Path
+		http.NotFound(w, r) // capture URL; don't serve valid response
+	}))
+	t.Cleanup(srv.Close)
+
+	host := srv.Listener.Addr().String()
+	// Reference with both tag and digest — tag must be stripped from URL path.
+	ref := fmt.Sprintf("%s/myrepo/img:v1.0@%s", host, digest)
+
+	adapter := capability.NewOCIRegistryClientAdapterWithHTTPClient(srv.Client())
+	adapter.PullManifests(context.Background(), ref) //nolint:errcheck
+
+	expected := fmt.Sprintf("/v2/myrepo/img/manifests/%s", digest)
+	if requested != expected {
+		t.Errorf("manifest URL path: got %q; want %q", requested, expected)
+	}
+}
+
 // ── stub: no-op io.ReadCloser ─────────────────────────────────────────────────
 
 type nopReadCloser struct{ r io.Reader }

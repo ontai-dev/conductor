@@ -230,9 +230,17 @@ func parseOCIRef(reference string) (ociRef, error) {
 
 	// Separate digest (@sha256:...) from tag (:tag).
 	if idx := strings.Index(remainder, "@"); idx >= 0 {
+		namePart := remainder[:idx]
+		// Strip any trailing tag (:tag) from the name. When a digest is present the
+		// tag is redundant and must not appear in the registry URL path — the path
+		// segment after the repository name must go directly to /manifests/{digest}.
+		// e.g. "ontai-dev/test-pack:v0.1.0@sha256:..." → name="ontai-dev/test-pack"
+		if colonIdx := strings.LastIndex(namePart, ":"); colonIdx >= 0 {
+			namePart = namePart[:colonIdx]
+		}
 		return ociRef{
 			registry: registry,
-			name:     remainder[:idx],
+			name:     namePart,
 			ref:      remainder[idx+1:], // e.g., "sha256:abc123"
 		}, nil
 	}
