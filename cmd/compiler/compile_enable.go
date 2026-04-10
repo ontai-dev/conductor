@@ -1183,6 +1183,18 @@ func writeGuardianLineageWebhook(dir string, caBundle []byte) error {
 				// FailurePolicy: Fail — a missing lineage check is a security breach.
 				// CLAUDE.md §14 Decision 1. guardian-schema.md §5.
 				"failurePolicy": "Fail",
+				// Namespaces labelled seam.ontai.dev/webhook-mode=exempt are excluded
+				// (seam-system, kube-system). All other namespaces are subject to
+				// lineage immutability enforcement. guardian-schema.md §5.
+				"namespaceSelector": map[string]interface{}{
+					"matchExpressions": []map[string]interface{}{
+						{
+							"key":      "seam.ontai.dev/webhook-mode",
+							"operator": "NotIn",
+							"values":   []string{"exempt"},
+						},
+					},
+				},
 				"rules": []map[string]interface{}{
 					{
 						"apiGroups":   []string{"security.ontai.dev"},
