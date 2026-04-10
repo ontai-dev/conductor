@@ -129,8 +129,12 @@ func TestEnable_Phase00aNamespacesContent(t *testing.T) {
 	// seam-system must carry the Guardian CheckBootstrapLabels gate label.
 	assertContainsStr(t, content, "seam.ontai.dev/webhook-mode: exempt")
 
-	// Both namespaces must carry privileged PSA enforcement.
-	assertContainsStr(t, content, "pod-security.kubernetes.io/enforce: privileged")
+	// All namespaces must carry restricted PSA enforcement with warn mirroring enforce.
+	assertContainsStr(t, content, "pod-security.kubernetes.io/enforce: restricted")
+	assertContainsStr(t, content, "pod-security.kubernetes.io/warn: restricted")
+
+	// ont-system must carry webhook-mode=governed (Guardian gates RBAC after bootstrap).
+	assertContainsStr(t, content, "seam.ontai.dev/webhook-mode: governed")
 
 	// seam-tenant namespaces must NOT be pre-created — they are Platform's domain.
 	if containsStr(content, "seam-tenant") {

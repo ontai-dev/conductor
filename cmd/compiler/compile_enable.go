@@ -178,12 +178,19 @@ func platformWrapperOps(version, registry, dsnsIP string) []operatorSpec {
 // clusterName is the management cluster name used to populate --cluster-ref arg.
 // Pass empty string to omit the args (used in tests without a real cluster name).
 func conductorOp(version, registry, clusterName string) operatorSpec {
+	// Conductor lease name is conductor-{clusterName} when clusterName is known,
+	// falling back to conductor-management for test/dry-run invocations without
+	// a real cluster name. conductor-schema.md §15 Role Declaration Contract.
+	leaderLease := "conductor-management"
+	if clusterName != "" {
+		leaderLease = "conductor-" + clusterName
+	}
 	op := operatorSpec{
 		Name:                "conductor",
 		Namespace:           "ont-system",
 		Image:               registry + "/conductor:" + version,
 		ServiceAccount:      "conductor",
-		LeaderElectionLease: "conductor-management",
+		LeaderElectionLease: leaderLease,
 	}
 	if clusterName != "" {
 		op.Args = []string{"agent", "--cluster-ref=" + clusterName}
@@ -501,10 +508,10 @@ func writeNamespacesManifest(dir, clusterName string) error {
 				// webhook-mode=exempt before Guardian's admission webhook registers.
 				// guardian-schema.md §4 Bootstrap RBAC Window, guardian 25c9e93 WS3.
 				"seam.ontai.dev/webhook-mode": "exempt",
-				// Privileged PSA: Seam operators run with elevated capabilities (leader
-				// election, CRD management). Namespace-wide privileged enforcement is
-				// required to avoid Pod admission failures on operator startup.
-				"pod-security.kubernetes.io/enforce": "privileged",
+				// Restricted PSA: operator containers must not require privileged escalation.
+				// warn mirrors enforce so violations surface before rollout.
+				"pod-security.kubernetes.io/enforce": "restricted",
+				"pod-security.kubernetes.io/warn":    "restricted",
 			},
 		},
 	}
@@ -513,9 +520,12 @@ func writeNamespacesManifest(dir, clusterName string) error {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "ont-system",
 			Labels: map[string]string{
-				// Privileged PSA: Conductor agent runs with host network access and
-				// eBPF capabilities for the PermissionService gRPC server.
-				"pod-security.kubernetes.io/enforce": "privileged",
+				// Restricted PSA. warn mirrors enforce.
+				"pod-security.kubernetes.io/enforce": "restricted",
+				"pod-security.kubernetes.io/warn":    "restricted",
+				// webhook-mode=governed: Guardian admission webhook gates RBAC resources
+				// in ont-system after the bootstrap window closes.
+				"seam.ontai.dev/webhook-mode": "governed",
 			},
 		},
 	}
@@ -536,10 +546,10 @@ func writeNamespacesManifest(dir, clusterName string) error {
 	buf.WriteString("#\n")
 	buf.WriteString("# seam-system: operator namespace for all Seam operator managers.\n")
 	buf.WriteString("#   webhook-mode=exempt: Guardian CheckBootstrapLabels startup gate.\n")
-	buf.WriteString("#   privileged PSA: required for operator containers.\n")
+	buf.WriteString("#   restricted PSA: operators must not require privilege escalation.\n")
 	buf.WriteString("#\n")
 	buf.WriteString("# ont-system: Conductor agent namespace (management and target clusters).\n")
-	buf.WriteString("#   privileged PSA: required for Conductor eBPF/host-network capabilities.\n")
+	buf.WriteString("#   restricted PSA, webhook-mode=governed.\n")
 	buf.WriteString("#\n")
 	if clusterName != "" {
 		buf.WriteString("# seam-tenant-" + clusterName + ": pack delivery namespace for the management cluster.\n")
@@ -563,11 +573,14 @@ func writeNamespacesManifest(dir, clusterName string) error {
 				Labels: map[string]string{
 					// Platform owns tenant namespaces — this is the management cluster's own
 					// tenant namespace for pack delivery. Labeled for Platform inspection.
-					"ontai.dev/managed-by":        "platform",
-					"platform.ontai.dev/cluster":  clusterName,
+					"ontai.dev/managed-by":       "platform",
+					"platform.ontai.dev/cluster": clusterName,
 					// webhook-mode=governed: Guardian admission webhook gates RBAC resources
 					// in this namespace after the bootstrap window closes.
 					"seam.ontai.dev/webhook-mode": "governed",
+					// Restricted PSA. warn mirrors enforce.
+					"pod-security.kubernetes.io/enforce": "restricted",
+					"pod-security.kubernetes.io/warn":    "restricted",
 				},
 			},
 		}
