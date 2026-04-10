@@ -294,8 +294,13 @@ func (e *capabilityStepExecutor) Execute(
 		}, nil
 	}
 
-	// Derive a per-step ConfigMap name from step name and clusterRef.
-	cmName := fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
+	// Derive the ConfigMap name: prefer step.Parameters["operationResultCM"] (set
+	// by buildStepParameters() from OPERATION_RESULT_CM env var — the name the
+	// owning operator reads back). Fall back to a deterministic pattern.
+	cmName := step.Parameters["operationResultCM"]
+	if cmName == "" {
+		cmName = fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
+	}
 
 	params := capability.ExecuteParams{
 		Capability:        step.Capability,

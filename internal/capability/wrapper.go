@@ -48,12 +48,13 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	}
 
 	// Read the PackExecution CR to get the ClusterPack reference.
-	// PackExecution lives in infra-system. wrapper-schema.md §4.
-	peList, err := params.DynamicClient.Resource(packExecutionGVR).Namespace("infra-system").
+	// PackExecutions live in seam-tenant-{clusterRef}. wrapper-schema.md §4.
+	peTenantNS := "seam-tenant-" + params.ClusterRef
+	peList, err := params.DynamicClient.Resource(packExecutionGVR).Namespace(peTenantNS).
 		List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("list PackExecution in infra-system: %v", err)), nil
+			fmt.Sprintf("list PackExecution in %s: %v", peTenantNS, err)), nil
 	}
 
 	var clusterPackName, clusterPackVersion string
@@ -69,7 +70,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 
 	if clusterPackName == "" {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
-			fmt.Sprintf("no PackExecution CR targeting cluster %q found in infra-system", params.ClusterRef)), nil
+			fmt.Sprintf("no PackExecution CR targeting cluster %q found in %s", params.ClusterRef, peTenantNS)), nil
 	}
 
 	// Read the ClusterPack to get the OCI registry reference and checksum.

@@ -229,7 +229,7 @@ func packExecutionCR(targetClusterRef, packName, packVersion string) *unstructur
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "infra.ontai.dev/v1alpha1",
 		"kind":       "PackExecution",
-		"metadata":   map[string]interface{}{"name": "pe-" + targetClusterRef, "namespace": "infra-system"},
+		"metadata":   map[string]interface{}{"name": "pe-" + targetClusterRef, "namespace": "seam-tenant-" + targetClusterRef},
 		"spec": map[string]interface{}{
 			"targetClusterRef": targetClusterRef,
 			"clusterPackRef": map[string]interface{}{
