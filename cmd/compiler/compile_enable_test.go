@@ -78,6 +78,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"phase-meta.yaml",
 			"dsns-zone-configmap.yaml",
 			"coredns-dsns-stanza.yaml",
+			"coredns-deployment-patch.yaml",
 			"dsns-loadbalancer.yaml",
 			"leaderelection.yaml",
 		}},
@@ -355,6 +356,7 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"05-post-bootstrap", "phase-meta.yaml"},
 		{"05-post-bootstrap", "dsns-zone-configmap.yaml"},
 		{"05-post-bootstrap", "coredns-dsns-stanza.yaml"},
+		{"05-post-bootstrap", "coredns-deployment-patch.yaml"},
 		{"05-post-bootstrap", "dsns-loadbalancer.yaml"},
 		{"05-post-bootstrap", "leaderelection.yaml"},
 	}
@@ -639,7 +641,8 @@ func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
 	content := readPhaseFile(t, outDir, "05-post-bootstrap", "dsns-zone-configmap.yaml")
 
 	assertContainsStr(t, content, "name: dsns-zone")
-	assertContainsStr(t, content, "namespace: ont-system")
+	// kube-system: CoreDNS pods mount this ConfigMap directly — must be co-located.
+	assertContainsStr(t, content, "namespace: kube-system")
 	assertContainsStr(t, content, "seam.ontai.dev/dsns-zone")
 	assertContainsStr(t, content, "governance.infrastructure.ontai.dev/owner")
 	assertContainsStr(t, content, "seam-core")
@@ -658,7 +661,10 @@ func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
 
 	assertContainsStr(t, content, "kind: Service")
 	assertContainsStr(t, content, "type: LoadBalancer")
-	assertContainsStr(t, content, "loadBalancerIP: 10.20.0.10")
+	// kube-system: Service selector must be in same namespace as CoreDNS pods.
+	assertContainsStr(t, content, "namespace: kube-system")
+	// Cilium IPAM annotation replaces deprecated spec.loadBalancerIP.
+	assertContainsStr(t, content, "lbipam.cilium.io/ips")
 	assertContainsStr(t, content, "port: 53")
 	assertContainsStr(t, content, "UDP")
 	assertContainsStr(t, content, "TCP")
