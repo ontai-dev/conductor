@@ -6,6 +6,8 @@ package capability
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -198,15 +200,16 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	}, nil
 }
 
-// computeManifestChecksum computes a simple content-addressed checksum for
-// a set of manifest bytes. This is a placeholder — production implementation
-// uses the same algorithm as the Compiler (sha256 of concatenated manifests).
+// computeManifestChecksum computes SHA256 of the concatenated raw artifact bytes
+// returned by PullManifests. For a single-layer OCI image this equals SHA256 of
+// the artifact blob — the same value produced by "sha256sum <artifact>.tar.gz".
+// Returns the checksum in "sha256:{hex}" format to match ClusterPack.spec.checksum.
 func computeManifestChecksum(manifests [][]byte) string {
-	// The real checksum must match what the Compiler produces. Actual
-	// implementation requires the shared checksum function from runnerlib.
-	// For now, return a sentinel that will only match if expectedChecksum is empty.
-	_ = manifests
-	return ""
+	h := sha256.New()
+	for _, m := range manifests {
+		h.Write(m)
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
 // gvrFromAPIVersionKind derives a schema.GroupVersionResource from the
