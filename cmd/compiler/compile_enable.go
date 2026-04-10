@@ -86,6 +86,21 @@ type operatorSpec struct {
 	ServiceAccount string
 	// LeaderElectionLease is the name of the leader election Lease.
 	LeaderElectionLease string
+	// Args are extra command-line arguments appended after the binary entrypoint.
+	// For Conductor: ["agent", "--cluster-ref=<cluster-name>"]. conductor-schema.md §15.
+	Args []string
+	// WebhookSecret is the name of the TLS Secret to mount as webhook certs at
+	// /tmp/k8s-webhook-server/serving-certs. Non-empty for Guardian, Platform,
+	// Wrapper, seam-core (all operators running an admission webhook server).
+	WebhookSecret string
+	// ConductorRegistry is the OCI registry prefix for Conductor executor Jobs.
+	// Injected as CONDUCTOR_REGISTRY env var into the Platform Deployment so the
+	// Platform operator can reference the correct Conductor image for Jobs it submits.
+	// Non-empty for Platform only.
+	ConductorRegistry string
+	// DSNSServiceIP is the DSNS LoadBalancer IP injected as DSNS_SERVICE_IP into
+	// the seam-core Deployment. Non-empty when --dsns-ip is provided to compiler enable.
+	DSNSServiceIP string
 }
 
 // phaseMeta is the structure written to phase-meta.yaml in each phase directory.
@@ -117,11 +132,14 @@ func guardianOp(version, registry string) operatorSpec {
 		Image:               registry + "/guardian:" + version,
 		ServiceAccount:      "guardian",
 		LeaderElectionLease: "guardian-leader",
+		WebhookSecret:       "guardian-webhook-cert",
 	}
 }
 
 // platformWrapperOps returns operatorSpecs for Platform, Wrapper, and seam-core.
-func platformWrapperOps(version, registry string) []operatorSpec {
+// dsnsIP is the DSNS LoadBalancer IP injected into seam-core as DSNS_SERVICE_IP.
+// Pass empty string when not providing a DSNS IP (e.g., in tests).
+func platformWrapperOps(version, registry, dsnsIP string) []operatorSpec {
 	return []operatorSpec{
 		{
 			Name:                "platform",
@@ -129,6 +147,8 @@ func platformWrapperOps(version, registry string) []operatorSpec {
 			Image:               registry + "/ont-platform:" + version,
 			ServiceAccount:      "platform",
 			LeaderElectionLease: "platform-leader",
+			WebhookSecret:       "platform-webhook-cert",
+			ConductorRegistry:   registry,
 		},
 		{
 			Name:                "wrapper",
@@ -136,6 +156,7 @@ func platformWrapperOps(version, registry string) []operatorSpec {
 			Image:               registry + "/ont-infra:" + version,
 			ServiceAccount:      "wrapper",
 			LeaderElectionLease: "wrapper-leader",
+			WebhookSecret:       "wrapper-webhook-cert",
 		},
 		{
 			Name:                "seam-core",
@@ -143,26 +164,34 @@ func platformWrapperOps(version, registry string) []operatorSpec {
 			Image:               registry + "/seam-core:" + version,
 			ServiceAccount:      "seam-core",
 			LeaderElectionLease: "seam-core-leader",
+			WebhookSecret:       "seam-core-webhook-cert",
+			DSNSServiceIP:       dsnsIP,
 		},
 	}
 }
 
 // conductorOp returns the operatorSpec for the Conductor operator.
-func conductorOp(version, registry string) operatorSpec {
-	return operatorSpec{
+// clusterName is the management cluster name used to populate --cluster-ref arg.
+// Pass empty string to omit the args (used in tests without a real cluster name).
+func conductorOp(version, registry, clusterName string) operatorSpec {
+	op := operatorSpec{
 		Name:                "conductor",
 		Namespace:           "ont-system",
 		Image:               registry + "/conductor:" + version,
 		ServiceAccount:      "conductor",
 		LeaderElectionLease: "conductor-management",
 	}
+	if clusterName != "" {
+		op.Args = []string{"agent", "--cluster-ref=" + clusterName}
+	}
+	return op
 }
 
 // allOperators returns all operator specs in their original flat order (used
 // for leader election leases in phase 5 which covers all operators).
-func allOperators(version, registry string) []operatorSpec {
-	result := []operatorSpec{conductorOp(version, registry), guardianOp(version, registry)}
-	result = append(result, platformWrapperOps(version, registry)...)
+func allOperators(version, registry, clusterName, dsnsIP string) []operatorSpec {
+	result := []operatorSpec{conductorOp(version, registry, clusterName), guardianOp(version, registry)}
+	result = append(result, platformWrapperOps(version, registry, dsnsIP)...)
 	return result
 }
 
@@ -209,6 +238,8 @@ func runEnableSubcommand(args []string) {
 	registry := fs.String("registry", defaultRegistry, "OCI registry prefix for operator images (default: 10.20.0.1:5000/ontai-dev).")
 	withCAPI := fs.Bool("capi", false, "Emit 00b-capi-prerequisites phase (CAPI core, Talos providers, Seam infra CRDs).")
 	kubeconfig := fs.String("kubeconfig", "", "Path to kubeconfig for reading guardian-ca-secret at compile time. Optional — omit to emit with empty caBundle.")
+	clusterName := fs.String("cluster-name", "", "Management cluster name stamped into the Conductor --cluster-ref arg. Required for production deployments.")
+	dsnsIP := fs.String("dsns-ip", "", "DSNS LoadBalancer IP (lbipam.cilium.io/ips annotation on dsns-loadbalancer Service). Required for production deployments.")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, enableHelp)
@@ -225,7 +256,7 @@ func runEnableSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -238,18 +269,25 @@ func runEnableSubcommand(args []string) {
 // "10.20.0.1:5000/ontai-dev"). Images are constructed as {registry}/{operator}:{version}.
 // Pass defaultRegistry to use the default local lab registry.
 //
+// clusterName is the management cluster name stamped into the Conductor Deployment
+// as --cluster-ref=<clusterName>. Pass empty string to omit the arg (used in tests).
+//
+// dsnsIP is the DSNS LoadBalancer IP set via lbipam.cilium.io/ips annotation on the
+// DSNS LoadBalancer Service. It is also injected as DSNS_SERVICE_IP into the seam-core
+// Deployment. Pass empty string to omit (used in tests without a live cluster).
+//
 // When withCAPI is true the 00b-capi-prerequisites phase is emitted between phase 0
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool) error {
+func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP string) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
 	gdn := guardianOp(version, registry)
-	pwOps := platformWrapperOps(version, registry)
-	cdt := conductorOp(version, registry)
+	pwOps := platformWrapperOps(version, registry, dsnsIP)
+	cdt := conductorOp(version, registry, clusterName)
 
 	// Read the Guardian CA bundle from the cluster at compile time.
 	// Returns nil when kubeconfig is empty or the Secret is unreachable —
@@ -279,7 +317,7 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 	if err := writePhase4Conductor(output, cdt); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
-	if err := writePhase5PostBootstrap(output, allOperators(version, registry)); err != nil {
+	if err := writePhase5PostBootstrap(output, allOperators(version, registry, clusterName, dsnsIP), dsnsIP); err != nil {
 		return fmt.Errorf("phase 5 post-bootstrap: %w", err)
 	}
 
@@ -1398,7 +1436,7 @@ func writeConductorCRDs(dir string) error {
 
 // --- Phase 5: post-bootstrap ---
 
-func writePhase5PostBootstrap(output string, operators []operatorSpec) error {
+func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP string) error {
 	dir := filepath.Join(output, "05-post-bootstrap")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1891,18 +1929,50 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 		})
 	}
 
-	// Guardian Deployment mounts the webhook TLS certificate at the path that
-	// controller-runtime's webhook server reads by default.
+	// Platform, Wrapper, and seam-core carry OPERATOR_NAMESPACE so their webhook
+	// servers and controllers can resolve their own namespace without downward API
+	// duplication. OPERATOR_NAMESPACE is also required by Guardian admission hooks
+	// in the platform and wrapper namespaces. guardian-schema.md §5.
+	if op.Name == "platform" || op.Name == "wrapper" || op.Name == "seam-core" {
+		env = append(env, corev1.EnvVar{
+			Name: "OPERATOR_NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			},
+		})
+	}
+
+	// Platform carries CONDUCTOR_REGISTRY so it can construct Conductor executor Job
+	// image references without hardcoding the registry. conductor-schema.md §15.
+	if op.ConductorRegistry != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "CONDUCTOR_REGISTRY",
+			Value: op.ConductorRegistry,
+		})
+	}
+
+	// seam-core carries DSNS_SERVICE_IP so the DSNSState can seed the static ns
+	// glue A record on startup. seam-core-schema.md §8 Decision 2.
+	if op.DSNSServiceIP != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "DSNS_SERVICE_IP",
+			Value: op.DSNSServiceIP,
+		})
+	}
+
+	// Operators running an admission webhook server mount their TLS certificate Secret
+	// at the path controller-runtime reads by default. WebhookSecret is set on all
+	// operators that run a webhook: Guardian, Platform, Wrapper, seam-core.
 	// guardian-schema.md §3 (webhook TLS).
 	var volumes []corev1.Volume
 	var volumeMounts []corev1.VolumeMount
-	if op.Name == "guardian" {
+	if op.WebhookSecret != "" {
 		volumes = []corev1.Volume{
 			{
 				Name: "webhook-certs",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: "guardian-webhook-cert",
+						SecretName: op.WebhookSecret,
 					},
 				},
 			},
@@ -1954,7 +2024,8 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 						{
 							Name:            op.Name,
 							Image:           op.Image,
-							ImagePullPolicy: corev1.PullIfNotPresent,
+							ImagePullPolicy: corev1.PullAlways,
+							Args:            op.Args,
 							Env:             env,
 							VolumeMounts:    volumeMounts,
 							// Container-level security context — defense in depth.
@@ -2127,13 +2198,22 @@ func writeLeaderElectionYAML(dir string, operators []operatorSpec) error {
 
 // buildOperatorRBACProfile constructs a Guardian RBACProfile CR for one Seam operator SA.
 // Uses the security.ontai.dev/v1alpha1 schema from guardian-schema.md §7.
+//
+// All RBACProfile CRs live in seam-system regardless of the operator's runtime
+// namespace. Conductor runs in ont-system but its RBACProfile is in seam-system
+// so Guardian can discover it alongside all other operator profiles.
+// guardian-schema.md §6.
 func buildOperatorRBACProfile(op operatorSpec) map[string]interface{} {
+	// RBACProfiles always land in seam-system — Guardian discovers them there.
+	// The principalRef still references the operator's actual SA namespace (op.Namespace).
+	profileNamespace := "seam-system"
+
 	return map[string]interface{}{
 		"apiVersion": "security.ontai.dev/v1alpha1",
 		"kind":       "RBACProfile",
 		"metadata": map[string]interface{}{
 			"name":      "rbac-" + op.Name,
-			"namespace": op.Namespace,
+			"namespace": profileNamespace,
 			"labels": map[string]string{
 				"app.kubernetes.io/name":      op.Name,
 				"app.kubernetes.io/component": "operator",
