@@ -71,6 +71,23 @@ func runExecute() {
 		os.Exit(1)
 	}
 
+	// Construct a synthetic single-step RunnerConfig from env vars.
+	// BuildExecuteContext populates Capability/ClusterRef/OperationResultCM but
+	// leaves RunnerConfig.Steps empty. kernel.RunExecute requires ≥1 step.
+	// conductor-schema.md §17.
+	execCtx.RunnerConfig = runnerlib.RunnerConfigSpec{
+		ClusterRef:  execCtx.ClusterRef,
+		RunnerImage: os.Getenv("CONDUCTOR_IMAGE"),
+		Steps: []runnerlib.RunnerConfigStep{
+			{
+				Name:          execCtx.Capability,
+				Capability:    execCtx.Capability,
+				HaltOnFailure: true,
+				Parameters:    buildStepParameters(),
+			},
+		},
+	}
+
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: build in-cluster config: %v\n", err)
@@ -212,6 +229,31 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "conductor agent: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// buildStepParameters collects pack-deploy relevant env vars into the
+// RunnerConfigStep.Parameters map. Keys match the parameter vocabulary
+// consumed by capability handlers. wrapper-schema.md §4, conductor-schema.md §6.
+func buildStepParameters() map[string]string {
+	params := map[string]string{}
+	if v := os.Getenv("PACK_REGISTRY_REF"); v != "" {
+		params["registryRef"] = v
+	}
+	if v := os.Getenv("PACK_CHECKSUM"); v != "" {
+		params["checksum"] = v
+	}
+	if v := os.Getenv("PACK_SIGNATURE"); v != "" {
+		params["signature"] = v
+	}
+	if v := os.Getenv("OPERATION_RESULT_CM"); v != "" {
+		params["operationResultCM"] = v
+	}
+	kubeconfigPath := "/var/run/secrets/kubeconfig/kubeconfig"
+	if v := os.Getenv("KUBECONFIG"); v != "" {
+		kubeconfigPath = v
+	}
+	params["kubeconfigPath"] = kubeconfigPath
+	return params
 }
 
 func printUsage() {
