@@ -17,9 +17,10 @@ import (
 )
 
 // packReceiptGVR is the GroupVersionResource for PackReceipt CRs.
-// Defined by the Wrapper operator in infra.ontai.dev. conductor-schema.md §10.
+// Defined in runner.ontai.dev — conductor owns PackReceipt as the sole author
+// and manager on every target cluster. conductor-schema.md §10, §15.
 var packReceiptGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "runner.ontai.dev",
 	Version:  "v1alpha1",
 	Resource: "packreceipts",
 }

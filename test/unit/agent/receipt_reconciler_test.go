@@ -15,7 +15,7 @@ import (
 // packReceiptGVR mirrors the GVR defined in the production receipt_reconciler.go.
 // Redeclared here to keep the test package self-contained.
 var packReceiptGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "runner.ontai.dev",
 	Version:  "v1alpha1",
 	Resource: "packreceipts",
 }
