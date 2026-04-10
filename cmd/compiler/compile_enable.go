@@ -1821,7 +1821,10 @@ func writePhaseMeta(dir string, meta phaseMeta) error {
 // RBAC exclusively via Guardian's RBACProfile provisioning mechanism. Emitting
 // static ClusterRole/ClusterRoleBinding for them would bypass Guardian's RBAC
 // ownership invariant (INV-004) and create parallel, unmanaged RBAC entries.
-// guardian-schema.md §6.
+//
+// Platform and Wrapper also emit executor ServiceAccounts ({op}-executor in
+// ont-system). These are the identities under which Kueue-submitted executor Jobs
+// run. guardian-schema.md §6.
 func writeOperatorRBACFile(dir, filename string, operators []operatorSpec) error {
 	var buf bytes.Buffer
 	buf.WriteString("# Seam Operator RBAC Resources\n")
@@ -1829,6 +1832,7 @@ func writeOperatorRBACFile(dir, filename string, operators []operatorSpec) error
 	buf.WriteString("# Human review required before GitOps commit.\n")
 	buf.WriteString("# ClusterRole and ClusterRoleBinding are emitted only for Guardian.\n")
 	buf.WriteString("# All other operators receive RBAC via Guardian RBACProfile provisioning (INV-004).\n")
+	buf.WriteString("# Platform and Wrapper additionally emit executor ServiceAccounts in ont-system.\n")
 
 	for _, op := range operators {
 		sa := corev1.ServiceAccount{
@@ -1849,6 +1853,31 @@ func writeOperatorRBACFile(dir, filename string, operators []operatorSpec) error
 		}
 		buf.WriteString("---\n")
 		buf.Write(saData)
+
+		// Executor ServiceAccounts — Platform and Wrapper submit Kueue Jobs whose
+		// pods run under a separate executor SA in ont-system. This separates the
+		// operator's control-plane identity from the executor Job identity.
+		// conductor-schema.md §5 (execute mode).
+		if op.Name == "platform" || op.Name == "wrapper" {
+			executorSA := corev1.ServiceAccount{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      op.Name + "-executor",
+					Namespace: "ont-system",
+					Labels: map[string]string{
+						"app.kubernetes.io/name":      op.Name,
+						"app.kubernetes.io/component": "executor",
+						"ontai.dev/managed-by":        "compiler",
+					},
+				},
+			}
+			executorData, err := yaml.Marshal(executorSA)
+			if err != nil {
+				return fmt.Errorf("marshal executor ServiceAccount for %s: %w", op.Name, err)
+			}
+			buf.WriteString("---\n")
+			buf.Write(executorData)
+		}
 
 		// Static ClusterRole and ClusterRoleBinding are the Guardian bootstrap
 		// window RBAC only. All other operators are governed by Guardian's own
