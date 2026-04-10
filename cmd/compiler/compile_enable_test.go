@@ -71,6 +71,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"conductor-crds.yaml",
 			"conductor-rbac.yaml",
 			"conductor-rbacprofile.yaml",
+			"conductor-signing-key.yaml",
 			"conductor-deployment.yaml",
 			"conductor-metrics-service.yaml",
 		}},

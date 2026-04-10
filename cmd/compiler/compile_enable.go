@@ -55,6 +55,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
@@ -1368,6 +1372,7 @@ func writePhase4Conductor(output string, cdt operatorSpec) error {
 		"conductor-crds.yaml",
 		"conductor-rbac.yaml",
 		"conductor-rbacprofile.yaml",
+		"conductor-signing-key.yaml",
 		"conductor-deployment.yaml",
 		"conductor-metrics-service.yaml",
 	}
@@ -1399,6 +1404,13 @@ func writePhase4Conductor(output string, cdt operatorSpec) error {
 
 	// conductor-rbacprofile.yaml — Conductor RBACProfile CR.
 	if err := writeOperatorRBACProfilesFile(dir, "conductor-rbacprofile.yaml", []operatorSpec{cdt}); err != nil {
+		return err
+	}
+
+	// conductor-signing-key.yaml — Ed25519 key pair Secret in ont-system.
+	// Emitted BEFORE conductor-deployment.yaml so the volume mount resolves at apply time.
+	// INV-026, conductor-schema.md §15.
+	if err := writeConductorSigningKeySecret(dir); err != nil {
 		return err
 	}
 
@@ -2011,6 +2023,8 @@ func writeDeploymentsFile(dir, filename string, operators []operatorSpec, header
 // Conductor Deployment carries CONDUCTOR_ROLE=management. conductor-schema.md §15.
 func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 	replicas := int32(2)
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
 	env := []corev1.EnvVar{
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
@@ -2038,6 +2052,9 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 				},
 			},
+			// TODO(guardian-engineer): wire PERMISSION_SNAPSHOT_FRESHNESS_WINDOW into
+			// PermissionSnapshotReconciler freshness validation logic. guardian-schema.md §9.
+			corev1.EnvVar{Name: "PERMISSION_SNAPSHOT_FRESHNESS_WINDOW", Value: "3600"},
 		)
 	}
 
@@ -2047,6 +2064,30 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 		env = append(env, corev1.EnvVar{
 			Name:  "CONDUCTOR_ROLE",
 			Value: "management",
+		})
+	}
+
+	// Conductor mounts the Ed25519 signing key Secret emitted in phase 04.
+	// SIGNING_PRIVATE_KEY_PATH and SIGNING_PUBLIC_KEY_PATH point to the PEM files
+	// within the mount. The Secret (conductor-signing-key) is emitted BEFORE this
+	// Deployment in the phase 04 apply order. INV-026, conductor-schema.md §15.
+	if op.Name == "conductor" {
+		env = append(env,
+			corev1.EnvVar{Name: "SIGNING_PRIVATE_KEY_PATH", Value: "/etc/conductor/signing/private.pem"},
+			corev1.EnvVar{Name: "SIGNING_PUBLIC_KEY_PATH", Value: "/etc/conductor/signing/public.pem"},
+		)
+		volumes = append(volumes, corev1.Volume{
+			Name: "conductor-signing-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: "conductor-signing-key",
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "conductor-signing-key",
+			MountPath: "/etc/conductor/signing",
+			ReadOnly:  true,
 		})
 	}
 
@@ -2085,26 +2126,20 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 	// at the path controller-runtime reads by default. WebhookSecret is set on all
 	// operators that run a webhook: Guardian, Platform, Wrapper, seam-core.
 	// guardian-schema.md §3 (webhook TLS).
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
 	if op.WebhookSecret != "" {
-		volumes = []corev1.Volume{
-			{
-				Name: "webhook-certs",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: op.WebhookSecret,
-					},
+		volumes = append(volumes, corev1.Volume{
+			Name: "webhook-certs",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: op.WebhookSecret,
 				},
 			},
-		}
-		volumeMounts = []corev1.VolumeMount{
-			{
-				Name:      "webhook-certs",
-				MountPath: "/tmp/k8s-webhook-server/serving-certs",
-				ReadOnly:  true,
-			},
-		}
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "webhook-certs",
+			MountPath: "/tmp/k8s-webhook-server/serving-certs",
+			ReadOnly:  true,
+		})
 	}
 
 	return appsv1.Deployment{
@@ -2278,6 +2313,68 @@ func operatorClusterRules(operatorName string) []rbacv1.PolicyRule {
 	default:
 		return common
 	}
+}
+
+// writeConductorSigningKeySecret generates a fresh Ed25519 signing key pair and
+// writes it as a Kubernetes Secret named conductor-signing-key in ont-system.
+// The Secret carries private.pem (PKCS8 PEM) and public.pem (PKIX PEM).
+// Emitted in phase 04 BEFORE conductor-deployment.yaml so the volume mount resolves.
+// INV-026, conductor-schema.md §15 (signing key lifecycle).
+func writeConductorSigningKeySecret(dir string) error {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate Ed25519 signing key: %w", err)
+	}
+
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("marshal PKCS8 private key: %w", err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+
+	publicDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return fmt.Errorf("marshal PKIX public key: %w", err)
+	}
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+
+	secret := corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conductor-signing-key",
+			Namespace: "ont-system",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "conductor",
+				"app.kubernetes.io/component": "signing",
+				"ontai.dev/managed-by":        "compiler",
+			},
+			Annotations: map[string]string{
+				// Human review: rotate this Secret via a new compiler enable run.
+				// The Conductor Deployment must be restarted after rotation.
+				"ontai.dev/rotate-via": "compiler enable",
+			},
+		},
+		StringData: map[string]string{
+			"private.pem": string(privatePEM),
+			"public.pem":  string(publicPEM),
+		},
+	}
+
+	data, err := yaml.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("marshal conductor-signing-key Secret: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Conductor Ed25519 signing key Secret — generated by compiler enable.\n")
+	buf.WriteString("# Private key: PKCS8 PEM. Public key: PKIX PEM.\n")
+	buf.WriteString("# Mounted at /etc/conductor/signing in the Conductor Deployment.\n")
+	buf.WriteString("# Rotate: re-run compiler enable and restart the Conductor Deployment.\n")
+	buf.WriteString("# WARNING: generated fresh each compiler enable run — store in GitOps after first enable.\n")
+	buf.WriteString("# INV-026, conductor-schema.md §15.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+	return os.WriteFile(filepath.Join(dir, "conductor-signing-key.yaml"), buf.Bytes(), 0644)
 }
 
 // writeLeaderElectionYAML writes leader election Lease resources in seam-system
