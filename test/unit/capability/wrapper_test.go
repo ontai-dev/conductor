@@ -248,7 +248,7 @@ func clusterPackCR(clusterRef, name, version, ociRef string) *unstructured.Unstr
 		"spec": map[string]interface{}{
 			"version": version,
 			"registryRef": map[string]interface{}{
-				"digest": ociRef,
+				"url": ociRef,
 			},
 		},
 	}}

@@ -89,9 +89,16 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		if name != clusterPackName || version != clusterPackVersion {
 			continue
 		}
-		ociRef, _, _ = unstructuredString(item.Object, "spec", "registryRef", "digest")
-		if ociRef == "" {
-			ociRef, _, _ = unstructuredString(item.Object, "spec", "registryRef", "url")
+		url, _, _ := unstructuredString(item.Object, "spec", "registryRef", "url")
+		digest, _, _ := unstructuredString(item.Object, "spec", "registryRef", "digest")
+		if url == "" {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("ClusterPack %s/%s has no registryRef.url", clusterPackName, clusterPackVersion)), nil
+		}
+		if digest != "" {
+			ociRef = url + "@" + digest
+		} else {
+			ociRef = url
 		}
 		expectedChecksum, _, _ = unstructuredString(item.Object, "spec", "checksum")
 		break
