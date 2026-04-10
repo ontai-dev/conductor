@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -122,7 +123,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 
 	// Verify content checksum if provided by the ClusterPack CR.
 	if expectedChecksum != "" {
-		actualChecksum := computeManifestChecksum(manifests)
+		actualChecksum := strings.TrimPrefix(computeManifestChecksum(manifests), "sha256:")
 		if actualChecksum != expectedChecksum {
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
 				fmt.Sprintf("checksum mismatch: expected %s, got %s", expectedChecksum, actualChecksum)), nil
