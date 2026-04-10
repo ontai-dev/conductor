@@ -23,7 +23,37 @@ import (
 // Production builds override this via -ldflags -X.
 const agentVersion = "dev"
 
+// PermissionServiceEnabled reports whether a Conductor with the given role should
+// start the local PermissionService gRPC server.
+//
+// Management cluster: returns false. PermissionService on the management cluster
+// is owned by Guardian — Conductor must not start a competing instance.
+//
+// Tenant cluster: returns true. Each tenant Conductor serves authorization
+// decisions locally from the acknowledged PermissionSnapshot without requiring
+// management cluster connectivity. conductor-schema.md §15, §10 step 6.
+func PermissionServiceEnabled(role Role) bool {
+	return role == RoleTenant
+}
+
+// WebhookEnabled reports whether a Conductor with the given role should start the
+// admission webhook server.
+//
+// Management cluster: returns false. The admission webhook on the management
+// cluster is owned by Guardian — Conductor must not start a competing instance.
+//
+// Tenant cluster: returns true. Each tenant Conductor runs a local admission
+// webhook that intercepts RBAC resources and enforces ontai.dev/rbac-owner=guardian.
+// conductor-schema.md §15.
+func WebhookEnabled(role Role) bool {
+	return role == RoleTenant
+}
+
 // RunAgent implements the agent-mode pipeline.
+//
+// Phase 0 — Role resolution: read CONDUCTOR_ROLE and exit with InvariantViolation
+//
+//	if absent or unrecognized. conductor-schema.md §15.
 //
 // Phase 1 — Bootstrap: validate mode (refuse compile flag). INV-023.
 // Phase 2 — Capability Declaration: on leader win, publish capability manifest
@@ -36,6 +66,14 @@ const agentVersion = "dev"
 // The call blocks until goCtx is cancelled (OS signal or test cancellation).
 // Returns nil on clean shutdown. conductor-design.md §4.3, conductor-schema.md §10.
 func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kubernetes.Interface, dynamicClient dynamic.Interface) error {
+	// Phase 0 — Resolve role. Exit immediately if absent or unrecognised.
+	// An unresolved role is a programming error — no reconciliation loop may run
+	// without a valid role declaration. conductor-schema.md §15. INV-026.
+	role, roleErr := ParseRole(os.Getenv)
+	if roleErr != nil {
+		ExitInvariantViolation("CONDUCTOR_ROLE must be management or tenant: " + roleErr.Error())
+	}
+
 	// Phase 1 — Validate mode. compile flag is InvariantViolation. INV-023.
 	GuardNotCompileMode(execCtx.Mode)
 
@@ -87,24 +125,34 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef)
 	}
 
-	// Phase 3 — Start the local PermissionService gRPC server.
-	// Serves authorization decisions from the local acknowledged PermissionSnapshot
-	// without requiring management cluster connectivity. All clusters (management
-	// and target) start this server. conductor-schema.md §10 step 6.
-	permSvcAddr := os.Getenv("PERMISSION_SERVICE_ADDR")
-	if permSvcAddr == "" {
-		permSvcAddr = ":50051"
-	}
+	// Phase 3 — PermissionService gRPC server (tenant clusters only).
+	// Management cluster: PermissionService is owned by Guardian. Conductor must
+	// not start a competing instance. conductor-schema.md §15.
+	// Tenant clusters: serves authorization decisions from the local acknowledged
+	// PermissionSnapshot without requiring management cluster connectivity.
+	// conductor-schema.md §10 step 6.
+	//
+	// snapshotStore is constructed unconditionally — both role paths need it for
+	// the federation pull loop and FederationClient.
 	snapshotStore := permissionservice.NewSnapshotStore()
-	localSvc := permissionservice.NewLocalService(snapshotStore)
-	go func() {
-		if err := permissionservice.ListenAndServe(goCtx, permSvcAddr, localSvc); err != nil {
-			fmt.Printf("conductor agent: cluster=%q permission service error: %v\n",
-				execCtx.ClusterRef, err)
+	if PermissionServiceEnabled(role) {
+		permSvcAddr := os.Getenv("PERMISSION_SERVICE_ADDR")
+		if permSvcAddr == "" {
+			permSvcAddr = ":50051"
 		}
-	}()
-	fmt.Printf("conductor agent: cluster=%q starting local PermissionService on %s\n",
-		execCtx.ClusterRef, permSvcAddr)
+		localSvc := permissionservice.NewLocalService(snapshotStore)
+		go func() {
+			if err := permissionservice.ListenAndServe(goCtx, permSvcAddr, localSvc); err != nil {
+				fmt.Printf("conductor agent: cluster=%q permission service error: %v\n",
+					execCtx.ClusterRef, err)
+			}
+		}()
+		fmt.Printf("conductor agent: cluster=%q starting local PermissionService on %s\n",
+			execCtx.ClusterRef, permSvcAddr)
+	} else {
+		fmt.Printf("conductor agent: cluster=%q role=management: PermissionService owned by Guardian, skipping\n",
+			execCtx.ClusterRef)
+	}
 
 	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance).
 	// When MGMT_KUBECONFIG_PATH is set, this Conductor is on a target cluster and
@@ -229,32 +277,38 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, mgmtFedAddr)
 	}
 
-	// Phase 3 — Start the SealedCausalChain admission webhook server.
-	// The webhook enforces spec.lineage immutability on all Seam-managed CRDs.
-	// seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
-	// Runs on all replicas (not gated by leader election) — the webhook must serve
-	// requests regardless of whether this replica holds the leader lease.
+	// Phase 3 — Admission webhook server (tenant clusters only).
+	// Management cluster: the admission webhook is owned by Guardian. Conductor
+	// must not start a competing instance. conductor-schema.md §15.
+	// Tenant clusters: enforces ontai.dev/rbac-owner=guardian annotation on all
+	// RBAC resources via a local webhook. Runs on all replicas (not gated by
+	// leader election) so the webhook serves requests without leadership dependency.
 	// WEBHOOK_TLS_CERT_PATH, WEBHOOK_TLS_KEY_PATH, and WEBHOOK_ADDR are read from
-	// the environment. When cert/key are not configured the webhook is skipped
-	// (development/test mode).
-	certPath := os.Getenv("WEBHOOK_TLS_CERT_PATH")
-	keyPath := os.Getenv("WEBHOOK_TLS_KEY_PATH")
-	if certPath != "" && keyPath != "" {
-		webhookAddr := os.Getenv("WEBHOOK_ADDR")
-		if webhookAddr == "" {
-			webhookAddr = ":8443"
-		}
-		wh := webhook.NewWebhookServer(webhookAddr, certPath, keyPath)
-		go func() {
-			if err := wh.Start(goCtx, certPath, keyPath); err != nil {
-				fmt.Printf("conductor agent: cluster=%q webhook server error: %v\n",
-					execCtx.ClusterRef, err)
+	// the environment. When cert/key are absent the webhook is skipped even on
+	// tenant clusters (development/test mode). seam-core-schema.md §5.
+	if WebhookEnabled(role) {
+		certPath := os.Getenv("WEBHOOK_TLS_CERT_PATH")
+		keyPath := os.Getenv("WEBHOOK_TLS_KEY_PATH")
+		if certPath != "" && keyPath != "" {
+			webhookAddr := os.Getenv("WEBHOOK_ADDR")
+			if webhookAddr == "" {
+				webhookAddr = ":8443"
 			}
-		}()
-		fmt.Printf("conductor agent: cluster=%q starting admission webhook on %s\n",
-			execCtx.ClusterRef, webhookAddr)
+			wh := webhook.NewWebhookServer(webhookAddr, certPath, keyPath)
+			go func() {
+				if err := wh.Start(goCtx, certPath, keyPath); err != nil {
+					fmt.Printf("conductor agent: cluster=%q webhook server error: %v\n",
+						execCtx.ClusterRef, err)
+				}
+			}()
+			fmt.Printf("conductor agent: cluster=%q starting admission webhook on %s\n",
+				execCtx.ClusterRef, webhookAddr)
+		} else {
+			fmt.Printf("conductor agent: cluster=%q WEBHOOK_TLS_CERT_PATH/WEBHOOK_TLS_KEY_PATH not set — webhook disabled\n",
+				execCtx.ClusterRef)
+		}
 	} else {
-		fmt.Printf("conductor agent: cluster=%q WEBHOOK_TLS_CERT_PATH/WEBHOOK_TLS_KEY_PATH not set — webhook disabled\n",
+		fmt.Printf("conductor agent: cluster=%q role=management: admission webhook owned by Guardian, skipping\n",
 			execCtx.ClusterRef)
 	}
 
