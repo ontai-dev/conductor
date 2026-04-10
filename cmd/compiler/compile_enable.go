@@ -301,7 +301,7 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
 	}
-	if err := writePhase00aNamespaces(output); err != nil {
+	if err := writePhase00aNamespaces(output, clusterName); err != nil {
 		return fmt.Errorf("phase 00a namespaces: %w", err)
 	}
 	if withCAPI {
@@ -438,7 +438,7 @@ func writePrerequisitesConfigMap(dir string) error {
 // — the pipeline applies phases in directory name order.
 //
 // conductor-schema.md §9, CONTEXT.md §4.
-func writePhase00aNamespaces(output string) error {
+func writePhase00aNamespaces(output, clusterName string) error {
 	dir := filepath.Join(output, "00a-namespaces")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -447,7 +447,7 @@ func writePhase00aNamespaces(output string) error {
 	if err := writeNamespacesPhaseMetaYAML(dir); err != nil {
 		return err
 	}
-	return writeNamespacesManifest(dir)
+	return writeNamespacesManifest(dir, clusterName)
 }
 
 // writeNamespacesPhaseMetaYAML writes the phase-meta.yaml for the 00a-namespaces phase
@@ -487,9 +487,11 @@ func writeNamespacesPhaseMetaYAML(dir string) error {
 }
 
 // writeNamespacesManifest writes namespaces.yaml containing the two canonical
-// Seam namespace objects. seam-tenant-{cluster-name} namespaces are created
-// by the Platform operator at cluster formation time and are NOT pre-created here.
-func writeNamespacesManifest(dir string) error {
+// Seam namespace objects plus, when clusterName is non-empty, the seam-tenant-
+// {clusterName} namespace required by the pack delivery chain (wrapper-schema.md §9).
+// The seam-tenant namespace carries managed-by=platform, cluster={clusterName}, and
+// webhook-mode=governed labels.
+func writeNamespacesManifest(dir, clusterName string) error {
 	seam := corev1.Namespace{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -539,13 +541,43 @@ func writeNamespacesManifest(dir string) error {
 	buf.WriteString("# ont-system: Conductor agent namespace (management and target clusters).\n")
 	buf.WriteString("#   privileged PSA: required for Conductor eBPF/host-network capabilities.\n")
 	buf.WriteString("#\n")
-	buf.WriteString("# NOTE: Per-cluster tenant namespaces (CONTEXT.md §4) are NOT pre-created here.\n")
-	buf.WriteString("# They are created by the Platform operator at target cluster formation time\n")
-	buf.WriteString("# (CP-INV-004). Do not create them manually.\n")
+	if clusterName != "" {
+		buf.WriteString("# seam-tenant-" + clusterName + ": pack delivery namespace for the management cluster.\n")
+		buf.WriteString("#   managed-by=platform, webhook-mode=governed. wrapper-schema.md §9.\n")
+		buf.WriteString("#\n")
+	}
 	buf.WriteString("---\n")
 	buf.Write(seamData)
 	buf.WriteString("---\n")
 	buf.Write(ontData)
+
+	if clusterName != "" {
+		// seam-tenant-{clusterName}: pack delivery namespace created by compiler enable
+		// for the management cluster itself. Per-target-cluster tenant namespaces are
+		// created by the Platform operator at formation time (CP-INV-004).
+		// wrapper-schema.md §9, CONTEXT.md §4 Namespace Model.
+		tenant := corev1.Namespace{
+			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "seam-tenant-" + clusterName,
+				Labels: map[string]string{
+					// Platform owns tenant namespaces — this is the management cluster's own
+					// tenant namespace for pack delivery. Labeled for Platform inspection.
+					"ontai.dev/managed-by":        "platform",
+					"platform.ontai.dev/cluster":  clusterName,
+					// webhook-mode=governed: Guardian admission webhook gates RBAC resources
+					// in this namespace after the bootstrap window closes.
+					"seam.ontai.dev/webhook-mode": "governed",
+				},
+			},
+		}
+		tenantData, err := yaml.Marshal(tenant)
+		if err != nil {
+			return fmt.Errorf("marshal seam-tenant-%s Namespace: %w", clusterName, err)
+		}
+		buf.WriteString("---\n")
+		buf.Write(tenantData)
+	}
 
 	return os.WriteFile(filepath.Join(dir, "namespaces.yaml"), buf.Bytes(), 0644)
 }
