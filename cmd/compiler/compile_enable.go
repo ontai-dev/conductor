@@ -157,7 +157,7 @@ func platformWrapperOps(version, registry, dsnsIP string) []operatorSpec {
 		{
 			Name:                "wrapper",
 			Namespace:           "seam-system",
-			Image:               registry + "/ont-infra:" + version,
+			Image:               registry + "/wrapper:" + version,
 			ServiceAccount:      "wrapper",
 			LeaderElectionLease: "wrapper-leader",
 			WebhookSecret:       "wrapper-webhook-cert",
