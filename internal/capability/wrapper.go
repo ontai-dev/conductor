@@ -74,11 +74,12 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	}
 
 	// Read the ClusterPack to get the OCI registry reference and checksum.
-	cpList, err := params.DynamicClient.Resource(clusterPackGVR).Namespace("infra-system").
+	// ClusterPacks live in seam-tenant-{clusterRef} alongside PackExecutions.
+	cpList, err := params.DynamicClient.Resource(clusterPackGVR).Namespace(peTenantNS).
 		List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("list ClusterPack in infra-system: %v", err)), nil
+			fmt.Sprintf("list ClusterPack in %s: %v", peTenantNS, err)), nil
 	}
 
 	var ociRef, expectedChecksum string

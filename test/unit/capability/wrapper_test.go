@@ -141,7 +141,7 @@ func TestPackDeploy_FetchesAndAppliesManifests(t *testing.T) {
 	})
 
 	pe := packExecutionCR(clusterRef, "cilium-pack", "v1.0.0")
-	cp := clusterPackCR("cilium-pack", "v1.0.0", "registry.example.com/cilium@sha256:abc123")
+	cp := clusterPackCR(clusterRef, "cilium-pack", "v1.0.0", "registry.example.com/cilium@sha256:abc123")
 	dynClient := newWrapperDynClient(pe, cp)
 
 	// Dynamic client also needs core API for server-side apply.
@@ -180,7 +180,7 @@ func TestPackDeploy_OCIFetchFailureReturnsExternalDependencyFailure(t *testing.T
 
 	clusterRef := "ccs-dev"
 	pe := packExecutionCR(clusterRef, "cilium-pack", "v1.0.0")
-	cp := clusterPackCR("cilium-pack", "v1.0.0", "registry.example.com/cilium@sha256:abc123")
+	cp := clusterPackCR(clusterRef, "cilium-pack", "v1.0.0", "registry.example.com/cilium@sha256:abc123")
 	dynClient := newWrapperDynClient(pe, cp)
 
 	// OCI client that always errors.
@@ -240,11 +240,11 @@ func packExecutionCR(targetClusterRef, packName, packVersion string) *unstructur
 	}}
 }
 
-func clusterPackCR(name, version, ociRef string) *unstructured.Unstructured {
+func clusterPackCR(clusterRef, name, version, ociRef string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "infra.ontai.dev/v1alpha1",
 		"kind":       "ClusterPack",
-		"metadata":   map[string]interface{}{"name": name, "namespace": "infra-system"},
+		"metadata":   map[string]interface{}{"name": name, "namespace": "seam-tenant-" + clusterRef},
 		"spec": map[string]interface{}{
 			"version": version,
 			"registryRef": map[string]interface{}{
