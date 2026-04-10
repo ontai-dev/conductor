@@ -21,28 +21,31 @@ type CapabilityManifest struct {
 // CapabilityEntry declares one named capability supported by this runner image.
 // The Name field is the authoritative identifier — it must match a named capability
 // constant exactly. Names are permanent. Renaming is forbidden. CR-INV-004.
+//
+// JSON field names match the CRD status.capabilities array schema exactly:
+// name, version, description, parameterSchema. Mode is a Go-only field not
+// declared in the CRD and is excluded from serialization via json:"-".
 type CapabilityEntry struct {
 	// Name is the globally unique, immutable capability identifier.
 	// Must match one of the Capability* constants in constants.go exactly.
-	Name string
+	Name string `json:"name"`
 
 	// Version is the semantic version of this capability implementation.
 	// Tied to the runner version. No independent capability releases. CR-INV-004.
-	Version string
+	Version string `json:"version"`
 
 	// Mode declares the execution mode this capability runs in.
-	// Named capabilities are always ExecutorMode.
-	// Agent-internal capabilities are AgentMode.
-	// Compile-mode outputs are CompileMode.
-	Mode CapabilityMode
+	// Named capabilities are always ExecutorMode. Not declared in the CRD schema —
+	// excluded from JSON serialization; used only for internal dispatch logic.
+	Mode CapabilityMode `json:"-"`
 
 	// ParameterSchema declares the input parameters this capability accepts.
 	// Map key is the parameter name. Value is the parameter definition.
 	// An empty map is valid for capabilities with no parameters.
-	ParameterSchema map[string]ParameterDef
+	ParameterSchema map[string]ParameterDef `json:"parameterSchema,omitempty"`
 
 	// Description is a human-readable summary of what this capability does.
-	Description string
+	Description string `json:"description,omitempty"`
 }
 
 // CapabilityMode is a typed string declaring which runner mode a capability
