@@ -1,6 +1,9 @@
 package capability_test
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +20,36 @@ import (
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+// makeTarGz builds an in-memory tar.gz archive from the provided file map.
+// Keys are file names (with extension), values are file contents.
+func makeTarGz(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, content := range files {
+		hdr := &tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     name,
+			Size:     int64(len(content)),
+			Mode:     0644,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("makeTarGz WriteHeader %s: %v", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatalf("makeTarGz Write %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("makeTarGz Close tar: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("makeTarGz Close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
 
 // ---------------------------------------------------------------------------
 // Fake OCI client
@@ -129,8 +162,8 @@ func TestPackDeploy_FetchesAndAppliesManifests(t *testing.T) {
 
 	clusterRef := "ccs-dev"
 
-	// One ConfigMap manifest to apply.
-	manifest, _ := json.Marshal(map[string]interface{}{
+	// One ConfigMap manifest packed into a tar.gz as the OCI layer blob.
+	manifestJSON, _ := json.Marshal(map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata": map[string]interface{}{
@@ -139,16 +172,16 @@ func TestPackDeploy_FetchesAndAppliesManifests(t *testing.T) {
 		},
 		"data": map[string]interface{}{"cluster-id": "1"},
 	})
+	tarGzBlob := makeTarGz(t, map[string][]byte{"manifest.yaml": manifestJSON})
 
 	pe := packExecutionCR(clusterRef, "cilium-pack", "v1.0.0")
 	cp := clusterPackCR(clusterRef, "cilium-pack", "v1.0.0", "registry.example.com/cilium@sha256:abc123")
 	dynClient := newWrapperDynClient(pe, cp)
 
-	// Dynamic client also needs core API for server-side apply.
-	// The fake dynamic client will accept Patch calls for unregistered GVRs in
-	// the context of server-side apply testing (fake returns 404 which we handle
-	// as a test limitation — the important thing is that the OCI fetch path ran).
-	oci := &stubOCIClient{manifests: [][]byte{manifest}}
+	// The fake dynamic client will return errors for unregistered GVRs on Patch —
+	// the test verifies PullManifests and tar extraction ran (result is non-nil
+	// with correct capability), not that SSA succeeded on the fake client.
+	oci := &stubOCIClient{manifests: [][]byte{tarGzBlob}}
 	kubeClient := fake.NewSimpleClientset()
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{

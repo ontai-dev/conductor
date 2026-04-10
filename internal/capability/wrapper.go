@@ -4,18 +4,23 @@
 package capability
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -130,18 +135,36 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		}
 	}
 
-	// Step 2 — Apply manifests via server-side apply.
+	// Step 2 — Decompress tar.gz artifact blobs and apply extracted YAML manifests.
+	// Each blob returned by PullManifests is an OCI layer — for pack artifacts this
+	// is a tar.gz containing pre-rendered YAML files. conductor-schema.md §9.
 	step2Start := time.Now().UTC()
 	appliedCount := 0
-	for i, manifest := range manifests {
-		if len(bytes.TrimSpace(manifest)) == 0 {
+
+	var yamlFiles [][]byte
+	for _, blob := range manifests {
+		extracted, err := extractYAMLsFromTarGz(blob)
+		if err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("extract tar.gz artifact: %v", err)), nil
+		}
+		yamlFiles = append(yamlFiles, extracted...)
+	}
+
+	for i, yamlData := range yamlFiles {
+		if len(bytes.TrimSpace(yamlData)) == 0 {
 			continue
 		}
-		// Extract the GVK and name from the manifest to determine the API endpoint.
+		// Convert YAML to JSON — sigs.k8s.io/yaml uses go-yaml internally and
+		// handles both pure-YAML and JSON-format manifests.
+		jsonData, err := sigsyaml.YAMLToJSON(yamlData)
+		if err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("yaml-to-json manifest[%d]: %v", i, err)), nil
+		}
+
 		var obj map[string]interface{}
-		if err := json.Unmarshal(manifest, &obj); err != nil {
-			// Try YAML — not supported in pure Go without a YAML library.
-			// The schema guarantees ClusterPack artifacts are JSON (conductor-schema.md §9).
+		if err := json.Unmarshal(jsonData, &obj); err != nil {
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("unmarshal manifest[%d]: %v", i, err)), nil
 		}
@@ -156,20 +179,18 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			continue
 		}
 
-		// Server-side apply via the dynamic client. This is the standard pattern
-		// for applying pre-rendered manifests without client-side merge logic.
+		// Server-side apply via the dynamic client.
 		gvr := gvrFromAPIVersionKind(apiVersion, kind)
-		patch, _ := json.Marshal(obj)
 
 		var applyErr error
 		if namespace != "" {
 			_, applyErr = params.DynamicClient.Resource(gvr).Namespace(namespace).
-				Patch(ctx, name, types.ApplyPatchType, patch, metav1.PatchOptions{
+				Patch(ctx, name, types.ApplyPatchType, jsonData, metav1.PatchOptions{
 					FieldManager: "conductor-pack-deploy",
 				})
 		} else {
 			_, applyErr = params.DynamicClient.Resource(gvr).
-				Patch(ctx, name, types.ApplyPatchType, patch, metav1.PatchOptions{
+				Patch(ctx, name, types.ApplyPatchType, jsonData, metav1.PatchOptions{
 					FieldManager: "conductor-pack-deploy",
 				})
 		}
@@ -199,6 +220,43 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			{Name: "apply-manifests", Status: runnerlib.ResultSucceeded, StartedAt: step2Start, CompletedAt: step2End, Message: fmt.Sprintf("%d manifests applied", appliedCount)},
 		},
 	}, nil
+}
+
+// extractYAMLsFromTarGz decompresses a gzip-compressed tar archive and returns
+// the contents of all entries with a .yaml or .yml extension.
+// This is the standard format for ClusterPack OCI artifacts: a tar.gz whose
+// entries are pre-rendered Kubernetes YAML manifests. conductor-schema.md §9.
+func extractYAMLsFromTarGz(data []byte) ([][]byte, error) {
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gr.Close() //nolint:errcheck
+
+	tr := tar.NewReader(gr)
+	var result [][]byte
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tar next: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(hdr.Name))
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		content, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", hdr.Name, err)
+		}
+		result = append(result, content)
+	}
+	return result, nil
 }
 
 // computeManifestChecksum computes SHA256 of the concatenated raw artifact bytes
