@@ -186,10 +186,12 @@ type SecretRef struct {
 // Populated exclusively by the runner agent on startup and during control loops.
 // No operator writes to this status directly.
 type RunnerConfigStatus struct {
-	// Capabilities is the self-declared capability manifest published by the agent.
-	// Operators read this before submitting Jobs. If a named capability is absent,
-	// operators raise CapabilityUnavailable on their operational CR and wait.
-	Capabilities CapabilityManifest
+	// Capabilities is the self-declared capability list published by the agent.
+	// Stored as a flat array of CapabilityEntry objects matching the CRD definition
+	// (status.capabilities: array). Operators read this before submitting Jobs.
+	// If a named capability is absent, operators raise CapabilityUnavailable and wait.
+	// conductor-schema.md §5.
+	Capabilities []CapabilityEntry
 
 	// AgentVersion is the runner image version currently running as agent.
 	AgentVersion string

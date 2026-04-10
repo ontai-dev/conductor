@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,16 +35,15 @@ func NewCapabilityPublisher(client dynamic.Interface, namespace string) *Capabil
 	return &CapabilityPublisher{client: client, namespace: namespace}
 }
 
-// Publish writes the manifest to the RunnerConfig named after the clusterRef.
+// Publish writes the capability list to the RunnerConfig named after the clusterRef.
 // It targets the status subresource so only status fields are changed.
-// conductor-schema.md §5 (RunnerConfigStatus), conductor-design.md §2.10.
-func (p *CapabilityPublisher) Publish(ctx context.Context, clusterRef, agentVersion, agentLeader string, manifest runnerlib.CapabilityManifest) error {
-	manifest.PublishedAt = time.Now().UTC()
-
+// capabilities is a flat []CapabilityEntry slice matching the CRD definition
+// (status.capabilities: array). conductor-schema.md §5, conductor-design.md §2.10.
+func (p *CapabilityPublisher) Publish(ctx context.Context, clusterRef, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) error {
 	// Build a strategic merge patch that updates only the status fields.
 	statusPatch := map[string]interface{}{
 		"status": map[string]interface{}{
-			"capabilities": manifest,
+			"capabilities": capabilities,
 			"agentVersion": agentVersion,
 			"agentLeader":  agentLeader,
 		},
@@ -70,11 +68,12 @@ func (p *CapabilityPublisher) Publish(ctx context.Context, clusterRef, agentVers
 	return nil
 }
 
-// BuildManifest constructs the CapabilityManifest from the registered execute-mode
-// capabilities. All capabilities are declared with ExecutorMode and version "dev".
-// Production builds will stamp the real version via ldflags.
+// BuildManifest constructs the []CapabilityEntry slice from the registered
+// execute-mode capabilities. All capabilities are declared with ExecutorMode
+// and the given version string. Production builds stamp the real version via ldflags.
+// The returned slice maps directly to the CRD status.capabilities array field.
 // conductor-design.md §2.10, conductor-schema.md §5.
-func BuildManifest(capabilities []string, version string) runnerlib.CapabilityManifest {
+func BuildManifest(capabilities []string, version string) []runnerlib.CapabilityEntry {
 	entries := make([]runnerlib.CapabilityEntry, 0, len(capabilities))
 	for _, name := range capabilities {
 		entries = append(entries, runnerlib.CapabilityEntry{
@@ -84,8 +83,5 @@ func BuildManifest(capabilities []string, version string) runnerlib.CapabilityMa
 			ParameterSchema: map[string]runnerlib.ParameterDef{},
 		})
 	}
-	return runnerlib.CapabilityManifest{
-		RunnerVersion: version,
-		Entries:       entries,
-	}
+	return entries
 }

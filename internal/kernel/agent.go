@@ -290,7 +290,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 func onLeaderStart(
 	leaderCtx context.Context,
 	clusterRef string,
-	manifest runnerlib.CapabilityManifest,
+	manifest []runnerlib.CapabilityEntry,
 	publisher *agent.CapabilityPublisher,
 	reconciler *agent.ReceiptReconciler,
 	signingLoop *agent.SigningLoop,
@@ -304,7 +304,7 @@ func onLeaderStart(
 		fmt.Printf("conductor agent: cluster=%q capability publish failed: %v\n", clusterRef, err)
 	} else {
 		fmt.Printf("conductor agent: cluster=%q published capability manifest (%d capabilities)\n",
-			clusterRef, len(manifest.Entries))
+			clusterRef, len(manifest))
 	}
 
 	const reconcileInterval = 30 * time.Second
