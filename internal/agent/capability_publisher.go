@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -41,7 +41,7 @@ func NewCapabilityPublisher(client dynamic.Interface, namespace string) *Capabil
 // capabilities is a flat []CapabilityEntry slice matching the CRD definition
 // (status.capabilities: array). conductor-schema.md §5, conductor-design.md §2.10.
 func (p *CapabilityPublisher) Publish(ctx context.Context, clusterRef, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) error {
-	log := ctrl.Log.WithName("capability-publisher").WithValues("clusterRef", clusterRef, "namespace", p.namespace)
+	log := slog.Default().With("component", "capability-publisher", "clusterRef", clusterRef, "namespace", p.namespace)
 
 	// Build a strategic merge patch that updates only the status fields.
 	statusPatch := map[string]interface{}{
