@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -806,6 +807,49 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 		secretNames = append(secretNames, secretName+".yaml")
 	}
 
+	// C-35: When importExistingCluster=true and machineConfigPaths is provided,
+	// also emit the talosconfig Secret so Platform can generate the kubeconfig.
+	// Resolution order: --talosconfig flag → TALOSCONFIG env → ~/.talos/config.
+	// Failure is a warning — the operator can apply the Secret manually.
+	if in.ImportExistingCluster && len(in.MachineConfigPaths) > 0 {
+		tcfgPath := talosconfigPath
+		if tcfgPath == "" {
+			tcfgPath = os.Getenv("TALOSCONFIG")
+		}
+		if tcfgPath == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				tcfgPath = filepath.Join(home, ".talos", "config")
+			}
+		}
+		if tcfgPath != "" {
+			tcfgData, tcfgErr := os.ReadFile(tcfgPath)
+			if tcfgErr != nil {
+				slog.Warn("C-35: cannot read talosconfig — seam-mc talosconfig Secret will not be emitted; apply manually",
+					"path", tcfgPath, "error", tcfgErr)
+			} else {
+				tcfgSecretName := "seam-mc-" + in.Name + "-talosconfig"
+				tcfgSecret := corev1.Secret{
+					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tcfgSecretName,
+						Namespace: ns,
+						Labels: map[string]string{
+							"ontai.dev/cluster":    in.Name,
+							"ontai.dev/managed-by": "compiler",
+						},
+					},
+					Type: corev1.SecretTypeOpaque,
+					StringData: map[string]string{"talosconfig": string(tcfgData)},
+				}
+				if err := writeCRYAML(output, tcfgSecretName, tcfgSecret); err != nil {
+					slog.Warn("C-35: cannot write talosconfig Secret YAML — apply manually", "error", err)
+				} else {
+					secretNames = append(secretNames, tcfgSecretName+".yaml")
+				}
+			}
+		}
+	}
+
 	// Fix 1: importExistingCluster=true always emits mode=import. The
 	// machineConfigPaths field only controls where PKI is read from, not the
 	// cluster lifecycle mode. A re-imported cluster is always mode=import.
@@ -873,7 +917,14 @@ type BootstrapSequence struct {
 	Steps       []BootstrapSequenceStep `json:"steps" yaml:"steps"`
 }
 
-// writeBootstrapSequence writes bootstrap-sequence.yaml documenting apply order.
+// writeBootstrapSequence writes bootstrap-sequence.yaml as a Kubernetes ConfigMap.
+//
+// The ConfigMap wraps the BootstrapSequence so that `kubectl apply -f compiled/bootstrap/`
+// succeeds without errors — `kind: BootstrapSequence` is not a CRD and kubectl would
+// reject it. The sequence content is stored in ConfigMap.data["sequence.yaml"] and can
+// be inspected with: kubectl get cm seam-bootstrap-sequence-{cluster} -n seam-system -o yaml
+//
+// C-36: previously used kind: BootstrapSequence (not a valid CRD). platform-schema.md §9.
 func writeBootstrapSequence(output, clusterName string, secretFiles []string) error {
 	seq := BootstrapSequence{
 		APIVersion:  "ontai.dev/v1alpha1",
@@ -895,12 +946,32 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string) er
 		},
 	}
 
-	data, err := yaml.Marshal(seq)
+	seqData, err := yaml.Marshal(seq)
 	if err != nil {
 		return fmt.Errorf("marshal bootstrap sequence: %w", err)
 	}
+
+	cm := corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "seam-bootstrap-sequence-" + clusterName,
+			Namespace: "seam-system",
+			Labels: map[string]string{
+				"ontai.dev/managed-by": "compiler",
+				"ontai.dev/cluster":    clusterName,
+			},
+		},
+		Data: map[string]string{
+			"sequence.yaml": string(seqData),
+		},
+	}
+
+	cmData, err := yaml.Marshal(cm)
+	if err != nil {
+		return fmt.Errorf("marshal bootstrap-sequence ConfigMap: %w", err)
+	}
 	outPath := filepath.Join(output, "bootstrap-sequence.yaml")
-	return os.WriteFile(outPath, data, 0644)
+	return os.WriteFile(outPath, cmData, 0644)
 }
 
 // compilePackBuild implements the packbuild subcommand.

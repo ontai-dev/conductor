@@ -132,15 +132,31 @@ func TestBootstrap_SequenceDocumentsApplyOrder(t *testing.T) {
 	}
 	content := string(data)
 
-	assertContainsStr(t, content, "kind: BootstrapSequence")
+	// C-36: bootstrap-sequence.yaml is now a ConfigMap so kubectl apply works.
+	assertContainsStr(t, content, "kind: ConfigMap")
+	assertContainsStr(t, content, "seam-bootstrap-sequence-ccs-mgmt")
+	// The BootstrapSequence content is embedded in ConfigMap.data["sequence.yaml"].
 	assertContainsStr(t, content, "clusterName: ccs-mgmt")
 	assertContainsStr(t, content, "seam-mc-ccs-mgmt-node1.yaml")
 	assertContainsStr(t, content, "ccs-mgmt.yaml")
 
-	// Verify step ordering via the parsed struct.
+	// Verify step ordering by parsing the ConfigMap, extracting sequence.yaml, and
+	// unmarshaling the inner BootstrapSequence.
+	var cm map[string]interface{}
+	if err := yaml.Unmarshal(data, &cm); err != nil {
+		t.Fatalf("parse bootstrap-sequence.yaml as ConfigMap: %v", err)
+	}
+	dataField, ok := cm["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("ConfigMap has no data field")
+	}
+	seqYAML, ok := dataField["sequence.yaml"].(string)
+	if !ok {
+		t.Fatalf("ConfigMap data has no sequence.yaml key")
+	}
 	var seq BootstrapSequence
-	if err := yaml.Unmarshal(data, &seq); err != nil {
-		t.Fatalf("parse bootstrap-sequence.yaml: %v", err)
+	if err := yaml.Unmarshal([]byte(seqYAML), &seq); err != nil {
+		t.Fatalf("parse inner sequence.yaml: %v", err)
 	}
 	if len(seq.Steps) != 2 {
 		t.Fatalf("expected 2 steps, got %d", len(seq.Steps))
