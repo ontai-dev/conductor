@@ -363,15 +363,13 @@ func onLeaderStart(
 	packInstancePullLoop *agent.PackInstancePullLoop,
 	packExWatcher *agent.PackExecutionWatcher,
 ) {
-	// Publish capability manifest to RunnerConfig status (one-shot on leader start).
-	// Failure is logged but does not abort — the agent retries on the next leader
-	// acquisition cycle. conductor-schema.md §10 step 3.
-	if err := publisher.Publish(leaderCtx, clusterRef, agentVersion, "", manifest); err != nil {
-		fmt.Printf("conductor agent: cluster=%q capability publish failed: %v\n", clusterRef, err)
-	} else {
-		fmt.Printf("conductor agent: cluster=%q published capability manifest (%d capabilities)\n",
-			clusterRef, len(manifest))
-	}
+	// Publish capability manifest to RunnerConfig status with background retry.
+	// If the RunnerConfig does not yet exist (Platform creates it after Conductor
+	// starts), the initial attempt fails and a goroutine retries every 30s until
+	// it succeeds. conductor-schema.md §10 step 3.
+	publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
+	fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
+		clusterRef, len(manifest))
 
 	const reconcileInterval = 30 * time.Second
 	const signingInterval = 30 * time.Second
