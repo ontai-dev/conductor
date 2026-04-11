@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -38,12 +39,18 @@ var packExecutionGVR = schema.GroupVersionResource{
 // seam-tenant-{clusterName} namespace. Idempotent: skips if PackExecution exists.
 type PackExecutionWatcher struct {
 	dynamicClient dynamic.Interface
+	log           logr.Logger
 }
 
 // NewPackExecutionWatcher creates a PackExecutionWatcher backed by the given
 // dynamic client. Should only be instantiated on the management cluster.
+// ctrl.Log must be initialized before calling this function — call it after
+// ctrl.SetLogger in main, not inside a goroutine.
 func NewPackExecutionWatcher(dynamicClient dynamic.Interface) *PackExecutionWatcher {
-	return &PackExecutionWatcher{dynamicClient: dynamicClient}
+	return &PackExecutionWatcher{
+		dynamicClient: dynamicClient,
+		log:           ctrl.Log.WithName("packexecution-watcher"),
+	}
 }
 
 // Run starts the PackExecution creation loop. Runs at the given interval until
@@ -51,8 +58,7 @@ func NewPackExecutionWatcher(dynamicClient dynamic.Interface) *PackExecutionWatc
 // infra.ontai.dev/pack across all seam-tenant-* namespaces and creates a
 // PackExecution for any RunnerConfig that lacks one.
 func (w *PackExecutionWatcher) Run(leaderCtx context.Context, interval time.Duration) {
-	log := ctrl.Log.WithName("packexecution-watcher")
-	log.Info("PackExecutionWatcher started", "interval", interval)
+	w.log.Info("PackExecutionWatcher started", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -61,7 +67,7 @@ func (w *PackExecutionWatcher) Run(leaderCtx context.Context, interval time.Dura
 			return
 		case <-ticker.C:
 			if err := w.reconcile(leaderCtx); err != nil {
-				log.Error(err, "PackExecutionWatcher reconcile error")
+				w.log.Error(err, "PackExecutionWatcher reconcile error")
 			}
 		}
 	}
@@ -95,7 +101,7 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 		peNamespace := ns // seam-tenant-{clusterName}
 		peName := packName + "-" + clusterName
 
-		log := ctrl.Log.WithName("packexecution-watcher").WithValues(
+		log := w.log.WithValues(
 			"packName", packName, "clusterName", clusterName, "namespace", peNamespace)
 
 		// Skip if PackExecution already exists.
