@@ -55,7 +55,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestBootstrap_CiliumPrerequisitesFalse_NoPatch(t *testing.T) {
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, baseBootstrapYAML)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -130,7 +130,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -176,7 +176,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -223,7 +223,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -269,7 +269,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -315,7 +315,7 @@ bootstrap:
 	outDir := t.TempDir()
 	inputPath := writeInputFile(t, input)
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
 
@@ -447,7 +447,7 @@ bootstrap:
 `
 	inputPath := writeInputFile(t, input)
 	// Pass a kubeconfig path that does not exist — connection must fail with an error.
-	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/kubeconfig.yaml")
+	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/kubeconfig.yaml", "")
 	if err == nil {
 		t.Fatal("expected error for missing kubeconfig; got nil")
 	}

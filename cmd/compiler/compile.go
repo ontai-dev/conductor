@@ -567,7 +567,7 @@ func validateBootstrapInput(b *BootstrapSection) error {
 // Uses the Talos machinery library to generate machine configurations.
 // No cluster connection is required in the default (fresh PKI) path.
 // conductor-schema.md §9.
-func compileBootstrap(input, output, kubeconfigPath string) error {
+func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) error {
 	in, err := readClusterInput(input)
 	if err != nil {
 		return err
@@ -579,7 +579,7 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 	// return — no machineconfigs are generated and no PKI extraction is needed.
 	if in.ImportExistingCluster && len(in.MachineConfigPaths) == 0 &&
 		(in.Bootstrap == nil || len(in.Bootstrap.Nodes) == 0) {
-		return compileImportTalosconfigSecret(in, output)
+		return compileImportTalosconfigSecret(in, output, talosconfigPath)
 	}
 
 	if err := validateBootstrapInput(in.Bootstrap); err != nil {
@@ -671,7 +671,7 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 					// Fall through to the talosconfig-only path: emit only the
 					// talosconfig Secret and TalosCluster CR. No machineconfig
 					// generation, no PKI extraction. C-32 Bug 2.
-					return compileImportTalosconfigSecret(in, output)
+					return compileImportTalosconfigSecret(in, output, talosconfigPath)
 				}
 				return fmt.Errorf("importExistingCluster: read secret %q from seam-system: %w", secretName, err)
 			}
@@ -794,11 +794,16 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 		secretNames = append(secretNames, secretName+".yaml")
 	}
 
-	// Produce TalosCluster CR: mode=bootstrap, capi.enabled=false (management cluster).
-	// ontai.dev/owns-runnerconfig signals Platform to add a finalizer and clean up
-	// the RunnerConfig in ont-system when this TalosCluster is deleted. Bug 3.
-	// Fix 1: populate Role, TalosVersion, ClusterEndpoint.
-	// Fix 3: Role derived from in.Role (defaults to management).
+	// Fix 1: importExistingCluster=true always emits mode=import. The
+	// machineConfigPaths field only controls where PKI is read from, not the
+	// cluster lifecycle mode. A re-imported cluster is always mode=import.
+	tcMode := platformv1alpha1.TalosClusterModeBootstrap
+	if in.ImportExistingCluster {
+		tcMode = platformv1alpha1.TalosClusterModeImport
+	}
+
+	// Produce TalosCluster CR. ontai.dev/owns-runnerconfig signals Platform to add
+	// a finalizer and clean up the RunnerConfig in ont-system on deletion. Bug 3.
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -812,7 +817,7 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 			},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode:            platformv1alpha1.TalosClusterModeBootstrap,
+			Mode:            tcMode,
 			Role:            clusterRole(in),
 			TalosVersion:    b.TalosVersion,
 			ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
@@ -925,11 +930,14 @@ func compilePackBuild(input, output string) error {
 
 // compileImportTalosconfigSecret handles the talosconfig-only import path.
 // When importExistingCluster=true with no machineConfigPaths and no bootstrap nodes,
-// reads the talosconfig from TALOSCONFIG env → ~/.talos/config and emits only the
-// seam-mc-{cluster}-talosconfig Secret. No machineconfigs are generated.
-// conductor-schema.md §9 Step 1.
-func compileImportTalosconfigSecret(in ClusterInput, output string) error {
-	talosConfigPath := os.Getenv("TALOSCONFIG")
+// reads the talosconfig using resolution order: flagValue → TALOSCONFIG env →
+// ~/.talos/config. Emits only the seam-mc-{cluster}-talosconfig Secret and a
+// TalosCluster CR. No machineconfigs are generated. conductor-schema.md §9 Step 1.
+func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) error {
+	talosConfigPath := flagValue
+	if talosConfigPath == "" {
+		talosConfigPath = os.Getenv("TALOSCONFIG")
+	}
 	if talosConfigPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

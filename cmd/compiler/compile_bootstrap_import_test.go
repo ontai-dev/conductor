@@ -39,7 +39,7 @@ bootstrap:
 	inputPath := writeInputFile(t, input)
 	outDir := t.TempDir()
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("generateMachineConfigFile: compileBootstrap failed: %v", err)
 	}
 
@@ -111,7 +111,7 @@ bootstrap:
 	inputPath := writeInputFile(t, input)
 	outDir := t.TempDir()
 
-	if err := compileBootstrap(inputPath, outDir, ""); err != nil {
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap (local file path) error: %v", err)
 	}
 
@@ -152,7 +152,7 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, input)
-	err := compileBootstrap(inputPath, t.TempDir(), "")
+	err := compileBootstrap(inputPath, t.TempDir(), "", "")
 	if err == nil {
 		t.Fatal("expected error for missing machine config file; got nil")
 	}
@@ -183,7 +183,7 @@ bootstrap:
       role: init
 `
 	inputPath := writeInputFile(t, input)
-	err := compileBootstrap(inputPath, t.TempDir(), "")
+	err := compileBootstrap(inputPath, t.TempDir(), "", "")
 	if err == nil {
 		t.Fatal("expected error when init node hostname absent from machineConfigPaths; got nil")
 	}
@@ -218,7 +218,7 @@ bootstrap:
 `
 	inputPath := writeInputFile(t, input)
 	// Pass a non-existent kubeconfig — the API path must fail with an error.
-	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/kubeconfig.yaml")
+	err := compileBootstrap(inputPath, t.TempDir(), "/nonexistent/kubeconfig.yaml", "")
 	if err == nil {
 		t.Fatal("expected error for missing kubeconfig in API fallback path; got nil")
 	}

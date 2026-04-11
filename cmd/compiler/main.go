@@ -53,19 +53,24 @@ func main() {
 }
 
 // bootstrapHelp is the authored per-subcommand help for 'compiler bootstrap'.
-const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path> [--kubeconfig <path>]
+const bootstrapHelp = `Usage: compiler bootstrap --input <path> --output <path> [--kubeconfig <path>] [--talosconfig <path>]
 
 Compile a cluster declaration YAML into Talos machine config Secrets and bootstrap CRs.
 
 Input contract:
-  --input      Path to a cluster declaration YAML file (ClusterInput schema).
-               Declares cluster name, mode, node list, and optional patches.
+  --input        Path to a cluster declaration YAML file (ClusterInput schema).
+                 Declares cluster name, mode, node list, and optional patches.
 
-  --kubeconfig Path to a kubeconfig file (flag → $KUBECONFIG → ~/.kube/config).
-               Required only when importExistingCluster: true in the input file.
-               When importExistingCluster=true, Compiler connects to the cluster
-               Kubernetes API, reads the init-node machine config Secret from
-               seam-system, and derives the PKI bundle from the existing CAs.
+  --kubeconfig   Path to a kubeconfig file (flag → $KUBECONFIG → ~/.kube/config).
+                 Used only when importExistingCluster: true and machineConfigPaths is
+                 absent. Compiler connects to the cluster Kubernetes API, reads the
+                 init-node machine config Secret from seam-system, and derives the
+                 PKI bundle from the existing CAs.
+
+  --talosconfig  Path to a talosconfig file (flag → $TALOSCONFIG → ~/.talos/config).
+                 Used only when importExistingCluster: true with no machineConfigPaths
+                 and no bootstrap nodes (talosconfig-only import path). Compiler reads
+                 this file and emits seam-mc-{cluster}-talosconfig Secret.
 
 Output contract:
   --output  Directory receiving:
@@ -100,6 +105,7 @@ func runBootstrapSubcommand(args []string) {
 	input := fs.String("input", "", "Path to cluster declaration YAML (required)")
 	output := fs.String("output", "", "Output directory for manifests (required)")
 	kubecfg := fs.String("kubeconfig", "", "Path to kubeconfig for importExistingCluster mode (flag → $KUBECONFIG → ~/.kube/config)")
+	taloscfg := fs.String("talosconfig", "", "Path to talosconfig for talosconfig-only import path (flag → $TALOSCONFIG → ~/.talos/config)")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, bootstrapHelp)
@@ -119,7 +125,7 @@ func runBootstrapSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := compileBootstrap(*input, *output, *kubecfg); err != nil {
+	if err := compileBootstrap(*input, *output, *kubecfg, *taloscfg); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler bootstrap: %v\n", err)
 		os.Exit(1)
 	}
