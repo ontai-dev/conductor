@@ -132,7 +132,7 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 			},
 			"spec": map[string]interface{}{
 				"targetClusterRef":    clusterName,
-				"admissionProfileRef": clusterName,
+				"admissionProfileRef": "rbac-wrapper",
 				"clusterPackRef": map[string]interface{}{
 					"name":    packName,
 					"version": packVersion,
