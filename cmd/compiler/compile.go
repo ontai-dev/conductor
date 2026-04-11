@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -541,6 +542,16 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 	if err != nil {
 		return err
 	}
+
+	// Talosconfig-only import: when importExistingCluster=true, no machineConfigPaths,
+	// and no bootstrap nodes are declared, the operator only needs the talosconfig
+	// Secret to connect to the cluster. Emit seam-mc-{cluster}-talosconfig.yaml and
+	// return — no machineconfigs are generated and no PKI extraction is needed.
+	if in.ImportExistingCluster && len(in.MachineConfigPaths) == 0 &&
+		(in.Bootstrap == nil || len(in.Bootstrap.Nodes) == 0) {
+		return compileImportTalosconfigSecret(in, output)
+	}
+
 	if err := validateBootstrapInput(in.Bootstrap); err != nil {
 		return fmt.Errorf("input %q: %w", input, err)
 	}
@@ -616,7 +627,11 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 				return fmt.Errorf("importExistingCluster: connect to cluster via kubeconfig %q: %w", resolvedKubeconfig, err)
 			}
 
-			secretName := "seam-mc-" + in.Name + "-" + initHostname
+			// Strip cluster-name prefix from hostname: Talos node names carry the
+			// cluster prefix (e.g. "ccs-mgmt-cp1" for cluster "ccs-mgmt"), so the
+			// Secret name would double the prefix without this strip. C-32.
+			hostname := strings.TrimPrefix(initHostname, in.Name+"-")
+			secretName := "seam-mc-" + in.Name + "-" + hostname
 			mcSecret, err := k8sClient.CoreV1().Secrets("seam-system").Get(
 				context.Background(), secretName, metav1.GetOptions{},
 			)
@@ -856,4 +871,51 @@ func compilePackBuild(input, output string) error {
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
+}
+
+// compileImportTalosconfigSecret handles the talosconfig-only import path.
+// When importExistingCluster=true with no machineConfigPaths and no bootstrap nodes,
+// reads the talosconfig from TALOSCONFIG env → ~/.talos/config and emits only the
+// seam-mc-{cluster}-talosconfig Secret. No machineconfigs are generated.
+// conductor-schema.md §9 Step 1.
+func compileImportTalosconfigSecret(in ClusterInput, output string) error {
+	talosConfigPath := os.Getenv("TALOSCONFIG")
+	if talosConfigPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("compileImportTalosconfigSecret: resolve home dir: %w", err)
+		}
+		talosConfigPath = filepath.Join(home, ".talos", "config")
+	}
+
+	data, err := os.ReadFile(talosConfigPath)
+	if err != nil {
+		return fmt.Errorf("compileImportTalosconfigSecret: read talosconfig %q: %w", talosConfigPath, err)
+	}
+
+	ns := in.Namespace
+	if ns == "" {
+		ns = "seam-system"
+	}
+
+	secretName := "seam-mc-" + in.Name + "-talosconfig"
+	secret := corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: ns,
+			Labels: map[string]string{
+				"ontai.dev/cluster":    in.Name,
+				"ontai.dev/managed-by": "compiler",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"talosconfig": string(data),
+		},
+	}
+	return writeCRYAML(output, secretName, secret)
 }
