@@ -476,12 +476,34 @@ func writeCRYAML(outDir, name string, obj interface{}) error {
 }
 
 // buildTalosCluster constructs a TalosCluster CR from a ClusterInput.
+//
+// When CAPI is disabled (management cluster path), only spec.mode, spec.role,
+// spec.talosVersion, spec.clusterEndpoint, and spec.capi.enabled=false are emitted.
+// CAPI-specific fields (kubernetesVersion, controlPlane, workers) are suppressed to
+// keep the management cluster CR minimal and unambiguous. platform-schema.md §5.
 func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 	ns := in.Namespace
 	if ns == "" {
 		ns = "seam-system"
 	}
 	mode := platformv1alpha1.TalosClusterMode(in.Mode)
+	spec := platformv1alpha1.TalosClusterSpec{
+		Mode: mode,
+		Role: clusterRole(in),
+		CAPI: platformv1alpha1.CAPIConfig{Enabled: in.CAPI.Enabled},
+	}
+	if in.CAPI.Enabled {
+		// Target cluster: populate full CAPI block.
+		spec.CAPI.TalosVersion = in.CAPI.TalosVersion
+		spec.CAPI.KubernetesVersion = in.CAPI.KubernetesVersion
+		spec.CAPI.ControlPlane = platformv1alpha1.CAPIControlPlaneConfig{
+			Replicas: in.CAPI.ControlPlaneReplicas,
+		}
+	} else if in.Bootstrap != nil {
+		// Management cluster: spec-level fields from the Bootstrap section.
+		spec.TalosVersion = in.Bootstrap.TalosVersion
+		spec.ClusterEndpoint = stripScheme(in.Bootstrap.ControlPlaneEndpoint)
+	}
 	return platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -491,17 +513,7 @@ func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 			Name:      in.Name,
 			Namespace: ns,
 		},
-		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode: mode,
-			CAPI: platformv1alpha1.CAPIConfig{
-				Enabled:           in.CAPI.Enabled,
-				TalosVersion:      in.CAPI.TalosVersion,
-				KubernetesVersion: in.CAPI.KubernetesVersion,
-				ControlPlane: platformv1alpha1.CAPIControlPlaneConfig{
-					Replicas: in.CAPI.ControlPlaneReplicas,
-				},
-			},
-		},
+		Spec: spec,
 	}
 }
 

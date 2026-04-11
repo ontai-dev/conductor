@@ -78,7 +78,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		{"05-post-bootstrap", []string{
 			"phase-meta.yaml",
 			"dsns-zone-configmap.yaml",
-			"coredns-dsns-stanza.yaml",
+			"coredns-dsns-patch.sh",
 			"coredns-deployment-patch.yaml",
 			"dsns-loadbalancer.yaml",
 			"leaderelection.yaml",
@@ -360,7 +360,7 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"04-conductor", "conductor-metrics-service.yaml"},
 		{"05-post-bootstrap", "phase-meta.yaml"},
 		{"05-post-bootstrap", "dsns-zone-configmap.yaml"},
-		{"05-post-bootstrap", "coredns-dsns-stanza.yaml"},
+		{"05-post-bootstrap", "coredns-dsns-patch.sh"},
 		{"05-post-bootstrap", "coredns-deployment-patch.yaml"},
 		{"05-post-bootstrap", "dsns-loadbalancer.yaml"},
 		{"05-post-bootstrap", "leaderelection.yaml"},
