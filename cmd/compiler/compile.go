@@ -734,7 +734,10 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 			}
 		}
 
-		secretName := "seam-mc-" + in.Name + "-" + node.Hostname
+		// Strip cluster-name prefix from hostname before constructing the secret
+		// name so the prefix is not doubled (e.g. ccs-mgmt-cp1 → cp1). C-32.
+		bareHostname := strings.TrimPrefix(node.Hostname, in.Name+"-")
+		secretName := "seam-mc-" + in.Name + "-" + bareHostname
 		secret := corev1.Secret{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: "v1",
