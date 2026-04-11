@@ -216,6 +216,29 @@ type BootstrapSection struct {
 	Nodes []BootstrapNode `yaml:"nodes"`
 }
 
+// stripScheme removes a URI scheme prefix (e.g. "https://") from an endpoint
+// string, returning only host:port. TalosClusterSpec.ClusterEndpoint is host:port
+// format only — no scheme, no trailing slash.
+func stripScheme(endpoint string) string {
+	if i := strings.Index(endpoint, "://"); i >= 0 {
+		return endpoint[i+3:]
+	}
+	return endpoint
+}
+
+// clusterRole returns the TalosClusterRole for a ClusterInput. When the Role
+// field is explicitly set, it is used directly. Otherwise the default is
+// TalosClusterRoleManagement, which covers all bootstrap and talosconfig-only
+// import scenarios. Fix 3.
+func clusterRole(in ClusterInput) platformv1alpha1.TalosClusterRole {
+	switch in.Role {
+	case "tenant":
+		return platformv1alpha1.TalosClusterRoleTenant
+	default:
+		return platformv1alpha1.TalosClusterRoleManagement
+	}
+}
+
 // ClusterInput is the human-authored spec format for bootstrap, launch, and enable
 // subcommands. Humans write this file; Compiler reads it and emits a TalosCluster CR.
 // Fields map directly to TalosClusterSpec. conductor-schema.md §9.
@@ -255,6 +278,12 @@ type ClusterInput struct {
 	// an existing one. Must be "bootstrap" or "import".
 	// +required
 	Mode string `yaml:"mode"`
+
+	// Role declares whether this cluster is the management cluster or a tenant
+	// (target) cluster. Valid values: "management", "tenant". Defaults to
+	// "management" when empty. Fix 3.
+	// +optional
+	Role string `yaml:"role,omitempty"`
 
 	// CAPI holds CAPI-specific configuration. Set enabled=true for target clusters,
 	// false for the management cluster. platform-schema.md §5.
@@ -768,6 +797,8 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 	// Produce TalosCluster CR: mode=bootstrap, capi.enabled=false (management cluster).
 	// ontai.dev/owns-runnerconfig signals Platform to add a finalizer and clean up
 	// the RunnerConfig in ont-system when this TalosCluster is deleted. Bug 3.
+	// Fix 1: populate Role, TalosVersion, ClusterEndpoint.
+	// Fix 3: Role derived from in.Role (defaults to management).
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -781,8 +812,11 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 			},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode: platformv1alpha1.TalosClusterModeBootstrap,
-			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+			Mode:            platformv1alpha1.TalosClusterModeBootstrap,
+			Role:            clusterRole(in),
+			TalosVersion:    b.TalosVersion,
+			ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
+			CAPI:            platformv1alpha1.CAPIConfig{Enabled: false},
 		},
 	}
 	if err := writeCRYAML(output, in.Name, tc); err != nil {
@@ -942,8 +976,15 @@ func compileImportTalosconfigSecret(in ClusterInput, output string) error {
 		return fmt.Errorf("compileImportTalosconfigSecret: write talosconfig secret: %w", err)
 	}
 
-	// Emit TalosCluster CR with mode=import, role=management so the operator
-	// can adopt the cluster without a bootstrap Job. conductor-schema.md §9.
+	// Emit TalosCluster CR with mode=import so the operator can adopt the cluster
+	// without a bootstrap Job. conductor-schema.md §9.
+	// Fix 1: populate TalosVersion and ClusterEndpoint when bootstrap section present.
+	// Fix 3: Role derived from in.Role (defaults to management).
+	var talosVersion, clusterEndpoint string
+	if in.Bootstrap != nil {
+		talosVersion = in.Bootstrap.TalosVersion
+		clusterEndpoint = stripScheme(in.Bootstrap.ControlPlaneEndpoint)
+	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -957,9 +998,11 @@ func compileImportTalosconfigSecret(in ClusterInput, output string) error {
 			},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode: platformv1alpha1.TalosClusterModeImport,
-			Role: platformv1alpha1.TalosClusterRoleManagement,
-			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+			Mode:            platformv1alpha1.TalosClusterModeImport,
+			Role:            clusterRole(in),
+			TalosVersion:    talosVersion,
+			ClusterEndpoint: clusterEndpoint,
+			CAPI:            platformv1alpha1.CAPIConfig{Enabled: false},
 		},
 	}
 	return writeCRYAML(output, in.Name, tc)
