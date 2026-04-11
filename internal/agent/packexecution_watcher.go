@@ -94,6 +94,10 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 		if packName == "" || clusterName == "" {
 			continue
 		}
+		admissionProfile := labels["infra.ontai.dev/admission-profile"]
+		if admissionProfile == "" {
+			admissionProfile = "rbac-wrapper"
+		}
 
 		peNamespace := ns // seam-tenant-{clusterName}
 		peName := packName + "-" + clusterName
@@ -128,7 +132,7 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 			},
 			"spec": map[string]interface{}{
 				"targetClusterRef":    clusterName,
-				"admissionProfileRef": "rbac-wrapper",
+				"admissionProfileRef": admissionProfile,
 				"clusterPackRef": map[string]interface{}{
 					"name":    packName,
 					"version": packVersion,
