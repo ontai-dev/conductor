@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -636,6 +637,13 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 				context.Background(), secretName, metav1.GetOptions{},
 			)
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					// seam-mc Secret absent — cluster was not bootstrapped via Seam.
+					// Fall through to the talosconfig-only path: emit only the
+					// talosconfig Secret and TalosCluster CR. No machineconfig
+					// generation, no PKI extraction. C-32 Bug 2.
+					return compileImportTalosconfigSecret(in, output)
+				}
 				return fmt.Errorf("importExistingCluster: read secret %q from seam-system: %w", secretName, err)
 			}
 
@@ -755,6 +763,8 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 	}
 
 	// Produce TalosCluster CR: mode=bootstrap, capi.enabled=false (management cluster).
+	// ontai.dev/owns-runnerconfig signals Platform to add a finalizer and clean up
+	// the RunnerConfig in ont-system when this TalosCluster is deleted. Bug 3.
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -763,6 +773,9 @@ func compileBootstrap(input, output, kubeconfigPath string) error {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,
 			Namespace: ns,
+			Annotations: map[string]string{
+				"ontai.dev/owns-runnerconfig": "true",
+			},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
 			Mode: platformv1alpha1.TalosClusterModeBootstrap,
@@ -917,5 +930,34 @@ func compileImportTalosconfigSecret(in ClusterInput, output string) error {
 			"talosconfig": string(data),
 		},
 	}
-	return writeCRYAML(output, secretName, secret)
+
+	if err := os.MkdirAll(output, 0755); err != nil {
+		return fmt.Errorf("compileImportTalosconfigSecret: create output dir: %w", err)
+	}
+
+	if err := writeCRYAML(output, secretName, secret); err != nil {
+		return fmt.Errorf("compileImportTalosconfigSecret: write talosconfig secret: %w", err)
+	}
+
+	// Emit TalosCluster CR with mode=import, role=management so the operator
+	// can adopt the cluster without a bootstrap Job. conductor-schema.md §9.
+	tc := platformv1alpha1.TalosCluster{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "platform.ontai.dev/v1alpha1",
+			Kind:       "TalosCluster",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      in.Name,
+			Namespace: ns,
+			Annotations: map[string]string{
+				"ontai.dev/owns-runnerconfig": "true",
+			},
+		},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			Mode: platformv1alpha1.TalosClusterModeImport,
+			Role: platformv1alpha1.TalosClusterRoleManagement,
+			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+		},
+	}
+	return writeCRYAML(output, in.Name, tc)
 }
