@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 var packWatcherRunnerConfigGVR = schema.GroupVersionResource{
@@ -50,6 +51,8 @@ func NewPackExecutionWatcher(dynamicClient dynamic.Interface) *PackExecutionWatc
 // infra.ontai.dev/pack across all seam-tenant-* namespaces and creates a
 // PackExecution for any RunnerConfig that lacks one.
 func (w *PackExecutionWatcher) Run(leaderCtx context.Context, interval time.Duration) {
+	log := ctrl.Log.WithName("packexecution-watcher")
+	log.Info("PackExecutionWatcher started", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -58,7 +61,7 @@ func (w *PackExecutionWatcher) Run(leaderCtx context.Context, interval time.Dura
 			return
 		case <-ticker.C:
 			if err := w.reconcile(leaderCtx); err != nil {
-				fmt.Printf("conductor agent: PackExecutionWatcher reconcile error: %v\n", err)
+				log.Error(err, "PackExecutionWatcher reconcile error")
 			}
 		}
 	}
@@ -92,18 +95,23 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 		peNamespace := ns // seam-tenant-{clusterName}
 		peName := packName + "-" + clusterName
 
+		log := ctrl.Log.WithName("packexecution-watcher").WithValues(
+			"packName", packName, "clusterName", clusterName, "namespace", peNamespace)
+
 		// Skip if PackExecution already exists.
 		_, err := w.dynamicClient.Resource(packExecutionGVR).Namespace(peNamespace).Get(ctx, peName, metav1.GetOptions{})
 		if err == nil {
+			log.V(1).Info("PackExecution already exists", "name", peName)
 			continue
 		}
 		if !k8serrors.IsNotFound(err) {
-			fmt.Printf("conductor agent: PackExecutionWatcher: get PackExecution %s/%s: %v\n", peNamespace, peName, err)
+			log.Error(err, "get PackExecution failed", "name", peName)
 			continue
 		}
 
 		// Create PackExecution from RunnerConfig. The admissionProfileRef defaults to
 		// the cluster name (convention: one RBACProfile per cluster, named after it).
+		log.Info("creating PackExecution", "name", peName, "packVersion", packVersion)
 		pe := &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "infra.ontai.dev/v1alpha1",
 			"kind":       "PackExecution",
@@ -111,8 +119,8 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 				"name":      peName,
 				"namespace": peNamespace,
 				"labels": map[string]interface{}{
-					"infra.ontai.dev/pack":        packName,
-					"platform.ontai.dev/cluster":  clusterName,
+					"infra.ontai.dev/pack":          packName,
+					"platform.ontai.dev/cluster":    clusterName,
 					"infra.ontai.dev/runner-config": rc.GetName(),
 				},
 			},
@@ -130,11 +138,10 @@ func (w *PackExecutionWatcher) reconcile(ctx context.Context) error {
 			if k8serrors.IsAlreadyExists(err) {
 				continue
 			}
-			fmt.Printf("conductor agent: PackExecutionWatcher: create PackExecution %s/%s: %v\n", peNamespace, peName, err)
+			log.Error(err, "create PackExecution failed", "name", peName)
 			continue
 		}
-		fmt.Printf("conductor agent: PackExecutionWatcher: created PackExecution %s/%s (pack=%s version=%s cluster=%s)\n",
-			peNamespace, peName, packName, packVersion, clusterName)
+		log.Info("PackExecution created", "name", peName, "packVersion", packVersion)
 	}
 	return nil
 }

@@ -374,6 +374,13 @@ type PackBuildInput struct {
 	// SourceBuildRef is an opaque reference to the build that produced this pack.
 	// +optional
 	SourceBuildRef string `yaml:"sourceBuildRef,omitempty"`
+
+	// TargetClusters is the list of cluster names to which this ClusterPack should
+	// be delivered. Mapped directly to ClusterPackSpec.targetClusters.
+	// Optional — if absent, the ClusterPack is global (all clusters on this pack).
+	// wrapper-schema.md §4. WS3.
+	// +optional
+	TargetClusters []string `yaml:"targetClusters,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -845,6 +852,7 @@ func compilePackBuild(input, output string) error {
 			},
 			Checksum:       in.Checksum,
 			SourceBuildRef: in.SourceBuildRef,
+			TargetClusters: in.TargetClusters,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
