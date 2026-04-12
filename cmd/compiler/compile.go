@@ -961,11 +961,14 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string, mo
 		"Platform's TalosClusterReconciler watches this CR and submits the bootstrap Conductor Job."
 
 	if mode == platformv1alpha1.TalosClusterModeImport {
-		step1Desc = "Apply Talos machineconfig Secrets and talosconfig Secret — one per node plus " +
-			"one talosconfig. Apply ALL before the TalosCluster CR."
+		step1Desc = "Apply ALL Secrets: machineconfig Secrets (one per node) AND the talosconfig Secret " +
+			"(seam-mc-" + clusterName + "-talosconfig.yaml). " +
+			"The talosconfig Secret is required for Platform to generate the kubeconfig. " +
+			"Apply ALL before TalosCluster CR."
 		step2Desc = "Apply TalosCluster CR with mode=import. " +
-			"Apply AFTER all Secrets in step 1, including the talosconfig Secret which Platform " +
-			"needs to generate the kubeconfig."
+			"Apply AFTER all Secrets in step 1 are present in the cluster — " +
+			"Platform reads the talosconfig Secret during TalosCluster reconciliation " +
+			"to generate and store the cluster kubeconfig."
 	}
 
 	seq := BootstrapSequence{
