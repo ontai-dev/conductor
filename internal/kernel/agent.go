@@ -312,17 +312,6 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef)
 	}
 
-	// PackExecutionWatcher — management cluster only (WS3).
-	// Watches RunnerConfigs labeled infra.ontai.dev/pack in seam-tenant-* namespaces
-	// and creates PackExecution CRs for any RunnerConfig that lacks one.
-	// wrapper-schema.md §9 delivery chain.
-	var packExWatcher *agent.PackExecutionWatcher
-	if role == RoleManagement {
-		packExWatcher = agent.NewPackExecutionWatcher(dynamicClient)
-		fmt.Printf("conductor agent: cluster=%q PackExecutionWatcher enabled (management role)\n",
-			execCtx.ClusterRef)
-	}
-
 	// Phase 4 — Run leader election. Blocks until goCtx is cancelled.
 	// On leader win: run capability publisher once, then start receipt reconciler loop.
 	// On leader loss: goroutines see their context cancelled and stop.
@@ -335,7 +324,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packExWatcher)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -361,7 +350,6 @@ func onLeaderStart(
 	signingLoop *agent.SigningLoop,
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
-	packExWatcher *agent.PackExecutionWatcher,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
 	// If the RunnerConfig does not yet exist (Platform creates it after Conductor
@@ -411,14 +399,6 @@ func onLeaderStart(
 	// Gap 28, conductor-schema.md §10.
 	if packInstancePullLoop != nil {
 		go packInstancePullLoop.Run(leaderCtx, signingInterval)
-	}
-
-	// Start PackExecution watcher (management cluster only).
-	// Watches RunnerConfigs labeled infra.ontai.dev/pack in seam-tenant-* namespaces
-	// and creates PackExecution CRs for RunnerConfigs that lack one.
-	// wrapper-schema.md §9 delivery chain. WS3.
-	if packExWatcher != nil {
-		go packExWatcher.Run(leaderCtx, signingInterval)
 	}
 
 	// Block until leadership is lost.
