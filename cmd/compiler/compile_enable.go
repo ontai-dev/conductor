@@ -2685,6 +2685,10 @@ func buildOperatorRBACProfile(op operatorSpec) map[string]interface{} {
 					"scope":            "cluster",
 				},
 			},
+			// domainIdentityRef traces this operator's service account to the
+			// DomainIdentity at core.ontai.dev. Set by compiler enable for all
+			// Seam family operators. guardian-schema.md §7, CLAUDE.md §14 Decision 2.
+			"domainIdentityRef": op.Name,
 		},
 	}
 }
