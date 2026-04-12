@@ -301,6 +301,28 @@ func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 	}
 }
 
+// TestEnable_RBACProfilesDomainIdentityRef verifies that every RBACProfile CR
+// emitted by compiler enable carries spec.domainIdentityRef set to the operator
+// name. guardian-schema.md §7, CLAUDE.md §14 Decision 2.
+func TestEnable_RBACProfilesDomainIdentityRef(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-rbacprofile.yaml")
+
+	assertContainsStr(t, content, "domainIdentityRef:")
+
+	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
+		if !strings.Contains(content, "domainIdentityRef: "+name) {
+			t.Errorf("expected domainIdentityRef: %q in RBACProfile output", name)
+		}
+	}
+}
+
 // TestEnable_RBACProfilesCarryReviewAnnotation verifies that RBACProfile files
 // include the human-review annotation. guardian-schema.md §6.
 func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
