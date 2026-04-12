@@ -19,6 +19,10 @@ import (
 // the RunnerConfig does not yet exist or the patch fails transiently.
 const capabilityPublishRetryInterval = 30 * time.Second
 
+// capabilityWatchInterval is how often the maintenance loop polls RunnerConfig
+// for UID changes after a successful publish.
+const capabilityWatchInterval = 15 * time.Second
+
 // runnerConfigGVR is the GroupVersionResource for RunnerConfig CRs.
 // API group runner.ontai.dev, schema version v1alpha1. conductor-schema.md §5.
 var runnerConfigGVR = schema.GroupVersionResource{
@@ -78,42 +82,115 @@ func (p *CapabilityPublisher) Publish(ctx context.Context, clusterRef, agentVers
 	return nil
 }
 
-// PublishWithRetry attempts an initial Publish and, if it fails, starts a
-// background goroutine that retries every capabilityPublishRetryInterval until
-// the publish succeeds or ctx is cancelled. The goroutine exits on first
-// success — there is no need to republish unless the RunnerConfig changes.
+// PublishWithRetry attempts an initial Publish and starts a background
+// maintenance goroutine. The goroutine retries failed publishes every
+// capabilityPublishRetryInterval, then after a successful publish polls
+// RunnerConfig every capabilityWatchInterval. If the RunnerConfig is deleted
+// or recreated (UID changes), the goroutine republishes the capability manifest.
 //
-// This handles the race where Conductor starts before Platform has created the
-// RunnerConfig: the initial attempt fails with NotFound, and the retry loop
-// picks it up once Platform creates the CR. conductor-schema.md §10 step 3.
+// This handles two races:
+//  1. Conductor starts before Platform creates RunnerConfig (NotFound on initial
+//     attempt — retry loop picks it up). conductor-schema.md §10 step 3.
+//  2. RunnerConfig is deleted and recreated (e.g. Platform restarts) — UID-based
+//     watch detects the recreation and republishes immediately.
 func (p *CapabilityPublisher) PublishWithRetry(ctx context.Context, clusterRef, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) {
 	log := slog.Default().With("component", "capability-publisher", "clusterRef", clusterRef, "namespace", p.namespace)
 
-	if err := p.Publish(ctx, clusterRef, agentVersion, agentLeader, capabilities); err == nil {
-		return // success on first attempt — no retry loop needed
-	} else {
-		log.Warn("initial capability publish failed — starting retry loop",
+	if err := p.Publish(ctx, clusterRef, agentVersion, agentLeader, capabilities); err != nil {
+		log.Warn("initial capability publish failed — background maintenance loop will retry",
 			"error", err, "retryInterval", capabilityPublishRetryInterval)
 	}
 
-	go func() {
-		ticker := time.NewTicker(capabilityPublishRetryInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				log.Info("capability publish retry loop cancelled", "reason", ctx.Err())
-				return
-			case <-ticker.C:
+	go p.maintainPublication(ctx, clusterRef, agentVersion, agentLeader, capabilities)
+}
+
+// maintainPublication is the long-running background goroutine started by
+// PublishWithRetry. It cycles through two phases until ctx is cancelled:
+//
+//  1. Publish phase: retries Publish every capabilityPublishRetryInterval until
+//     success, then records the RunnerConfig UID.
+//  2. Watch phase: polls RunnerConfig every capabilityWatchInterval. On UID
+//     change or NotFound, transitions back to the publish phase.
+func (p *CapabilityPublisher) maintainPublication(ctx context.Context, clusterRef, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) {
+	log := slog.Default().With("component", "capability-publisher", "clusterRef", clusterRef, "namespace", p.namespace)
+
+	// Seed currentUID from a RunnerConfig that may already exist from the
+	// synchronous initial attempt in PublishWithRetry.
+	currentUID, err := p.fetchRunnerConfigUID(ctx, clusterRef)
+	if err != nil {
+		currentUID = "" // will enter publish phase immediately
+	}
+
+	for {
+		// Publish phase: retry until Publish succeeds and we have a valid UID.
+		if currentUID == "" {
+			retryTicker := time.NewTicker(capabilityPublishRetryInterval)
+		publishLoop:
+			for {
 				if err := p.Publish(ctx, clusterRef, agentVersion, agentLeader, capabilities); err != nil {
-					log.Warn("capability publish retry failed", "error", err)
+					log.Warn("capability publish failed — retrying",
+						"error", err, "retryInterval", capabilityPublishRetryInterval)
 				} else {
-					log.Info("capability manifest published successfully after retry")
+					uid, err := p.fetchRunnerConfigUID(ctx, clusterRef)
+					if err != nil {
+						log.Warn("published but failed to read RunnerConfig UID — will re-check next tick", "error", err)
+					} else {
+						log.Info("capability manifest published", "uid", uid)
+						currentUID = uid
+					}
+					retryTicker.Stop()
+					break publishLoop
+				}
+				select {
+				case <-ctx.Done():
+					retryTicker.Stop()
+					log.Info("capability publish loop cancelled", "reason", ctx.Err())
 					return
+				case <-retryTicker.C:
+					// retry
 				}
 			}
 		}
-	}()
+
+		// Watch phase: poll for RunnerConfig deletion or recreation.
+		watchTicker := time.NewTicker(capabilityWatchInterval)
+	watchLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				watchTicker.Stop()
+				log.Info("capability watch loop cancelled", "reason", ctx.Err())
+				return
+			case <-watchTicker.C:
+				uid, err := p.fetchRunnerConfigUID(ctx, clusterRef)
+				if err != nil {
+					watchTicker.Stop()
+					log.Info("RunnerConfig not found — republishing capabilities", "clusterRef", clusterRef)
+					currentUID = ""
+					break watchLoop
+				}
+				if uid != currentUID {
+					watchTicker.Stop()
+					log.Info("RunnerConfig UID changed — republishing capabilities",
+						"clusterRef", clusterRef, "oldUID", currentUID, "newUID", uid)
+					currentUID = ""
+					break watchLoop
+				}
+			}
+		}
+		// Loop back to publish phase.
+	}
+}
+
+// fetchRunnerConfigUID fetches the RunnerConfig named clusterRef and returns its
+// UID. Returns an error if the resource is not found or the Get call fails.
+func (p *CapabilityPublisher) fetchRunnerConfigUID(ctx context.Context, clusterRef string) (string, error) {
+	rc, err := p.client.Resource(runnerConfigGVR).Namespace(p.namespace).Get(ctx, clusterRef, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("capability publisher: get RunnerConfig %q in %q: %w",
+			clusterRef, p.namespace, err)
+	}
+	return string(rc.GetUID()), nil
 }
 
 // BuildManifest constructs the []CapabilityEntry slice from the registered
