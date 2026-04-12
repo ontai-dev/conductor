@@ -497,7 +497,7 @@ func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 		// Target cluster: populate full CAPI block.
 		spec.CAPI.TalosVersion = in.CAPI.TalosVersion
 		spec.CAPI.KubernetesVersion = in.CAPI.KubernetesVersion
-		spec.CAPI.ControlPlane = platformv1alpha1.CAPIControlPlaneConfig{
+		spec.CAPI.ControlPlane = &platformv1alpha1.CAPIControlPlaneConfig{
 			Replicas: in.CAPI.ControlPlaneReplicas,
 		}
 	} else if in.Bootstrap != nil {
@@ -807,46 +807,15 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 		secretNames = append(secretNames, secretName+".yaml")
 	}
 
-	// C-35: When importExistingCluster=true and machineConfigPaths is provided,
-	// also emit the talosconfig Secret so Platform can generate the kubeconfig.
-	// Resolution order: --talosconfig flag → TALOSCONFIG env → ~/.talos/config.
-	// Failure is a warning — the operator can apply the Secret manually.
-	if in.ImportExistingCluster && len(in.MachineConfigPaths) > 0 {
-		tcfgPath := talosconfigPath
-		if tcfgPath == "" {
-			tcfgPath = os.Getenv("TALOSCONFIG")
-		}
-		if tcfgPath == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				tcfgPath = filepath.Join(home, ".talos", "config")
-			}
-		}
-		if tcfgPath != "" {
-			tcfgData, tcfgErr := os.ReadFile(tcfgPath)
-			if tcfgErr != nil {
-				slog.Warn("C-35: cannot read talosconfig — seam-mc talosconfig Secret will not be emitted; apply manually",
-					"path", tcfgPath, "error", tcfgErr)
-			} else {
-				tcfgSecretName := "seam-mc-" + in.Name + "-talosconfig"
-				tcfgSecret := corev1.Secret{
-					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      tcfgSecretName,
-						Namespace: ns,
-						Labels: map[string]string{
-							"ontai.dev/cluster":    in.Name,
-							"ontai.dev/managed-by": "compiler",
-						},
-					},
-					Type: corev1.SecretTypeOpaque,
-					StringData: map[string]string{"talosconfig": string(tcfgData)},
-				}
-				if err := writeCRYAML(output, tcfgSecretName, tcfgSecret); err != nil {
-					slog.Warn("C-35: cannot write talosconfig Secret YAML — apply manually", "error", err)
-				} else {
-					secretNames = append(secretNames, tcfgSecretName+".yaml")
-				}
-			}
+	// C-35: When importExistingCluster=true, also emit the talosconfig Secret so
+	// Platform can generate the kubeconfig via ensureKubeconfigSecret. Applies to
+	// both the machineConfigPaths path (local file PKI) and the Kubernetes API path
+	// (Seam clusters). Failure is a warning — the operator can apply manually.
+	if in.ImportExistingCluster {
+		if tcfgFile, err := writeTalosconfigSecret(in, talosconfigPath, output); err != nil {
+			return err
+		} else if tcfgFile != "" {
+			secretNames = append(secretNames, tcfgFile)
 		}
 	}
 
@@ -885,7 +854,7 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	}
 
 	// Produce bootstrap-sequence.yaml documenting the apply order.
-	return writeBootstrapSequence(output, in.Name, secretNames)
+	return writeBootstrapSequence(output, in.Name, secretNames, tcMode)
 }
 
 // nodeRoleToMachineType converts a bootstrap node role to the Talos machine.Type.
@@ -900,6 +869,61 @@ func nodeRoleToMachineType(role string) (machine.Type, error) {
 	default:
 		return machine.TypeUnknown, fmt.Errorf("unknown role %q", role)
 	}
+}
+
+// writeTalosconfigSecret reads the talosconfig from talosconfigPath (falling back to
+// TALOSCONFIG env var and ~/.talos/config) and writes seam-mc-{cluster}-talosconfig.yaml
+// to the output directory. Returns the filename ("seam-mc-{cluster}-talosconfig.yaml")
+// on success so callers can add it to secretNames. Returns ("", nil) if the talosconfig
+// cannot be read or written — failure is a warning, not fatal; the operator can apply
+// the Secret manually. platform-schema.md §9, conductor-schema.md §9.
+func writeTalosconfigSecret(in ClusterInput, talosconfigPath, output string) (string, error) {
+	ns := in.Namespace
+	if ns == "" {
+		ns = "seam-system"
+	}
+
+	tcfgPath := talosconfigPath
+	if tcfgPath == "" {
+		tcfgPath = os.Getenv("TALOSCONFIG")
+	}
+	if tcfgPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			tcfgPath = filepath.Join(home, ".talos", "config")
+		}
+	}
+	if tcfgPath == "" {
+		slog.Warn("writeTalosconfigSecret: cannot resolve talosconfig path — Secret will not be emitted; apply manually",
+			"cluster", in.Name)
+		return "", nil
+	}
+
+	tcfgData, err := os.ReadFile(tcfgPath)
+	if err != nil {
+		slog.Warn("writeTalosconfigSecret: cannot read talosconfig — Secret will not be emitted; apply manually",
+			"path", tcfgPath, "error", err)
+		return "", nil
+	}
+
+	secretName := "seam-mc-" + in.Name + "-talosconfig"
+	secret := corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: ns,
+			Labels: map[string]string{
+				"ontai.dev/cluster":    in.Name,
+				"ontai.dev/managed-by": "compiler",
+			},
+		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: map[string]string{"talosconfig": string(tcfgData)},
+	}
+	if err := writeCRYAML(output, secretName, secret); err != nil {
+		slog.Warn("writeTalosconfigSecret: cannot write talosconfig Secret YAML — apply manually", "error", err)
+		return "", nil
+	}
+	return secretName + ".yaml", nil
 }
 
 // BootstrapSequenceStep documents one step in the bootstrap apply sequence.
@@ -924,24 +948,40 @@ type BootstrapSequence struct {
 // reject it. The sequence content is stored in ConfigMap.data["sequence.yaml"] and can
 // be inspected with: kubectl get cm seam-bootstrap-sequence-{cluster} -n seam-system -o yaml
 //
+// The mode parameter controls step descriptions:
+//   - bootstrap: standard fresh-PKI path; step 1 lists machineconfig Secrets only.
+//   - import: existing cluster path; step 1 lists machineconfig and talosconfig Secrets;
+//     step 2 reminds the operator that the talosconfig Secret must be applied first.
+//
 // C-36: previously used kind: BootstrapSequence (not a valid CRD). platform-schema.md §9.
-func writeBootstrapSequence(output, clusterName string, secretFiles []string) error {
+func writeBootstrapSequence(output, clusterName string, secretFiles []string, mode platformv1alpha1.TalosClusterMode) error {
+	step1Desc := "Apply Talos machineconfig Secrets — one per node. " +
+		"Apply ALL before the TalosCluster CR."
+	step2Desc := "Apply TalosCluster CR with mode=bootstrap and capi.enabled=false. " +
+		"Platform's TalosClusterReconciler watches this CR and submits the bootstrap Conductor Job."
+
+	if mode == platformv1alpha1.TalosClusterModeImport {
+		step1Desc = "Apply Talos machineconfig Secrets and talosconfig Secret — one per node plus " +
+			"one talosconfig. Apply ALL before the TalosCluster CR."
+		step2Desc = "Apply TalosCluster CR with mode=import. " +
+			"Apply AFTER all Secrets in step 1, including the talosconfig Secret which Platform " +
+			"needs to generate the kubeconfig."
+	}
+
 	seq := BootstrapSequence{
 		APIVersion:  "ontai.dev/v1alpha1",
 		Kind:        "BootstrapSequence",
 		ClusterName: clusterName,
 		Steps: []BootstrapSequenceStep{
 			{
-				Step: 1,
-				Description: "Apply Talos machineconfig Secrets — one per node. " +
-					"Apply before the TalosCluster CR so Platform can reference them at bootstrap time.",
-				Resources: secretFiles,
+				Step:        1,
+				Description: step1Desc,
+				Resources:   secretFiles,
 			},
 			{
-				Step: 2,
-				Description: "Apply TalosCluster CR with mode=bootstrap and capi.enabled=false. " +
-					"Platform's TalosClusterReconciler watches this CR and submits the bootstrap Conductor Job.",
-				Resources: []string{clusterName + ".yaml"},
+				Step:        2,
+				Description: step2Desc,
+				Resources:   []string{clusterName + ".yaml"},
 			},
 		},
 	}
