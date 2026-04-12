@@ -48,6 +48,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 			"guardian-crds.yaml",
 			"guardian-rbac.yaml",
 			"guardian-rbacprofiles.yaml",
+			"seam-memberships.yaml",
 		}},
 		{"02-guardian-deploy", []string{
 			"phase-meta.yaml",
@@ -319,6 +320,32 @@ func TestEnable_RBACProfilesDomainIdentityRef(t *testing.T) {
 	for _, name := range []string{"conductor", "guardian", "platform", "wrapper", "seam-core"} {
 		if !strings.Contains(content, "domainIdentityRef: "+name) {
 			t.Errorf("expected domainIdentityRef: %q in RBACProfile output", name)
+		}
+	}
+}
+
+// TestEnable_SeamMembershipsContent verifies that seam-memberships.yaml in phase 01
+// contains all five Seam operator SeamMembership CRs with the correct apiVersion,
+// tier=infrastructure, and matching domainIdentityRef values.
+// infrastructure.ontai.dev/v1alpha1, guardian-schema.md §7.
+func TestEnable_SeamMembershipsContent(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "seam-memberships.yaml")
+
+	assertContainsStr(t, content, "apiVersion: infrastructure.ontai.dev/v1alpha1")
+	assertContainsStr(t, content, "kind: SeamMembership")
+	assertContainsStr(t, content, "tier: infrastructure")
+
+	for _, name := range []string{"guardian", "platform", "wrapper", "conductor", "seam-core"} {
+		if !strings.Contains(content, "name: "+name) {
+			t.Errorf("seam-memberships.yaml missing SeamMembership for %q", name)
+		}
+		if !strings.Contains(content, "domainIdentityRef: "+name) {
+			t.Errorf("seam-memberships.yaml missing domainIdentityRef: %q", name)
 		}
 	}
 }
