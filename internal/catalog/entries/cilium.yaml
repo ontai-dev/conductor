@@ -1,0 +1,39 @@
+# Cilium CNI agent and operator — RBACProfile catalog entry.
+# Catalog version: {{ .EntryVersion }}
+# conductor-schema.md §16.
+#
+# PermissionSets referenced below must exist in the RBACProfile namespace before
+# Guardian can set provisioned=true on this profile. Create them as PermissionSet
+# CRs with the RBAC rules required by the Cilium CNI and operator ServiceAccounts.
+#
+# Cilium ServiceAccounts: cilium (DaemonSet agent), cilium-operator (Deployment).
+# Both share cluster-scoped permissions for network policy enforcement and node config.
+#
+# spec.lineage is controller-managed — do not author this field manually.
+# The InfrastructureLineageController sets it after admission. CLAUDE.md §14.
+apiVersion: security.ontai.dev/v1alpha1
+kind: RBACProfile
+metadata:
+  name: {{ .RBACProfileName }}
+  namespace: {{ .Namespace }}
+  annotations:
+    ontai.dev/catalog-version: "{{ .EntryVersion }}"
+    ontai.dev/catalog-component: "{{ .EntryName }}"
+    ontai.dev/catalog-description: "{{ .EntryDescription }}"
+spec:
+  principalRef: cilium
+  targetClusters:
+{{- range .TargetClusters }}
+  - {{ . }}
+{{- end }}
+  rbacPolicyRef: {{ .RBACPolicyRef }}
+  permissionDeclarations:
+    # Cluster-wide network policy enforcement: Endpoint, NetworkPolicy, Node, CiliumNetworkPolicy.
+    - permissionSetRef: cilium-cluster-network
+      scope: cluster
+    # Cluster-wide node configuration: CiliumNode, CiliumEndpoint, CiliumIdentity.
+    - permissionSetRef: cilium-cluster-identity
+      scope: cluster
+    # Cilium operator permissions: CiliumNetworkPolicy, CiliumClusterwideNetworkPolicy, IPPool.
+    - permissionSetRef: cilium-operator
+      scope: cluster

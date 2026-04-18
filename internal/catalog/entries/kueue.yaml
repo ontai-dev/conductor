@@ -1,0 +1,40 @@
+# Kueue batch scheduler — RBACProfile catalog entry.
+# Catalog version: {{ .EntryVersion }}
+# conductor-schema.md §16.
+#
+# Kueue is the batch scheduling layer for Wrapper pack-deploy Jobs. Guardian
+# provisions the ClusterQueue from QueueProfile (guardian-schema.md §14).
+# This RBACProfile governs Kueue's controller-manager service account RBAC.
+#
+# Kueue ServiceAccount: kueue-controller-manager (Deployment in kueue-system,
+# or seam-system on management cluster). Requires cluster-wide access to
+# ClusterQueue, LocalQueue, Workload, ResourceFlavor CRDs plus Job management.
+#
+# spec.lineage is controller-managed — do not author this field manually.
+# The InfrastructureLineageController sets it after admission. CLAUDE.md §14.
+apiVersion: security.ontai.dev/v1alpha1
+kind: RBACProfile
+metadata:
+  name: {{ .RBACProfileName }}
+  namespace: {{ .Namespace }}
+  annotations:
+    ontai.dev/catalog-version: "{{ .EntryVersion }}"
+    ontai.dev/catalog-component: "{{ .EntryName }}"
+    ontai.dev/catalog-description: "{{ .EntryDescription }}"
+spec:
+  principalRef: kueue-controller-manager
+  targetClusters:
+{{- range .TargetClusters }}
+  - {{ . }}
+{{- end }}
+  rbacPolicyRef: {{ .RBACPolicyRef }}
+  permissionDeclarations:
+    # Cluster-wide Kueue CRD management: ClusterQueue, ResourceFlavor, AdmissionCheck.
+    - permissionSetRef: kueue-cluster-scheduling
+      scope: cluster
+    # Cluster-wide Workload management: LocalQueue, Workload across namespaces.
+    - permissionSetRef: kueue-workload-management
+      scope: cluster
+    # Cluster-wide Job admission: batch/Job, apps/Deployment admission integration.
+    - permissionSetRef: kueue-job-admission
+      scope: cluster

@@ -1,0 +1,171 @@
+# Talos CAPI Control Plane Provider Manifests
+# Pinned version: cluster-api-control-plane-provider-talos v0.5.8
+# Source: https://github.com/siderolabs/cluster-api-control-plane-provider-talos
+# Embedded at compile time by the Seam Compiler enable pipeline.
+# Apply after CAPI core is running (capi-system Deployment Available).
+# platform-schema.md §3 CAPI composition model.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: taloscontrolplanes.controlplane.cluster.x-k8s.io
+spec:
+  group: controlplane.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: TalosControlPlane
+    listKind: TalosControlPlaneList
+    plural: taloscontrolplanes
+    singular: taloscontrolplane
+  scope: Namespaced
+  versions:
+  - name: v1alpha3
+    schema:
+      openAPIV3Schema:
+        description: TalosControlPlane is the Schema for the taloscontrolplanes API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TalosControlPlaneSpec defines the desired state of TalosControlPlane.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            description: TalosControlPlaneStatus defines the observed state of TalosControlPlane.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: control-plane-talos
+  name: cacppt-manager
+  namespace: capi-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: control-plane-talos
+  name: cacppt-manager-role
+rules:
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  resources:
+  - taloscontrolplanes
+  - taloscontrolplanes/status
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  - clusters/status
+  - machines
+  - machines/status
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - bootstrap.cluster.x-k8s.io
+  resources:
+  - talosconfigs
+  - talosconfigtemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: control-plane-talos
+  name: cacppt-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cacppt-manager-role
+subjects:
+- kind: ServiceAccount
+  name: cacppt-manager
+  namespace: capi-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: control-plane-talos
+    control-plane: controller-manager
+  name: cacppt-controller-manager
+  namespace: capi-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/provider: control-plane-talos
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/provider: control-plane-talos
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --leader-elect
+        command:
+        - /manager
+        image: ghcr.io/siderolabs/cluster-api-control-plane-provider-talos:v0.5.8
+        name: manager
+        resources:
+          limits:
+            cpu: 200m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: cacppt-manager
+      terminationGracePeriodSeconds: 10

@@ -1,0 +1,40 @@
+# CloudNativePG operator — RBACProfile catalog entry.
+# Catalog version: {{ .EntryVersion }}
+# conductor-schema.md §16.
+#
+# CNPG is a Guardian dependency (INV-016). Guardian itself runs CNPG for its
+# security warehouse. CNPG on the management cluster is provisioned by Guardian's
+# Phase 1 bootstrap. This RBACProfile governs CNPG's service account RBAC.
+#
+# CNPG ServiceAccount: cnpg-manager (controller-manager Deployment in cnpg-system,
+# or seam-system on management cluster). Requires cluster-wide access to Cluster,
+# Pooler, Backup, ScheduledBackup CRDs plus core RBAC for pod/configmap management.
+#
+# spec.lineage is controller-managed — do not author this field manually.
+# The InfrastructureLineageController sets it after admission. CLAUDE.md §14.
+apiVersion: security.ontai.dev/v1alpha1
+kind: RBACProfile
+metadata:
+  name: {{ .RBACProfileName }}
+  namespace: {{ .Namespace }}
+  annotations:
+    ontai.dev/catalog-version: "{{ .EntryVersion }}"
+    ontai.dev/catalog-component: "{{ .EntryName }}"
+    ontai.dev/catalog-description: "{{ .EntryDescription }}"
+spec:
+  principalRef: cnpg-manager
+  targetClusters:
+{{- range .TargetClusters }}
+  - {{ . }}
+{{- end }}
+  rbacPolicyRef: {{ .RBACPolicyRef }}
+  permissionDeclarations:
+    # Cluster-wide CNPG CRD management: Cluster, Pooler, Backup, ScheduledBackup.
+    - permissionSetRef: cnpg-cluster-management
+      scope: cluster
+    # Namespaced core operations: Pod, ConfigMap, Secret, Service, PVC management.
+    - permissionSetRef: cnpg-core-ops
+      scope: namespaced
+    # Cluster-wide status and event access: Nodes, Events, StorageClass.
+    - permissionSetRef: cnpg-cluster-observer
+      scope: cluster

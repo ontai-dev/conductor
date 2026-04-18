@@ -1,0 +1,30 @@
+# Dockerfile.compiler — Compiler binary (compile mode, debian-slim).
+#
+# The Compiler is a short-lived tool invoked by humans or the bootstrap pipeline.
+# It is never deployed to any cluster. It uses debian-slim to support SOPS age
+# key operations, Helm chart HTTPS pulls, and CNPG health verification in the
+# enable phase. INV-022 — this image is never deployed to any cluster.
+# conductor-schema.md §14.
+
+FROM golang:1.25 AS builder
+WORKDIR /build
+COPY conductor/ .
+COPY guardian/ ../guardian/
+COPY platform/ ../platform/
+COPY seam-core/ ../seam-core/
+COPY wrapper/ ../wrapper/
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /bin/compiler \
+    ./cmd/compiler
+
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bin/compiler /usr/local/bin/compiler
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/compiler"]

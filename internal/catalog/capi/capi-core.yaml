@@ -1,0 +1,286 @@
+# Cluster API Core Operator Manifests
+# Pinned version: cluster-api v1.9.4
+# Source: https://github.com/kubernetes-sigs/cluster-api/releases/tag/v1.9.4
+# Embedded at compile time by the Seam Compiler enable pipeline.
+# Apply to the management cluster before Platform operator starts.
+# platform-schema.md §3 CAPI composition model.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+    control-plane: controller-manager
+  name: capi-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: clusters.cluster.x-k8s.io
+spec:
+  group: cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: Cluster
+    listKind: ClusterList
+    plural: clusters
+    singular: cluster
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: Cluster is the Schema for the clusters API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ClusterSpec defines the desired state of Cluster.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            description: ClusterStatus defines the observed state of Cluster.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: machines.cluster.x-k8s.io
+spec:
+  group: cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: Machine
+    listKind: MachineList
+    plural: machines
+    singular: machine
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: Machine is the Schema for the machines API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MachineSpec defines the desired state of Machine.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            description: MachineStatus defines the observed state of Machine.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: machinedeployments.cluster.x-k8s.io
+spec:
+  group: cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: MachineDeployment
+    listKind: MachineDeploymentList
+    plural: machinedeployments
+    singular: machinedeployment
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: MachineDeployment is the Schema for the machinedeployments API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MachineDeploymentSpec defines the desired state of MachineDeployment.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            description: MachineDeploymentStatus defines the observed state of MachineDeployment.
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: machinesets.cluster.x-k8s.io
+spec:
+  group: cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: MachineSet
+    listKind: MachineSetList
+    plural: machinesets
+    singular: machineset
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: MachineSet is the Schema for the machinesets API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+  name: capi-manager
+  namespace: capi-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+  name: capi-manager-role
+rules:
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  - clusters/status
+  - machines
+  - machines/status
+  - machinedeployments
+  - machinedeployments/status
+  - machinesets
+  - machinesets/status
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+  name: capi-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capi-manager-role
+subjects:
+- kind: ServiceAccount
+  name: capi-manager
+  namespace: capi-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+    control-plane: controller-manager
+  name: capi-controller-manager
+  namespace: capi-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/provider: cluster-api
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/provider: cluster-api
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --leader-elect
+        command:
+        - /manager
+        image: registry.k8s.io/cluster-api/cluster-api-controller:v1.9.4
+        name: manager
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: capi-manager
+      terminationGracePeriodSeconds: 10

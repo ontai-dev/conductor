@@ -1,0 +1,68 @@
+# Dockerfile.execute — Conductor binary for execute mode (debian-slim).
+#
+# Execute-mode Jobs run as short-lived Kueue Jobs in ont-system on the management
+# cluster. This image includes SOPS, Helm, and Kustomize binaries required for
+# pack-deploy and related capabilities. conductor-schema.md §14.
+#
+# Execute mode uses the conductor binary. Compile mode is refused at startup per
+# INV-023. Only the conductor binary is included — no compile-mode clients.
+
+ARG SOPS_VERSION=3.9.4
+ARG HELM_VERSION=3.17.3
+ARG KUSTOMIZE_VERSION=5.6.0
+
+FROM golang:1.25 AS builder
+WORKDIR /build
+COPY conductor/ .
+COPY guardian/ ../guardian/
+COPY platform/ ../platform/
+COPY seam-core/ ../seam-core/
+COPY wrapper/ ../wrapper/
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /bin/conductor \
+    ./cmd/conductor
+
+FROM debian:12-slim AS tools
+
+ARG SOPS_VERSION
+ARG HELM_VERSION
+ARG KUSTOMIZE_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install SOPS
+RUN curl -fsSL \
+    "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
+    -o /usr/local/bin/sops \
+    && chmod 0755 /usr/local/bin/sops
+
+# Install Helm
+RUN curl -fsSL \
+    "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin linux-amd64/helm \
+    && chmod 0755 /usr/local/bin/helm
+
+# Install Kustomize
+RUN curl -fsSL \
+    "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz -C /usr/local/bin \
+    && chmod 0755 /usr/local/bin/kustomize
+
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bin/conductor /usr/local/bin/conductor
+COPY --from=tools /usr/local/bin/sops /usr/local/bin/sops
+COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=tools /usr/local/bin/kustomize /usr/local/bin/kustomize
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/conductor"]
+CMD ["execute"]
