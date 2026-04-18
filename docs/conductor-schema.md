@@ -8,7 +8,7 @@
 ## 1. Central Principle
 
 The conductor repository is the platform intelligence. Operators are thin reconcilers.
-All execution logic — compile-time and runtime — lives in the two binaries built from
+All execution logic - compile-time and runtime - lives in the two binaries built from
 this repository.
 
 **Compiler** is the compile-time binary. It is a short-lived tool invoked by humans
@@ -46,9 +46,9 @@ wrappers, which are excluded from Conductor at build time via Go build tags.
 **No system binary invocations in any mode.** All clients are pure Go library
 integrations. No kubectl, no talosctl, no helm binary, no kustomize binary, no
 shell invocations at any point in execute or agent mode. Compile mode uses Go
-library wrappers only — no shell invocations.
+library wrappers only - no shell invocations.
 
-**Three modes — no other modes exist:**
+**Three modes - no other modes exist:**
 
 | Mode     | Binary    | Invocation              | Duration    | Image       | Cluster Scope             |
 |----------|-----------|-------------------------|-------------|-------------|---------------------------|
@@ -77,7 +77,7 @@ Invoking talos goclient in compile mode is a programming error. INV-013.
 - `registry.ontai.dev/ontai-dev/compiler:v{talosVersion}-r{revision}`
 - `registry.ontai.dev/ontai-dev/conductor:v{talosVersion}-r{revision}`
 
-The talosVersion component declares Talos API compatibility — not cosmetic. A cluster
+The talosVersion component declares Talos API compatibility - not cosmetic. A cluster
 at Talos v1.9.3 must use a Conductor tagged v1.9.3-rN. INV-012.
 
 Compiler and Conductor always carry the same version tag built from the same source
@@ -120,7 +120,7 @@ operator logic changes are required for new capabilities.
 
 ### RunnerConfig
 
-Scope: Namespaced — ont-system (management cluster), tenant-{cluster-name} (targets).
+Scope: Namespaced - ont-system (management cluster), tenant-{cluster-name} (targets).
 Short name: rc
 
 The live operational contract between operators and Conductor for a specific cluster
@@ -141,7 +141,7 @@ Key spec fields:
 - operatorLeaderNode: the node currently hosting the leader pod of the initiating
   operator. Resolved at creation time via the Kubernetes downward API. Used by
   Conductor execute mode for node affinity exclusion when selfOperation is true.
-- selfOperation: boolean — true when the Job's execution cluster and the target
+- selfOperation: boolean - true when the Job's execution cluster and the target
   cluster are the same (management cluster self-operations). false for all
   tenant-targeted operations. Conductor execute mode reads this field to determine
   whether to apply NotIn node affinity constraints. When false, exclusion logic
@@ -167,11 +167,11 @@ CapabilityUnavailable.
 
 ### OperatorManifest
 
-Scope: Namespaced — ont-system. Management cluster only.
+Scope: Namespaced - ont-system. Management cluster only.
 Short name: om
 
 Declares one operator for Compiler's enable phase to install. Not used for
-target cluster operator installation — that is ClusterPack delivery.
+target cluster operator installation - that is ClusterPack delivery.
 
 The bootstrap RBACPolicy that is available before Guardian installs must
 authorize the enable phase operations declared here.
@@ -187,7 +187,7 @@ Key spec fields:
 - upgradeStrategy: RollingUpgrade or RecreateOnChange.
 - installOrder: integer defining enable phase sequence. Lower installs first.
   Prerequisites use order 0. Guardian must always be order 1. This is enforced
-  by Compiler — any OperatorManifest with installOrder 1 that is not Guardian
+  by Compiler - any OperatorManifest with installOrder 1 that is not Guardian
   is a programming error.
 
 Status conditions: Installed, Healthy, Failed.
@@ -228,7 +228,7 @@ corresponding implementation. Conductor exits with a structured OperationResult.
 | credential-rotate   | Platform       | NodeMaintenance                                             | Service account key rotation              |
 | hardening-apply     | Platform       | NodeMaintenance                                             | Apply HardeningProfile                    |
 | cluster-reset       | Platform       | ClusterReset                                                | Destructive factory reset with human gate |
-| pack-compile        | Wrapper        | PackBuild spec file (compile mode — not a cluster CRD, not a Kueue Job) | Compiler compile mode: renders PackBuild inputs into ClusterPack OCI artifact |
+| pack-compile        | Wrapper        | PackBuild spec file (compile mode - not a cluster CRD, not a Kueue Job) | Compiler compile mode: renders PackBuild inputs into ClusterPack OCI artifact |
 | pack-deploy         | Wrapper        | PackExecution                                               | Apply ClusterPack to target cluster       |
 | rbac-provision      | Guardian       | (agent-initiated)                                           | Provision RBAC artifacts from snapshot    |
 
@@ -245,7 +245,7 @@ Secrets.
 
 Note on pack-compile: pack-compile is the sole compile-mode entry in this table. It does
 not follow the execute-mode Job pattern that all other capabilities follow. It appears
-here for completeness — the capability name constant exists in the shared library so that
+here for completeness - the capability name constant exists in the shared library so that
 Wrapper and Compiler share a common vocabulary. However, pack-compile is never submitted
 as a Kueue Job, never run by Conductor, and never runs on any cluster.
 
@@ -255,7 +255,7 @@ RunnerConfig status. No operator requires changes.
 
 ---
 
-## 7. Inter-Job State — Temporary PVC Protocol
+## 7. Inter-Job State - Temporary PVC Protocol
 
 For multi-step sequence capabilities (bootstrap, stack-upgrade, cluster-reset),
 Conductor uses a temporary PVC for inter-step state transfer.
@@ -281,7 +281,7 @@ exit. ConfigMap name derived from Job name. The operator reads it to advance CR 
 No other inter-process communication channel exists between operator and Conductor.
 
 Structure: phase, status (succeeded or failed), startedAt, completedAt, artifacts
-(structured references — never raw content), failureReason (category and detail
+(structured references - never raw content), failureReason (category and detail
 when failed), steps (individual step results for multi-step capabilities).
 
 The operator must read OperationResult within the Job's configured TTL. After TTL
@@ -293,19 +293,19 @@ expiry the ConfigMap is garbage collected.
 
 ### Canonical Compiler Command Surface
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 The complete and authoritative compiler command surface is:
 
 | Subcommand    | Purpose                                                          | Cluster connectivity | Output                                          |
 |---------------|------------------------------------------------------------------|----------------------|-------------------------------------------------|
-| `bootstrap`   | Management cluster formation — Talos machineconfigs + bootstrap CRs | No              | CR YAML + encrypted machineconfig files         |
+| `bootstrap`   | Management cluster formation - Talos machineconfigs + bootstrap CRs | No              | CR YAML + encrypted machineconfig files         |
 | `launch`      | Management cluster CRD installation manifest                     | No                   | CRD manifest YAML bundle                        |
 | `enable`      | Seam operator deployment manifest bundle                         | No                   | Operator YAML bundle (Deployments, RBAC, etc.)  |
 | `packbuild`   | ClusterPack OCI artifact + CR YAML                               | No                   | ClusterPack CR YAML + OCI push                  |
 | `maintenance` | MaintenanceBundle CR with pre-resolved scheduling context         | Yes (management)     | MaintenanceBundle CR YAML                       |
 | `component`   | RBACProfile CRs for third-party components                       | Optional (--discover)| RBACProfile CR YAML(s)                          |
-| `domain`      | Reserved — domain CR compilation not yet implemented             | —                    | —                                               |
+| `domain`      | Reserved - domain CR compilation not yet implemented             | -                    | -                                               |
 
 No other compiler subcommands exist. New subcommands require a Platform Governor directive before implementation.
 
@@ -313,17 +313,17 @@ No other compiler subcommands exist. New subcommands require a Platform Governor
 
 ### Management Cluster Bootstrap Sequence Authority
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 The management cluster bootstrap sequence is owned exclusively by the Compiler in three steps. Platform operator has no involvement in management cluster bootstrap. This is a locked invariant.
 
-**Step 1 — `compiler bootstrap`**
-Forms the management cluster itself. Reads TalosCluster spec and human-provided machineconfig inputs. Validates spec against platform-schema.md rules. SOPS-encrypts talos-secret, machineconfigs, and talosconfig using the admin's age key. Writes encrypted files to output path. Produces bootstrap CRs (TalosCluster in mode: bootstrap) as YAML. No cluster connection required. Compiler never applies resources — the GitOps pipeline or operator's kubectl applies the output.
+**Step 1 - `compiler bootstrap`**
+Forms the management cluster itself. Reads TalosCluster spec and human-provided machineconfig inputs. Validates spec against platform-schema.md rules. SOPS-encrypts talos-secret, machineconfigs, and talosconfig using the admin's age key. Writes encrypted files to output path. Produces bootstrap CRs (TalosCluster in mode: bootstrap) as YAML. No cluster connection required. Compiler never applies resources - the GitOps pipeline or operator's kubectl applies the output.
 
-**Step 2 — `compiler launch`**
+**Step 2 - `compiler launch`**
 Installs all Seam CRDs onto the management cluster. Reads the CRD manifest set for all Seam API groups (platform.ontai.dev, security.ontai.dev, infra.ontai.dev, runner.ontai.dev, infrastructure.ontai.dev). Produces a CRD manifest YAML bundle ready for GitOps application. No cluster connection required. Compiler never applies resources.
 
-**Step 3 — `compiler enable`**
+**Step 3 - `compiler enable`**
 Produces the complete Seam operator deployment manifest bundle as YAML output. The bundle
 is structured as six sequenced phases applied in ascending order. Each phase carries a
 `phase-meta.yaml` declaring name, order, readinessGate, and applyOrder.
@@ -337,11 +337,11 @@ is structured as six sequenced phases applied in ascending order. Each phase car
 | 2     | `02-guardian-deploy`             | Guardian Deployment, Guardian RBACProfile, admission webhook configuration        | Guardian webhook operational     |
 | 3     | `03-platform-wrapper`            | Platform Deployment, Wrapper Deployment, seam-core Deployment, their RBACProfiles | All three operators healthy      |
 | 4     | `04-conductor`                   | Conductor Deployment in ont-system **stamped with `role=management`** (see §15 Role Declaration Contract), Conductor RBACProfile | Conductor agent ready |
-| 5     | `05-post-bootstrap`              | Remaining cluster-wide resources, Kueue ClusterQueue scaffold, metallb config     | —                                |
+| 5     | `05-post-bootstrap`              | Remaining cluster-wide resources, Kueue ClusterQueue scaffold, metallb config     | -                                |
 
 Phase 0 is the prerequisite phase that resolves the CNPG dependency before Guardian
 is deployed. Guardian's startup migration runner connects to CNPG before registering
-any controller — phase 0 must reach readiness before phase 1 may begin. See
+any controller - phase 0 must reach readiness before phase 1 may begin. See
 guardian-schema.md §16 CNPG Deployment Contract.
 
 Phase 1 namespace-labels.yaml stamps `seam.ontai.dev/webhook-mode=exempt` on
@@ -352,12 +352,12 @@ guardian-schema.md §4 Bootstrap RBAC Window.
 The full bundle also contains:
 - All RBAC resources for all Seam operator service accounts (distributed across phases by operator).
 - All leader election Lease templates.
-- First-class platform-owned RBACProfile CRs for all Seam operator service accounts — one per operator, Guardian-governed, human-reviewed before GitOps commit.
+- First-class platform-owned RBACProfile CRs for all Seam operator service accounts - one per operator, Guardian-governed, human-reviewed before GitOps commit.
 
 Compiler never applies resources directly. The GitOps pipeline applies this bundle after human review. No cluster connection required.
 
-**F-P8:** Phase 0 (`00-infrastructure-dependencies`) implementation — adding CNPG operator
-manifests and CNPG Cluster CR to the enable bundle output — requires a Conductor Engineer
+**F-P8:** Phase 0 (`00-infrastructure-dependencies`) implementation - adding CNPG operator
+manifests and CNPG Cluster CR to the enable bundle output - requires a Conductor Engineer
 session. See CONTEXT.md F-P8.
 
 **Invariant:** Platform operator is not involved at any step of management cluster bootstrap. Management cluster formation, CRD installation, and operator deployment are all compiler-driven. Platform's role begins when the management cluster is operational and CRDs are registered.
@@ -387,14 +387,14 @@ cluster access through one of these three sources.
 
 - `maintenanceTargetNodes`: the target node set for the operation. Directly populates
   `RunnerConfig.MaintenanceTargetNodes` when Platform creates the RunnerConfig from
-  this bundle. The node set is validated against the live cluster at compile time —
+  this bundle. The node set is validated against the live cluster at compile time -
   nodes that do not exist cause a compile-time failure.
 
 - `operatorLeaderNode`: the node currently hosting the leader pod of the initiating
   Platform operator, resolved live from the management cluster's Platform leader
   election lease (`platform-leader` Lease in `seam-system`). Directly populates
   `RunnerConfig.OperatorLeaderNode`. Compiler fails fast if the lease does not exist
-  or has no holder — this is a safety gate, not a recoverable condition.
+  or has no holder - this is a safety gate, not a recoverable condition.
 
 - `s3ConfigSecretRef`: the S3 configuration Secret reference, resolved and validated
   to exist before the MaintenanceBundle CR is committed. If the Secret is absent,
@@ -409,7 +409,7 @@ cluster access through one of these three sources.
 MaintenanceBundle is a new CRD in the `platform.ontai.dev` API group. Its complete
 type definition, spec fields, status conditions, and reconciler implementation are
 deferred to a Platform Schema Engineer session (F-P5). The contract above establishes
-the semantic requirements — the CR carries pre-resolved scheduling context so neither
+the semantic requirements - the CR carries pre-resolved scheduling context so neither
 Platform nor Conductor need to perform cluster queries at execution time.
 
 ---
@@ -417,7 +417,7 @@ Platform nor Conductor need to perform cluster queries at execution time.
 ## 10. Agent Mode (Conductor binary)
 
 Conductor in agent mode is a long-lived Deployment in ont-system on every cluster.
-Same binary, agent startup flag. Implements leader election — only one replica
+Same binary, agent startup flag. Implements leader election - only one replica
 writes to RunnerConfig status and receipt CRs at a time.
 
 **On startup (all clusters):**
@@ -459,9 +459,9 @@ Seam is fully open source with no licensing tier. All clusters are equal. No enf
 
 ## 12. Operational Readiness Gates
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
-### Gate 1 — Port 50000 Talos API Reachability
+### Gate 1 - Port 50000 Talos API Reachability
 
 Platform operator is the sole owner of Talos apid port 50000 reachability validation
 across both native and CAPI cluster paths. No other operator and no Conductor
@@ -489,7 +489,7 @@ provisioning sequence. No other reconciler or operator repeats this check.
 
 ## 13. RunnerConfig Self-Operation Contract
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 The RunnerConfig spec carries three fields as a first-class scheduling contract. These
 fields govern Conductor execute mode node affinity exclusion for management cluster
@@ -500,14 +500,14 @@ RunnerConfig creation time.
 - `maintenanceTargetNodes`: list of node names that are the subject of the operation.
 - `operatorLeaderNode`: the node currently hosting the leader pod of the initiating
   operator, resolved via the Kubernetes downward API.
-- `selfOperation`: boolean — true when the Job's execution cluster and target cluster
+- `selfOperation`: boolean - true when the Job's execution cluster and target cluster
   are the same (management cluster self-operations); false for all tenant-targeted
   operations.
 
 **Operator responsibility at RunnerConfig creation:**
 The initiating operator populates all three fields. `operatorLeaderNode` is resolved
 at creation time using the Kubernetes downward API (fieldRef: spec.nodeName on the
-operator's own pod). The operator must not cache this value — it must be resolved
+operator's own pod). The operator must not cache this value - it must be resolved
 fresh at each RunnerConfig creation to reflect the current leader pod's node.
 
 **Conductor execute mode contract:**
@@ -518,7 +518,7 @@ of the maintenance operation, and does not land on the node hosting the operator
 leader pod (which would cause a scheduling deadlock if the node were cordoned).
 
 When selfOperation is false, Conductor skips exclusion resolution entirely. Tenant-
-targeted operations are exempt — the Job executes on the management cluster regardless
+targeted operations are exempt - the Job executes on the management cluster regardless
 of which nodes the remote target cluster is operating on.
 
 **Conductor agent mode recovery path:**
@@ -567,7 +567,7 @@ that the produced binary runs cleanly on the distroless/base image before releas
 
 ## 15. Role Declaration Contract
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 Conductor reads a role declaration field at startup to determine which loops to
 activate and which responsibilities to assume. The role field is stamped externally
@@ -587,18 +587,18 @@ environment variable or ConfigMap mount. It is stamped once at Deployment creati
 time and never modified by any controller.
 
 **Management role startup sequence:**
-Conductor with role=management activates all loops from §10 — including PackInstance
+Conductor with role=management activates all loops from §10 - including PackInstance
 signing, PermissionSnapshot signing, and the full agent mode startup sequence.
 
 **Tenant role startup sequence:**
-Conductor with role=tenant activates the target-cluster-specific loops from §10 —
+Conductor with role=tenant activates the target-cluster-specific loops from §10 -
 PackReceipt, PermissionSnapshotReceipt, admission webhook, PermissionService gRPC,
 drift detection, and PermissionSnapshot pull loop. It does not activate signing loops.
 Signing is management-only. INV-026.
 
 **Invariants:**
 - Conductor with an absent or unrecognized role field exits immediately with
-  InvariantViolation structured exit. This is a hard gate — a Conductor without a
+  InvariantViolation structured exit. This is a hard gate - a Conductor without a
   valid role declaration is a programming error, not a recoverable condition.
 - No component other than `compiler enable` (management) and Platform operator (tenant)
   may stamp the role field. Guardian, Wrapper, seam-core, and humans never set this field.
@@ -609,11 +609,11 @@ Signing is management-only. INV-026.
 
 ## 16. compiler component Subcommand
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 `compiler component` emits RBACProfile CRs as YAML output for third-party components
 operating in a Guardian-governed cluster. Guardian's admission webhook enforces what
-RBACProfiles declare — it never generates them and never guesses.
+RBACProfiles declare - it never generates them and never guesses.
 `compiler component` is a prerequisite for any third-party component operating in a
 Guardian-governed cluster.
 
@@ -666,14 +666,14 @@ third-party resources. Cluster access follows the same resolution order as
   them. The contract direction is: component declares needs → Guardian enforces.
 - The embedded catalog is the versioned source of truth for canonical component
   RBACProfiles. Catalog version is tied to the compiler release tag.
-- F-P6: compiler component real implementation — catalog scaffold and RBACProfile
-  template rendering — requires a Conductor Engineer session.
+- F-P6: compiler component real implementation - catalog scaffold and RBACProfile
+  template rendering - requires a Conductor Engineer session.
 
 ---
 
 ## 17. RunnerConfig Execution Model
 
-**LOCKED GOVERNOR DECISION — Platform Governor directive 2026-04-05.**
+**LOCKED GOVERNOR DECISION - Platform Governor directive 2026-04-05.**
 
 ### Multi-Step Intent
 
@@ -689,7 +689,7 @@ carries a `steps` list where each step declares:
   entire RunnerConfig with terminal condition Failed and no further steps execute.
 
 A RunnerConfig with a single entry in the steps list is the degenerate case of this
-model — not a separate model. All RunnerConfigs use the steps list, even single-step
+model - not a separate model. All RunnerConfigs use the steps list, even single-step
 operations.
 
 ### Step Sequencer Responsibility
@@ -717,10 +717,10 @@ never submits individual Jobs. This boundary is permanent and locked.
 Each completed step produces one StepResult entry in RunnerConfig status:
 
 - `stepName`: matches the step name declared in spec.
-- `phase`: lifecycle state — `Pending`, `Running`, `Succeeded`, or `Failed`.
+- `phase`: lifecycle state - `Pending`, `Running`, `Succeeded`, or `Failed`.
 - `outputRef`: reference to the ConfigMap in ont-system from which the result was
   harvested. ConfigMap is named after the Job. It is garbage-collected after TTL.
-- `result`: raw JSON payload — the structured OperationResult document from the
+- `result`: raw JSON payload - the structured OperationResult document from the
   ConfigMap. Conductor writes this verbatim without semantic interpretation.
 
 ### Terminal Conditions
@@ -741,7 +741,7 @@ reconciliation loop.
 **Conductor harvests and records only.** Conductor never interprets what a step
 result means for the domain. It does not know whether a step failure is retryable.
 It does not know whether a partial completion is acceptable. It writes StepResult
-entries and terminal conditions — nothing more.
+entries and terminal conditions - nothing more.
 
 **The owning operator interprets only.** The owning operator watches RunnerConfig
 status for the terminal condition. It reads StepResult entries. It decides what the
@@ -756,13 +756,13 @@ without a Governor constitutional amendment.
 
 ## 18. Federation Channel Contract
 
-**LOCKED INVARIANT — Platform Governor directive 2026-04-05.**
+**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
 
 The Conductor agent process on the management cluster exposes two listener ports.
 
 **Internal port:**
 Serves cluster-local callers using cluster-internal certificate authority trust.
-All local components — operators, Guardian, Compiler tools during bootstrap — call
+All local components - operators, Guardian, Compiler tools during bootstrap - call
 this port. Environment variable: `INTERNAL_PORT`.
 
 **Federation port:**
@@ -776,7 +776,7 @@ connect to the federation port.
 **Stream model:**
 One persistent bidirectional gRPC stream per connected tenant Conductor. The stream
 is established by the tenant Conductor; the management Conductor accepts it. The
-management side is stateless with respect to connection lifecycle — it does not
+management side is stateless with respect to connection lifecycle - it does not
 initiate connections and does not maintain expectations about which tenants are
 connected at any given time.
 
@@ -803,34 +803,34 @@ satisfy this requirement.
 Both sides send HeartBeat messages at 30-second intervals. Three consecutive missed
 HeartBeat acknowledgments from a tenant marks that channel degraded in management
 status tracking. Management records the degraded state in RunnerConfig status for
-the affected tenant — the state is observable but not actionable by the management
+the affected tenant - the state is observable but not actionable by the management
 side. Reconnect responsibility belongs entirely to the tenant Conductor.
 
 **Tenant Conductor behavior on channel degradation:**
 - Buffers audit events in a local write-ahead buffer backed by a PVC in ont-system.
-- Fails RunnerConfig validation calls closed — no validation is attempted without
+- Fails RunnerConfig validation calls closed - no validation is attempted without
   an active management channel stream.
 - Emits `FederationChannelDegraded` condition on its local RunnerConfig status.
 
 **Tenant Conductor behavior on reconnect:**
 Replays unacknowledged audit events starting from the last acknowledged sequence
-number. The management AuditSink deduplicates received events on sequence number —
+number. The management AuditSink deduplicates received events on sequence number -
 replays are safe and expected. RunnerConfig validation calls resume immediately on
 stream re-establishment.
 
 **Ownership boundary:**
 The federation channel is a Conductor concern exclusively. Guardian on both the
 management cluster and tenant clusters is a consumer and producer of channel
-contents — Guardian produces audit events and receives revocations — but Guardian
+contents - Guardian produces audit events and receives revocations - but Guardian
 does not own the channel, does not configure it, and does not monitor its health.
 Guardian health and federation channel health are independent.
 
 Tenant Guardian running role=management (sovereign mode) has no federation channel
 relationship with the management Guardian. A sovereign tenant Guardian is fully
-independent — no audit forwarding, no cross-cluster identity federation unless an
+independent - no audit forwarding, no cross-cluster identity federation unless an
 explicit `federated-downstream` IdentityProvider CR is authored by a human. The
 tenant Conductor for a sovereign tenant cluster still connects to the management
-Conductor federation port for RunnerConfig validation — the channel is always
+Conductor federation port for RunnerConfig validation - the channel is always
 Conductor-to-Conductor, never Guardian-to-Guardian.
 
 This is a locked invariant. The typed message envelope contract is stable. Adding
@@ -838,27 +838,27 @@ new message types requires a Platform Governor directive before implementation.
 
 ---
 
-*runner.ontai.dev schema — conductor repository*
+*runner.ontai.dev schema - conductor repository*
 *Amendments appended below with date and rationale.*
 
-2026-03-30 — Two-binary model adopted. Compiler confined to compile mode (debian).
+2026-03-30 - Two-binary model adopted. Compiler confined to compile mode (debian).
   Conductor owns execute and agent modes (distroless). runnerImage field renamed to
-  agentImage on RunnerConfig. Execute mode Jobs confirmed as pure Go — no system
+  agentImage on RunnerConfig. Execute mode Jobs confirmed as pure Go - no system
   binaries required. Signing and verification model added to agent
   responsibilities. CR-INV-009 through CR-INV-010 merged into root CLAUDE.md as
   INV-022 through INV-026.
 
-2026-03-30 — Capability table updated with Triggering CRD column (Path B ruling).
+2026-03-30 - Capability table updated with Triggering CRD column (Path B ruling).
   talos-upgrade, kube-upgrade, stack-upgrade, node-scale-up, node-decommission, and
   node-reboot confirmed retained. Triggering CRDs are active when TalosCluster
   spec.capi.enabled=false only. For capi.enabled=true target clusters CAPI handles
-  these operations natively. Orphaned-constant finding closed — these six capability
+  these operations natively. Orphaned-constant finding closed - these six capability
   constants are not orphaned.
 
-2026-04-03 — Binary rename throughout: conductor → Compiler, conductor → Conductor.
+2026-04-03 - Binary rename throughout: conductor → Compiler, conductor → Conductor.
   Repository renamed conductor (was conductor). Module path updated to
   github.com/ontai-dev/conductor. Section 11 Enterprise License Enforcement removed
-  entirely — Seam is fully open source with no licensing tier; replaced with single
+  entirely - Seam is fully open source with no licensing tier; replaced with single
   sentence. All licensing references removed from RunnerConfig spec and status fields:
   licenseSecretRef removed, licenseStatus removed, LicenseConstraint condition removed.
   Agent startup sequence step 3 (license check) removed; steps renumbered. Section 9
@@ -869,7 +869,7 @@ new message types requires a Platform Governor directive before implementation.
   to reference consolidated day-two CRDs: UpgradePolicy, NodeOperation,
   EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, HardeningProfile.
 
-2026-04-05 — Two locked Governor directives added. Section 12 "Operational Readiness
+2026-04-05 - Two locked Governor directives added. Section 12 "Operational Readiness
   Gates": Platform operator is the sole owner of port 50000 Talos API reachability
   validation across native and CAPI paths; Screen and all other components are
   permanently excluded. Section 13 "RunnerConfig Self-Operation Contract": three new
@@ -878,7 +878,7 @@ new message types requires a Platform Governor directive before implementation.
   affinity constraints when selfOperation=true; skips exclusion when selfOperation=false;
   agent mode acts as recovery path only. Dockerfile Standards renumbered to Section 14.
 
-2026-04-05 — compiler maintenance subcommand added to Section 9. Produces
+2026-04-05 - compiler maintenance subcommand added to Section 9. Produces
   MaintenanceBundle CR with pre-encoded scheduling context: maintenanceTargetNodes
   (validated node set), operatorLeaderNode (resolved from platform-leader Lease),
   s3ConfigSecretRef (validated at compile time per platform-schema.md §10),
@@ -887,7 +887,7 @@ new message types requires a Platform Governor directive before implementation.
   Fails fast if leader lease absent, nodes invalid, or S3 Secret missing.
   MaintenanceBundle CRD definition deferred to Platform Schema Engineer session (F-P5).
 
-2026-04-05 — Three locked Governor directives added. (1) Management Cluster Bootstrap
+2026-04-05 - Three locked Governor directives added. (1) Management Cluster Bootstrap
   Sequence Authority added to Section 9: bootstrap/launch/enable owned exclusively by
   Compiler in three steps; Platform has no involvement; Compiler never applies
   resources; compiler enable stamps role=management on Conductor Deployment. Canonical
@@ -902,19 +902,19 @@ new message types requires a Platform Governor directive before implementation.
   optional --discover for cluster auto-detect); catalog at internal/catalog/;
   F-P6 open finding for implementation.
 
-2026-04-05 — Section 17 "RunnerConfig Execution Model" added as locked Governor
+2026-04-05 - Section 17 "RunnerConfig Execution Model" added as locked Governor
   decision. RunnerConfig is a multi-step operation intent: spec carries a steps list
   (name, capability, parameters, dependsOn, haltOnFailure). Conductor execute mode is
-  the sole authority over step-to-step progression — materialises one Job at a time,
+  the sole authority over step-to-step progression - materialises one Job at a time,
   harvests OperationResult ConfigMap from ont-system on completion, writes StepResult
   (stepName, phase, outputRef, result payload) into RunnerConfig status. Terminal
   conditions: Completed (all steps succeeded) and Failed (halt-on-failure semantics).
-  Owning operator watches terminal condition and interprets step results — never drives
-  progression. Conductor harvests and records only — never interprets. Boundary is
+  Owning operator watches terminal condition and interprets step results - never drives
+  progression. Conductor harvests and records only - never interprets. Boundary is
   permanent and locked. F-P7 added to CONTEXT.md: all existing platform day-2
   reconcilers must migrate from single-capability RunnerConfig to step list model.
 
-2026-04-05 — Two locked Governor directives added. (1) §9 compiler enable bundle
+2026-04-05 - Two locked Governor directives added. (1) §9 compiler enable bundle
   restructured to six phases: phase 0 (00-infrastructure-dependencies: CNPG operator
   manifests + CNPG Cluster CR for management Guardian, readiness gate: CNPG Cluster
   ready), phase 1 (01-guardian-bootstrap), phases 2-5 are the existing phases
@@ -922,13 +922,13 @@ new message types requires a Platform Governor directive before implementation.
   resolves the CNPG dependency before Guardian is deployed; Guardian startup migration
   runner connects to CNPG before registering any controller. F-P8 recorded: phase 0
   implementation requires a Conductor Engineer session. (2) §18 "Federation Channel
-  Contract" added (locked invariant): management Conductor exposes two ports — internal
+  Contract" added (locked invariant): management Conductor exposes two ports - internal
   (cluster-local CA) and federation (FEDERATION_PORT=9443, management CA client certs,
   cluster ID as SAN, rejects invalid certs). One persistent bidirectional gRPC stream
   per connected tenant Conductor; management side stateless on connection lifecycle;
   tenant Conductor owns reconnect. Typed message envelope: RunnerConfigValidationRequest/
   Response, AuditEventBatch, AuditEventAck, RevocationPush, HeartBeat. RevocationPush
-  is management-initiated — architectural justification for persistent stream over RPCs.
+  is management-initiated - architectural justification for persistent stream over RPCs.
   Heartbeat: 30s interval; 3 missed ACKs = channel degraded in management RunnerConfig
   status. Tenant on degradation: WAL PVC buffer in ont-system, validation calls fail
   closed, FederationChannelDegraded condition. On reconnect: replay from last acked
