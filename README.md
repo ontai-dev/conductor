@@ -103,5 +103,28 @@ go test ./...
 
 ---
 
+## Status
+
+Alpha. Deployed and tested on management cluster (ccs-mgmt).
+Tenant cluster onboarding is not yet verified end to end.
+See [docs/conductor-schema.md](./docs/conductor-schema.md)
+for current capability and known gaps.
+
+CRDs are deployed and reconciling on the live management cluster.
+The schema specification is published at:
+https://schema.ontai.dev/v1alpha1/
+
+## Contributing
+
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull
+request. Every new reconciliation behavior requires a written
+specification and senior engineer sign-off before any code is
+written.
+
+File issues at https://github.com/ontai-dev/conductor/issues.
+For security issues contact security@ontai.dev directly.
+
+---
+
 *conductor - Seam Platform Intelligence (Compiler + Conductor)*
 *Apache License, Version 2.0*
