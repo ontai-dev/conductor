@@ -56,17 +56,17 @@ docker-build:
 		--platform linux/amd64 \
 		-f Dockerfile.compiler \
 		-t $(IMAGE_REGISTRY)/compiler:$(TAG) \
-		.
+		..
 	docker build \
 		--platform linux/amd64 \
 		-f Dockerfile.execute \
 		-t $(IMAGE_REGISTRY)/conductor-execute:$(TAG) \
-		.
+		..
 	docker build \
 		--platform linux/amd64 \
 		-f Dockerfile.agent \
 		-t $(IMAGE_REGISTRY)/conductor:$(TAG) \
-		.
+		..
 
 # docker-push pushes all three already-built conductor images to the registry.
 docker-push:
