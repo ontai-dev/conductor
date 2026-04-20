@@ -1,0 +1,48 @@
+name: ccs-app
+namespace: seam-tenant-ccs-app
+mode: bootstrap
+role: tenant
+capi:
+  enabled: true
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  controlPlane:
+    replicas: 3
+    endpointVIP: "10.20.2.10"
+  workers:
+    - name: default
+      replicas: 2
+      machines:
+        - ccs-app-w1
+        - ccs-app-w2
+  ciliumPackRef:
+    name: cilium-ccs-app
+    version: v1.16.0
+bootstrap:
+  controlPlaneEndpoint: "https://10.20.2.10:6443"
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  installDisk: "/dev/vda"
+  nodes:
+    - hostname: ccs-app-cp1
+      ip: "10.20.2.2"
+      role: init
+    - hostname: ccs-app-cp2
+      ip: "10.20.2.3"
+      role: controlplane
+    - hostname: ccs-app-cp3
+      ip: "10.20.2.4"
+      role: controlplane
+    - hostname: ccs-app-w1
+      ip: "10.20.2.5"
+      role: worker
+    - hostname: ccs-app-w2
+      ip: "10.20.2.6"
+      role: worker
+registryMirrors:
+  - registry: ghcr.io
+    endpoints:
+      - http://10.20.0.1:5000
+  - registry: registry.k8s.io
+    endpoints:
+      - http://10.20.0.1:5000

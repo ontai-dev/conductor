@@ -1,0 +1,45 @@
+name: ccs-mgmt
+namespace: seam-system
+mode: import
+importExistingCluster: true
+# role omitted -- defaults to management via clusterRole() in compile.go
+capi:
+  enabled: false
+bootstrap:
+  controlPlaneEndpoint: "https://10.20.0.10:6443"
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  installDisk: "/dev/vda"
+  nodes:
+    - hostname: ccs-mgmt-cp1
+      ip: "10.20.0.2"
+      role: init
+    - hostname: ccs-mgmt-cp2
+      ip: "10.20.0.3"
+      role: controlplane
+    - hostname: ccs-mgmt-cp3
+      ip: "10.20.0.4"
+      role: controlplane
+    - hostname: ccs-mgmt-w1
+      ip: "10.20.0.5"
+      role: worker
+    - hostname: ccs-mgmt-w2
+      ip: "10.20.0.6"
+      role: worker
+ciliumPrerequisites: true
+registryMirrors:
+  - registry: ghcr.io
+    endpoints:
+      - http://10.20.0.1:5000
+  - registry: registry.k8s.io
+    endpoints:
+      - http://10.20.0.1:5000
+  - registry: docker.io
+    endpoints:
+      - http://10.20.0.1:5000
+  - registry: 10.20.0.1:5000
+    endpoints:
+      - http://10.20.0.1:5000
+# machineConfigPaths is injected by tests at runtime -- not present in static fixture.
+# Tests use generateMachineConfigFile to produce a real init-node machine config and
+# pass it via a programmatic overlay before calling compileBootstrap.
