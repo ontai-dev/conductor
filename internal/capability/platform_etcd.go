@@ -99,7 +99,7 @@ func (h *etcdBackupHandler) Execute(ctx context.Context, params ExecuteParams) (
 	}, nil
 }
 
-// etcdMaintenanceHandler implements the etcd-maintenance (defrag) named capability.
+// etcdMaintenanceHandler implements the etcd-defrag named capability.
 // Runs EtcdDefragment on the etcd cluster members via the Talos machine API.
 // platform-schema.md §5 (EtcdMaintenance.spec.operation=defrag).
 type etcdMaintenanceHandler struct{}
@@ -108,18 +108,18 @@ func (h *etcdMaintenanceHandler) Execute(ctx context.Context, params ExecutePara
 	now := time.Now().UTC()
 
 	if params.TalosClient == nil {
-		return failureResult(runnerlib.CapabilityEtcdMaintenance, now, runnerlib.ValidationFailure,
-			"etcd-maintenance requires TalosClient"), nil
+		return failureResult(runnerlib.CapabilityEtcdDefrag, now, runnerlib.ValidationFailure,
+			"etcd-defrag requires TalosClient"), nil
 	}
 
 	stepStart := time.Now().UTC()
 	if err := params.TalosClient.EtcdDefragment(ctx); err != nil {
-		return failureResult(runnerlib.CapabilityEtcdMaintenance, now, runnerlib.ExecutionFailure,
+		return failureResult(runnerlib.CapabilityEtcdDefrag, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("EtcdDefragment: %v", err)), nil
 	}
 
 	return runnerlib.OperationResultSpec{
-		Capability:  runnerlib.CapabilityEtcdMaintenance,
+		Capability:  runnerlib.CapabilityEtcdDefrag,
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
