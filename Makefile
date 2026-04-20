@@ -2,13 +2,21 @@
 IMAGE_REGISTRY ?= registry.ontai.dev/ontai-dev
 TAG            ?= dev
 
-.PHONY: build test e2e lint lint-docs lint-images install-hooks clean docker-build docker-push
+.PHONY: build test test-unit test-integration test-all e2e lint lint-docs lint-images install-hooks clean docker-build docker-push
 
 build:
 	go build ./...
 
 test:
 	go test ./test/unit/...
+
+test-unit:
+	go test ./test/unit/...
+
+test-integration:
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test ./test/integration/...
+
+test-all: test-unit test-integration
 
 e2e:
 	MGMT_KUBECONFIG=$(MGMT_KUBECONFIG) TENANT_KUBECONFIG=$(TENANT_KUBECONFIG) \
