@@ -79,7 +79,6 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 		{"05-post-bootstrap", []string{
 			"phase-meta.yaml",
 			"dsns-zone-configmap.yaml",
-			"coredns-dsns-patch.sh",
 			"coredns-deployment-patch.yaml",
 			"dsns-loadbalancer.yaml",
 			"leaderelection.yaml",
@@ -409,7 +408,6 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 		{"04-conductor", "conductor-metrics-service.yaml"},
 		{"05-post-bootstrap", "phase-meta.yaml"},
 		{"05-post-bootstrap", "dsns-zone-configmap.yaml"},
-		{"05-post-bootstrap", "coredns-dsns-patch.sh"},
 		{"05-post-bootstrap", "coredns-deployment-patch.yaml"},
 		{"05-post-bootstrap", "dsns-loadbalancer.yaml"},
 		{"05-post-bootstrap", "leaderelection.yaml"},
@@ -939,5 +937,60 @@ func TestEnable_RegistryFlagOverride(t *testing.T) {
 		if strings.Contains(content, "10.20.0.1:5000") {
 			t.Errorf("%s/%s still references default registry after override", path.phase, path.file)
 		}
+	}
+}
+
+// TestEnable_Phase05_NoDSNSPatchScript verifies that phase 05-post-bootstrap does
+// NOT emit coredns-dsns-patch.sh. The CoreDNS Corefile DSNS patch is handled
+// automatically by enable-ccs-mgmt.sh Step 7a. Emitting a shell script violates
+// INV-001 (no shell scripts anywhere). C-COREDNS-PATCH.
+func TestEnable_Phase05_NoDSNSPatchScript(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	scriptPath := filepath.Join(outDir, "05-post-bootstrap", "coredns-dsns-patch.sh")
+	if _, err := os.Stat(scriptPath); err == nil {
+		t.Errorf("coredns-dsns-patch.sh must not be emitted by compiler enable; " +
+			"INV-001 prohibits shell scripts; CoreDNS patch is handled by " +
+			"enable-ccs-mgmt.sh Step 7a (C-COREDNS-PATCH)")
+	}
+}
+
+// TestEnable_Phase05_MetaReferencesCI verifies that the phase 05 ReadinessGate
+// references C-COREDNS-PATCH and does not contain the old MANUAL STEP REQUIRED
+// language. C-COREDNS-PATCH.
+func TestEnable_Phase05_MetaReferencesCI(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	meta := readPhaseFile(t, outDir, "05-post-bootstrap", "phase-meta.yaml")
+	if strings.Contains(meta, "MANUAL STEP REQUIRED") {
+		t.Errorf("phase 05 ReadinessGate must not say MANUAL STEP REQUIRED; " +
+			"CoreDNS patch is now automated by enable-ccs-mgmt.sh (C-COREDNS-PATCH)")
+	}
+	if !strings.Contains(meta, "C-COREDNS-PATCH") {
+		t.Errorf("phase 05 ReadinessGate must reference C-COREDNS-PATCH; got: %s", meta)
+	}
+}
+
+// TestEnable_Phase00_KueueWebhookScopingDocumented verifies that the phase 00
+// prerequisites ConfigMap documents Kueue webhook scoping and references
+// C-KUEUE-WEBHOOK. The scoping is applied immediately after Kueue is deployed
+// in Phase 00 by enable-ccs-mgmt.sh, not as a deferred post-bootstrap step.
+// C-KUEUE-WEBHOOK.
+func TestEnable_Phase00_KueueWebhookScopingDocumented(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	prereqs := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "prerequisites.yaml")
+	if !strings.Contains(prereqs, "C-KUEUE-WEBHOOK") {
+		t.Errorf("prerequisites.yaml must reference C-KUEUE-WEBHOOK in the job-scheduler section; " +
+			"the Kueue webhook scoping is applied immediately after Kueue deployment in Phase 00")
 	}
 }
