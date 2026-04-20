@@ -123,13 +123,6 @@ func (h *rbacProvisionHandler) Execute(ctx context.Context, params ExecuteParams
 				_, applyErr = rbacClient.ClusterRoles().Update(ctx, cr, metav1.UpdateOptions{})
 			}
 			if applyErr != nil {
-				steps = append(steps, runnerlib.StepResult{
-					Name:      fmt.Sprintf("apply-clusterrole:%s", principalRef),
-					Status:    runnerlib.ResultFailed,
-					StartedAt: stepStart,
-					CompletedAt: time.Now().UTC(),
-					Message: applyErr.Error(),
-				})
 				return failureResult(runnerlib.CapabilityRBACProvision, now, runnerlib.ExecutionFailure,
 					fmt.Sprintf("apply ClusterRole %q: %v", roleName, applyErr)), nil
 			}

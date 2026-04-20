@@ -121,14 +121,11 @@ func (h *clusterResetHandler) Execute(ctx context.Context, params ExecuteParams)
 
 	var approved bool
 	var gracefulDrain bool
-	for _, item := range crList.Items {
-		// Human approval gate: ontai.dev/reset-approved=true must be present.
-		// INV-007 — Destructive operations require affirmative CR with human approval gate.
-		annotations, _, _ := unstructuredList(item.Object, "metadata", "annotations")
-		_ = annotations // annotations are in a map, not a list
-
-		annMap, ok := item.Object["metadata"].(map[string]interface{})
-		if ok {
+	// Human approval gate: ontai.dev/reset-approved=true must be present.
+	// INV-007 -- Destructive operations require affirmative CR with human approval gate.
+	if len(crList.Items) > 0 {
+		item := crList.Items[0]
+		if annMap, ok := item.Object["metadata"].(map[string]interface{}); ok {
 			if annBlock, ok := annMap["annotations"].(map[string]interface{}); ok {
 				v, _ := annBlock[resetApprovalAnnotation].(string)
 				approved = v == "true"
@@ -136,7 +133,6 @@ func (h *clusterResetHandler) Execute(ctx context.Context, params ExecuteParams)
 		}
 		drainStr, _, _ := unstructuredString(item.Object, "spec", "drainGracePeriodSeconds")
 		gracefulDrain = drainStr != "0"
-		break
 	}
 
 	if !approved {

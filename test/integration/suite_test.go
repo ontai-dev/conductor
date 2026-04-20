@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -269,7 +268,3 @@ func getStepResults(obj *unstructured.Unstructured) []map[string]interface{} {
 	return results
 }
 
-// isNotFoundErr returns true if the error is a Kubernetes NotFound error.
-func isNotFoundErr(err error) bool {
-	return apierrors.IsNotFound(err)
-}

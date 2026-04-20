@@ -476,51 +476,6 @@ func writeCRYAML(outDir, name string, obj interface{}) error {
 	return nil
 }
 
-// buildTalosCluster constructs a TalosCluster CR from a ClusterInput.
-//
-// When CAPI is disabled (management cluster path), only spec.mode, spec.role,
-// spec.talosVersion, spec.clusterEndpoint, and spec.capi.enabled=false are emitted.
-// CAPI-specific fields (kubernetesVersion, controlPlane, workers) are suppressed to
-// keep the management cluster CR minimal and unambiguous. platform-schema.md §5.
-func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
-	ns := in.Namespace
-	if ns == "" {
-		ns = "seam-system"
-	}
-	mode := platformv1alpha1.TalosClusterMode(in.Mode)
-	spec := platformv1alpha1.TalosClusterSpec{
-		Mode: mode,
-		Role: clusterRole(in),
-	}
-	if in.CAPI.Enabled {
-		// Target cluster: populate full CAPI block. Pointer is nil when disabled,
-		// which suppresses the capi field from YAML output entirely (C-34).
-		spec.CAPI = &platformv1alpha1.CAPIConfig{
-			Enabled:           true,
-			TalosVersion:      in.CAPI.TalosVersion,
-			KubernetesVersion: in.CAPI.KubernetesVersion,
-			ControlPlane: &platformv1alpha1.CAPIControlPlaneConfig{
-				Replicas: in.CAPI.ControlPlaneReplicas,
-			},
-		}
-	} else if in.Bootstrap != nil {
-		// Management cluster: spec-level fields from the Bootstrap section.
-		spec.TalosVersion = in.Bootstrap.TalosVersion
-		spec.ClusterEndpoint = stripScheme(in.Bootstrap.ControlPlaneEndpoint)
-	}
-	return platformv1alpha1.TalosCluster{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "platform.ontai.dev/v1alpha1",
-			Kind:       "TalosCluster",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      in.Name,
-			Namespace: ns,
-		},
-		Spec: spec,
-	}
-}
-
 // validateBootstrapInput checks all required fields in the BootstrapSection.
 func validateBootstrapInput(b *BootstrapSection) error {
 	if b == nil {

@@ -269,11 +269,6 @@ func (h *nodeDecommissionHandler) Execute(ctx context.Context, params ExecutePar
 
 		node, getErr := params.KubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if getErr != nil {
-			steps = append(steps, runnerlib.StepResult{
-				Name: fmt.Sprintf("cordon:%s", nodeName), Status: runnerlib.ResultFailed,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("get node: %v", getErr),
-			})
 			return failureResult(runnerlib.CapabilityNodeDecommission, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("get node %s: %v", nodeName, getErr)), nil
 		}
@@ -294,11 +289,6 @@ func (h *nodeDecommissionHandler) Execute(ctx context.Context, params ExecutePar
 	for _, nodeName := range targetNodes {
 		stepStart := time.Now().UTC()
 		if err := params.TalosClient.Reset(ctx, true); err != nil {
-			steps = append(steps, runnerlib.StepResult{
-				Name: fmt.Sprintf("reset:%s", nodeName), Status: runnerlib.ResultFailed,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: err.Error(),
-			})
 			return failureResult(runnerlib.CapabilityNodeDecommission, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("reset node %s: %v", nodeName, err)), nil
 		}
@@ -362,11 +352,6 @@ func (h *nodeRebootHandler) Execute(ctx context.Context, params ExecuteParams) (
 	for _, nodeName := range targetNodes {
 		stepStart := time.Now().UTC()
 		if err := params.TalosClient.Reboot(ctx); err != nil {
-			steps = append(steps, runnerlib.StepResult{
-				Name: fmt.Sprintf("reboot:%s", nodeName), Status: runnerlib.ResultFailed,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: err.Error(),
-			})
 			return failureResult(runnerlib.CapabilityNodeReboot, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("reboot node %s: %v", nodeName, err)), nil
 		}
