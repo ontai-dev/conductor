@@ -21,18 +21,6 @@ import (
 // Fake dynamic client helpers
 // ---------------------------------------------------------------------------
 
-// platformGVRs lists all platform CRD GVRs needed for fake client registration.
-var platformGVRs = []schema.GroupVersionResource{
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "talosclusters"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "upgradepolicies"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "nodeoperations"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "nodemaintenances"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "etcdmaintenances"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "pkirotations"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "clusterresets"},
-	{Group: "platform.ontai.dev", Version: "v1alpha1", Resource: "hardeningprofiles"},
-}
-
 // platformKindToResource maps canonical Kind names to their GVR resource names.
 // Required because resource names are irregular plurals (e.g., policy→policies).
 var platformKindToResource = map[string]string{
@@ -79,40 +67,6 @@ func newPlatformDynClient(objects ...*unstructured.Unstructured) *dynamicfake.Fa
 		}
 	}
 	return client
-}
-
-// capFirst capitalizes the first letter.
-func capFirst(s string) string {
-	if len(s) == 0 {
-		return s
-	}
-	b := []byte(s)
-	if b[0] >= 'a' && b[0] <= 'z' {
-		b[0] -= 32
-	}
-	return string(b)
-}
-
-// singular strips a trailing 's'.
-func singular(s string) string {
-	if len(s) > 0 && s[len(s)-1] == 's' {
-		return s[:len(s)-1]
-	}
-	return s
-}
-
-// lower lowercases all characters in s.
-func lower(s string) string {
-	b := make([]byte, len(s))
-	for i := range s {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		} else {
-			b[i] = c
-		}
-	}
-	return string(b)
 }
 
 // ---------------------------------------------------------------------------

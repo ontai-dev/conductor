@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,12 +82,6 @@ func ociServer(t *testing.T, name string, layers []struct{ Digest, Content strin
 	}))
 	t.Cleanup(srv.Close)
 	return srv
-}
-
-// httpClientForServer returns an *http.Client that routes all requests through
-// the given httptest.Server by stripping the host.
-func httpClientForServer(srv *httptest.Server) *http.Client {
-	return srv.Client()
 }
 
 // TestOCIRegistryClientAdapter_PullManifests_SingleLayer verifies that a
@@ -247,9 +240,3 @@ func TestOCIRef_TagAndDigestRef(t *testing.T) {
 	}
 }
 
-// ── stub: no-op io.ReadCloser ─────────────────────────────────────────────────
-
-type nopReadCloser struct{ r io.Reader }
-
-func (n nopReadCloser) Read(p []byte) (int, error) { return n.r.Read(p) }
-func (n nopReadCloser) Close() error               { return nil }

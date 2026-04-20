@@ -54,7 +54,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -71,8 +70,6 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/internal/catalog/capi"
@@ -1092,29 +1089,6 @@ func writeGuardianWebhookCert(dir string) error {
 	buf.Write(data)
 
 	return os.WriteFile(filepath.Join(dir, "guardian-webhook-cert.yaml"), buf.Bytes(), 0644)
-}
-
-// readGuardianCABundle reads the ca.crt field from the guardian-ca-secret Secret in seam-system.
-// Returns nil when kubeconfig is empty, the Secret is unreachable, or the field is absent.
-// A nil return is safe: caBundle fields are emitted as empty strings in the YAML output.
-func readGuardianCABundle(kubeconfig string) []byte {
-	if kubeconfig == "" {
-		return nil
-	}
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		return nil
-	}
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil
-	}
-	secret, err := clientset.CoreV1().Secrets("seam-system").Get(
-		context.Background(), "guardian-ca-secret", metav1.GetOptions{})
-	if err != nil {
-		return nil
-	}
-	return secret.Data["ca.crt"]
 }
 
 // writeGuardianService writes guardian-service.yaml to dir.

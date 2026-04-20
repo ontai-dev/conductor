@@ -22,12 +22,6 @@ import (
 	"github.com/ontai-dev/conductor/internal/permissionservice"
 )
 
-// allPullLoopGVRs lists the GVRs needed by the pull loop tests.
-var allPullLoopGVRs = []schema.GroupVersionResource{
-	psGVR,                      // PermissionSnapshot — on management cluster
-	permissionSnapshotReceiptGVR, // PermissionSnapshotReceipt — on local cluster
-}
-
 // newMgmtClient returns a fake dynamic client with PermissionSnapshot GVR registered.
 func newMgmtClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return newFakeDynamicClientWithGVRs([]schema.GroupVersionResource{psGVR}, objs...)
@@ -343,7 +337,7 @@ func TestSnapshotPullLoop_EmptyManagementCluster(t *testing.T) {
 func TestSnapshotPullLoop_FormalCRDSchema_SubjectsField(t *testing.T) {
 	// Build the formal-schema spec with two SubjectEntry values.
 	// Fields match PermissionSnapshotSpec exactly as defined in guardian/api/v1alpha1.
-	now := fmt.Sprintf("%s", "2026-04-07T12:00:00Z")
+	now := "2026-04-07T12:00:00Z"
 	spec := map[string]interface{}{
 		"targetCluster":          "ccs-test",
 		"version":                now,

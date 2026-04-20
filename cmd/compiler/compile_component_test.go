@@ -243,7 +243,9 @@ func TestDescriptorMode_MissingNameFails(t *testing.T) {
 `
 	dir := t.TempDir()
 	descPath := filepath.Join(dir, "descriptor.yaml")
-	os.WriteFile(descPath, []byte(descriptorYAML), 0644)
+	if err := os.WriteFile(descPath, []byte(descriptorYAML), 0644); err != nil {
+		t.Fatalf("write descriptor: %v", err)
+	}
 
 	err := runDescriptorMode(descPath, "")
 	if err == nil {
@@ -258,7 +260,9 @@ func TestDescriptorMode_MissingNamespaceFails(t *testing.T) {
 `
 	dir := t.TempDir()
 	descPath := filepath.Join(dir, "descriptor.yaml")
-	os.WriteFile(descPath, []byte(descriptorYAML), 0644)
+	if err := os.WriteFile(descPath, []byte(descriptorYAML), 0644); err != nil {
+		t.Fatalf("write descriptor: %v", err)
+	}
 
 	err := runDescriptorMode(descPath, "")
 	if err == nil {
@@ -284,7 +288,9 @@ namespace: seam-tenant-management
 `
 	dir := t.TempDir()
 	descPath := filepath.Join(dir, "descriptor.yaml")
-	os.WriteFile(descPath, []byte(descriptorYAML), 0644)
+	if err := os.WriteFile(descPath, []byte(descriptorYAML), 0644); err != nil {
+		t.Fatalf("write descriptor: %v", err)
+	}
 
 	outPath := filepath.Join(dir, "output.yaml")
 	err := runDescriptorMode(descPath, outPath)
