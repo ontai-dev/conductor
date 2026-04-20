@@ -976,3 +976,21 @@ func TestEnable_Phase05_MetaReferencesCI(t *testing.T) {
 		t.Errorf("phase 05 ReadinessGate must reference C-COREDNS-PATCH; got: %s", meta)
 	}
 }
+
+// TestEnable_Phase00_KueueWebhookScopingDocumented verifies that the phase 00
+// prerequisites ConfigMap documents Kueue webhook scoping and references
+// C-KUEUE-WEBHOOK. The scoping is applied immediately after Kueue is deployed
+// in Phase 00 by enable-ccs-mgmt.sh, not as a deferred post-bootstrap step.
+// C-KUEUE-WEBHOOK.
+func TestEnable_Phase00_KueueWebhookScopingDocumented(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	prereqs := readPhaseFile(t, outDir, "00-infrastructure-dependencies", "prerequisites.yaml")
+	if !strings.Contains(prereqs, "C-KUEUE-WEBHOOK") {
+		t.Errorf("prerequisites.yaml must reference C-KUEUE-WEBHOOK in the job-scheduler section; " +
+			"the Kueue webhook scoping is applied immediately after Kueue deployment in Phase 00")
+	}
+}

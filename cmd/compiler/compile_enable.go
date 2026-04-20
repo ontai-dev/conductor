@@ -397,7 +397,10 @@ func writePrerequisitesConfigMap(dir string) error {
 				"A Secret named guardian-db-credentials must exist in seam-system " +
 				"with keys username and password.",
 			"job-scheduler": "Kueue v0.16.2 or later. " +
-				"ClusterQueue and LocalQueue CRDs must exist and be registered.",
+				"ClusterQueue and LocalQueue CRDs must exist and be registered. " +
+				"Kueue mutating webhook is scoped to ont-managed namespaces immediately " +
+				"after kueue-controller.yaml is applied in Phase 00 by enable-ccs-mgmt.sh. " +
+				"C-KUEUE-WEBHOOK.",
 			"certificate-manager": "cert-manager v1.13 or later if webhook TLS is managed externally. " +
 				"Optional if self-signed certificates are used.",
 			"storage": "A default StorageClass must exist for CNPG PVCs.",

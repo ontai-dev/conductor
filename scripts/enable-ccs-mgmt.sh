@@ -229,6 +229,23 @@ ${KUBECTL} apply -f "${COMPILED_DIR}/kueue-controller.yaml" --server-side=false 
   || log_err "Failed to apply kueue-controller.yaml"
 ${KUBECTL} apply -f "${COMPILED_DIR}/kueue-quota.yaml" --server-side=false \
   || log_err "Failed to apply kueue-quota.yaml"
+
+# Kueue webhook scoping -- applied immediately after Kueue is deployed so the
+# webhook is scoped before any Seam operator deployments start. Scoping prevents
+# Kueue's mutating webhook from intercepting workloads in system namespaces.
+# Moved from Step 7d to Phase 00 -- C-KUEUE-WEBHOOK.
+if [[ "${DRY_RUN}" == "false" ]]; then
+  wait_crd "workloads.kueue.x-k8s.io" 120
+  ${KUBECTL} patch mutatingwebhookconfiguration \
+    kueue-validating-webhook-configuration \
+    --type=json \
+    -p='[{"op":"add","path":"/webhooks/0/namespaceSelector","value":{"matchLabels":{"ont-managed":"true"}}}]' \
+    || log_err "Kueue webhook scoping patch failed"
+  log_ok "Kueue webhook scoped to ont-managed namespaces"
+else
+  echo kubectl patch mutatingwebhookconfiguration kueue-validating-webhook-configuration --type=json -p='[...]'
+fi
+
 apply_phase "${ENABLE_DIR}/00-infrastructure-dependencies"
 PHASE_STATUS["00-infrastructure-dependencies"]="applied"
 
@@ -388,19 +405,8 @@ fi
 POST_STATUS+=("7c-guardian-patch: applied")
 log_ok "Guardian CNPG connection patch complete"
 
-# Step 7d: Kueue webhook scoping
-# Scope Kueue's mutating webhook to ont-managed namespaces only so it does not
-# intercept workloads in system namespaces. A static manifest replacement would
-# conflict with Kueue's own controller on subsequent reconciles; kubectl patch
-# is the correct path for a targeted field addition.
-log_step "7d: Kueue webhook scoping"
-${KUBECTL} patch mutatingwebhookconfiguration \
-  kueue-validating-webhook-configuration \
-  --type=json \
-  -p='[{"op":"add","path":"/webhooks/0/namespaceSelector","value":{"matchLabels":{"ont-managed":"true"}}}]' \
-  || log_err "Kueue webhook scoping patch failed"
-POST_STATUS+=("7d-kueue-webhook: patched")
-log_ok "Kueue webhook scoping complete"
+# Step 7d: Kueue webhook scoping -- moved to Phase 00, immediately after
+# kueue-controller.yaml is applied. C-KUEUE-WEBHOOK.
 
 # Step 7e: Webhook certificates
 # platform-wrapper-seam-core-webhook-cert.sh applies cert-manager Certificate
