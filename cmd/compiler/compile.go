@@ -361,6 +361,34 @@ type ClusterInput struct {
 	CiliumPrerequisites bool `yaml:"ciliumPrerequisites,omitempty"`
 }
 
+// CAPIControlPlaneInput holds control plane configuration within a CAPIInput.
+type CAPIControlPlaneInput struct {
+	// Replicas is the desired number of control plane nodes.
+	Replicas int32 `yaml:"replicas,omitempty"`
+	// EndpointVIP is the VIP address for the control plane endpoint. When set,
+	// it is used as the cluster's control plane endpoint in CAPI objects.
+	EndpointVIP string `yaml:"endpointVIP,omitempty"`
+}
+
+// CAPIWorkerInput declares a worker node pool within a CAPIInput.
+type CAPIWorkerInput struct {
+	// Name is the pool identifier, used as the MachineDeployment name suffix.
+	Name string `yaml:"name"`
+	// Replicas is the desired number of worker nodes in this pool.
+	Replicas int32 `yaml:"replicas,omitempty"`
+	// Machines lists the SeamInfrastructureMachine CR names pre-provisioned for
+	// this pool. Maps to CAPIWorkerPool.SeamInfrastructureMachineNames.
+	Machines []string `yaml:"machines,omitempty"`
+}
+
+// CAPICiliumPackRefInput is the human-authored Cilium pack reference in CAPIInput.
+type CAPICiliumPackRefInput struct {
+	// Name is the ClusterPack CR name for the cluster-specific Cilium pack.
+	Name string `yaml:"name"`
+	// Version is the ClusterPack version string.
+	Version string `yaml:"version"`
+}
+
 // CAPIInput is the CAPI configuration section of ClusterInput.
 type CAPIInput struct {
 	// Enabled is true for all target (CAPI-managed) clusters, false for the
@@ -375,9 +403,17 @@ type CAPIInput struct {
 	// Required when Enabled=true.
 	KubernetesVersion string `yaml:"kubernetesVersion,omitempty"`
 
-	// ControlPlaneReplicas is the desired number of control plane nodes.
-	// Required when Enabled=true.
-	ControlPlaneReplicas int32 `yaml:"controlPlaneReplicas,omitempty"`
+	// ControlPlane holds control plane configuration. Required when Enabled=true.
+	ControlPlane *CAPIControlPlaneInput `yaml:"controlPlane,omitempty"`
+
+	// Workers is the list of worker node pools. Each pool maps to a
+	// MachineDeployment and a set of pre-provisioned SeamInfrastructureMachine CRs.
+	Workers []CAPIWorkerInput `yaml:"workers,omitempty"`
+
+	// CiliumPackRef references the cluster-specific Cilium ClusterPack.
+	// Required when Enabled=true. Applied as the first pack after the CAPI cluster
+	// reaches Running state. platform-schema.md §2.3.
+	CiliumPackRef *CAPICiliumPackRefInput `yaml:"ciliumPackRef,omitempty"`
 }
 
 // PackBuildInput is the human-authored spec format for the packbuild subcommand.
@@ -495,14 +531,7 @@ func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 	if in.CAPI.Enabled {
 		// Target cluster: populate full CAPI block. Pointer is nil when disabled,
 		// which suppresses the capi field from YAML output entirely (C-34).
-		spec.CAPI = &platformv1alpha1.CAPIConfig{
-			Enabled:           true,
-			TalosVersion:      in.CAPI.TalosVersion,
-			KubernetesVersion: in.CAPI.KubernetesVersion,
-			ControlPlane: &platformv1alpha1.CAPIControlPlaneConfig{
-				Replicas: in.CAPI.ControlPlaneReplicas,
-			},
-		}
+		spec.CAPI = buildCAPIConfig(in.CAPI)
 	} else if in.Bootstrap != nil {
 		// Management cluster: spec-level fields from the Bootstrap section.
 		spec.TalosVersion = in.Bootstrap.TalosVersion
@@ -519,6 +548,36 @@ func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 		},
 		Spec: spec,
 	}
+}
+
+// buildCAPIConfig maps a CAPIInput to a platformv1alpha1.CAPIConfig pointer.
+// Returns a fully populated CAPIConfig with all provided fields set.
+// The caller is responsible for only calling this when CAPIInput.Enabled=true.
+func buildCAPIConfig(c CAPIInput) *platformv1alpha1.CAPIConfig {
+	cfg := &platformv1alpha1.CAPIConfig{
+		Enabled:           true,
+		TalosVersion:      c.TalosVersion,
+		KubernetesVersion: c.KubernetesVersion,
+	}
+	if c.ControlPlane != nil {
+		cfg.ControlPlane = &platformv1alpha1.CAPIControlPlaneConfig{
+			Replicas: c.ControlPlane.Replicas,
+		}
+	}
+	for _, w := range c.Workers {
+		cfg.Workers = append(cfg.Workers, platformv1alpha1.CAPIWorkerPool{
+			Name:                           w.Name,
+			Replicas:                       w.Replicas,
+			SeamInfrastructureMachineNames: w.Machines,
+		})
+	}
+	if c.CiliumPackRef != nil {
+		cfg.CiliumPackRef = &platformv1alpha1.CAPICiliumPackRef{
+			Name:    c.CiliumPackRef.Name,
+			Version: c.CiliumPackRef.Version,
+		}
+	}
+	return cfg
 }
 
 // validateBootstrapInput checks all required fields in the BootstrapSection.
@@ -832,6 +891,20 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 
 	// Produce TalosCluster CR. ontai.dev/owns-runnerconfig signals Platform to add
 	// a finalizer and clean up the RunnerConfig in ont-system on deletion. Bug 3.
+	tcSpec := platformv1alpha1.TalosClusterSpec{
+		Mode:            tcMode,
+		Role:            clusterRole(in),
+		TalosVersion:    b.TalosVersion,
+		ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
+	}
+	if in.CAPI.Enabled {
+		// CAPI target cluster: populate the full CAPI block using buildCAPIConfig.
+		// TalosVersion and ClusterEndpoint are still set from the bootstrap section
+		// above so the CR carries both the Talos version and the endpoint.
+		tcSpec.CAPI = buildCAPIConfig(in.CAPI)
+	}
+	// CAPI nil when disabled -- pointer ensures the capi block is suppressed from
+	// serialization (C-34). No capi: {enabled: false} noise.
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -844,13 +917,7 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 				"ontai.dev/owns-runnerconfig": "true",
 			},
 		},
-		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode:            tcMode,
-			Role:            clusterRole(in),
-			TalosVersion:    b.TalosVersion,
-			ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
-			// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
-		},
+		Spec: tcSpec,
 	}
 	if err := writeCRYAML(output, in.Name, tc); err != nil {
 		return fmt.Errorf("write TalosCluster CR: %w", err)
