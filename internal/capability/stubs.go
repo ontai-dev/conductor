@@ -24,7 +24,7 @@ func RegisterAll(reg *Registry) {
 	reg.Register(runnerlib.CapabilityNodeDecommission, &nodeDecommissionHandler{})
 	reg.Register(runnerlib.CapabilityNodeReboot, &nodeRebootHandler{})
 	reg.Register(runnerlib.CapabilityEtcdBackup, &etcdBackupHandler{})
-	reg.Register(runnerlib.CapabilityEtcdMaintenance, &etcdMaintenanceHandler{})
+	reg.Register(runnerlib.CapabilityEtcdDefrag, &etcdMaintenanceHandler{})
 	reg.Register(runnerlib.CapabilityEtcdRestore, &etcdRestoreHandler{})
 	reg.Register(runnerlib.CapabilityPKIRotate, &pkiRotateHandler{})
 	reg.Register(runnerlib.CapabilityCredentialRotate, &credentialRotateHandler{})

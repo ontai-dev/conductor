@@ -46,9 +46,9 @@ const (
 	// Triggered by TalosBackup CR.
 	CapabilityEtcdBackup = "etcd-backup"
 
-	// CapabilityEtcdMaintenance performs etcd defragmentation and optional snapshot.
-	// Triggered by TalosEtcdMaintenance CR.
-	CapabilityEtcdMaintenance = "etcd-maintenance"
+	// CapabilityEtcdDefrag performs etcd defragmentation on all members.
+	// Triggered by EtcdMaintenance CR with operation=defrag. conductor-schema.md §6.
+	CapabilityEtcdDefrag = "etcd-defrag"
 
 	// CapabilityEtcdRestore performs disaster recovery from an S3 etcd snapshot.
 	// Triggered by TalosRecovery CR.

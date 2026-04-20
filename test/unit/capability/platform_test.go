@@ -525,29 +525,29 @@ func TestNodeScaleUp_WritesRequestConfigMap(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// etcd-maintenance
+// etcd-defrag
 // ---------------------------------------------------------------------------
 
 func TestEtcdMaintenance_NilClientReturnsValidationFailure(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
-	h, _ := reg.Resolve(runnerlib.CapabilityEtcdMaintenance)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdDefrag)
 
-	result, err := h.Execute(context.Background(), capability.ExecuteParams{Capability: runnerlib.CapabilityEtcdMaintenance})
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{Capability: runnerlib.CapabilityEtcdDefrag})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertValidationFailure(t, result, "etcd-maintenance nil client")
+	assertValidationFailure(t, result, "etcd-defrag nil client")
 }
 
 func TestEtcdMaintenance_CallsDefragment(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
-	h, _ := reg.Resolve(runnerlib.CapabilityEtcdMaintenance)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdDefrag)
 
 	talos := &stubTalosClient{}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityEtcdMaintenance,
+		Capability: runnerlib.CapabilityEtcdDefrag,
 		ClusterRef: "ccs-test",
 		ExecuteClients: capability.ExecuteClients{TalosClient: talos},
 	})

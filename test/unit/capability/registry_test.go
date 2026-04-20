@@ -82,7 +82,7 @@ func TestRegistry_RegisterAllPopulatesAllExecuteCapabilities(t *testing.T) {
 		runnerlib.CapabilityNodeDecommission,
 		runnerlib.CapabilityNodeReboot,
 		runnerlib.CapabilityEtcdBackup,
-		runnerlib.CapabilityEtcdMaintenance,
+		runnerlib.CapabilityEtcdDefrag,
 		runnerlib.CapabilityEtcdRestore,
 		runnerlib.CapabilityPKIRotate,
 		runnerlib.CapabilityCredentialRotate,
