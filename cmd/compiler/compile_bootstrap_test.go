@@ -112,8 +112,10 @@ func TestBootstrap_TalosClusterHasCorrectSpec(t *testing.T) {
 	assertContainsStr(t, content, "kind: TalosCluster")
 	assertContainsStr(t, content, "name: ccs-mgmt")
 	assertContainsStr(t, content, "mode: bootstrap")
-	// capi.enabled: false means management cluster — direct bootstrap path.
-	assertContainsStr(t, content, "enabled: false")
+	// capi.enabled=false means nil CAPIConfig pointer -- capi block is absent (C-34).
+	if strings.Contains(content, "capi:") {
+		t.Errorf("management cluster CR must not contain capi block; got:\n%s", content)
+	}
 }
 
 // TestBootstrap_SequenceDocumentsApplyOrder verifies that bootstrap-sequence.yaml
@@ -338,6 +340,32 @@ bootstrap:
 	}
 	if !strings.Contains(err.Error(), "name") {
 		t.Errorf("error %q does not mention 'name'", err.Error())
+	}
+}
+
+// TestBootstrap_CAPIDisabled_NoCapiBlockInCR verifies that a TalosCluster CR
+// compiled with capi.enabled=false contains no capi field in YAML output.
+// Regression test for C-34: CAPIConfig was a non-pointer struct so omitempty
+// never suppressed the block; now it is *CAPIConfig (nil when disabled).
+func TestBootstrap_CAPIDisabled_NoCapiBlockInCR(t *testing.T) {
+	outDir := t.TempDir()
+	inputPath := writeInputFile(t, bootstrapInputYAML)
+
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+
+	crPath := filepath.Join(outDir, "ccs-mgmt.yaml")
+	data, err := os.ReadFile(crPath)
+	if err != nil {
+		t.Fatalf("read TalosCluster CR: %v", err)
+	}
+	cr := string(data)
+	if strings.Contains(cr, "capi:") {
+		t.Errorf("TalosCluster CR with capi.enabled=false must not contain a capi block; got:\n%s", cr)
+	}
+	if strings.Contains(cr, "controlPlane:") {
+		t.Errorf("TalosCluster CR with capi.enabled=false must not contain controlPlane; got:\n%s", cr)
 	}
 }
 

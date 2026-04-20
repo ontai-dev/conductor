@@ -491,14 +491,17 @@ func buildTalosCluster(in ClusterInput) platformv1alpha1.TalosCluster {
 	spec := platformv1alpha1.TalosClusterSpec{
 		Mode: mode,
 		Role: clusterRole(in),
-		CAPI: platformv1alpha1.CAPIConfig{Enabled: in.CAPI.Enabled},
 	}
 	if in.CAPI.Enabled {
-		// Target cluster: populate full CAPI block.
-		spec.CAPI.TalosVersion = in.CAPI.TalosVersion
-		spec.CAPI.KubernetesVersion = in.CAPI.KubernetesVersion
-		spec.CAPI.ControlPlane = &platformv1alpha1.CAPIControlPlaneConfig{
-			Replicas: in.CAPI.ControlPlaneReplicas,
+		// Target cluster: populate full CAPI block. Pointer is nil when disabled,
+		// which suppresses the capi field from YAML output entirely (C-34).
+		spec.CAPI = &platformv1alpha1.CAPIConfig{
+			Enabled:           true,
+			TalosVersion:      in.CAPI.TalosVersion,
+			KubernetesVersion: in.CAPI.KubernetesVersion,
+			ControlPlane: &platformv1alpha1.CAPIControlPlaneConfig{
+				Replicas: in.CAPI.ControlPlaneReplicas,
+			},
 		}
 	} else if in.Bootstrap != nil {
 		// Management cluster: spec-level fields from the Bootstrap section.
@@ -846,7 +849,7 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 			Role:            clusterRole(in),
 			TalosVersion:    b.TalosVersion,
 			ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
-			CAPI:            platformv1alpha1.CAPIConfig{Enabled: false},
+			// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
 		},
 	}
 	if err := writeCRYAML(output, in.Name, tc); err != nil {
@@ -1136,7 +1139,7 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 			Role:            clusterRole(in),
 			TalosVersion:    talosVersion,
 			ClusterEndpoint: clusterEndpoint,
-			CAPI:            platformv1alpha1.CAPIConfig{Enabled: false},
+			// CAPI nil -- management cluster import path; nil suppresses capi block (C-34).
 		},
 	}
 	return writeCRYAML(output, in.Name, tc)
