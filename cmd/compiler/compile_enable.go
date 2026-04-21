@@ -62,6 +62,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -110,6 +111,11 @@ type operatorSpec struct {
 	// platform.ontai.dev/role annotation on the Deployment and injected as the
 	// CONDUCTOR_ROLE env var via downward API fieldRef. Non-empty for Conductor only.
 	Role string
+	// AdditionalTargetClusters is an optional list of extra cluster names appended to
+	// the RBACProfile targetClusters alongside the invariant "management" entry.
+	// Set to the management cluster's actual name (e.g., "ccs-mgmt") so EPGReconciler
+	// generates a PermissionSnapshot for that name, which PackExecution Gate 3 requires.
+	AdditionalTargetClusters []string
 }
 
 // phaseMeta is the structure written to phase-meta.yaml in each phase directory.
@@ -211,9 +217,25 @@ func conductorOp(version, registry, clusterName string) operatorSpec {
 
 // allOperators returns all operator specs in their original flat order (used
 // for leader election leases in phase 5 which covers all operators).
+// When clusterName is non-empty, it is appended to every operator's
+// AdditionalTargetClusters so EPGReconciler generates a PermissionSnapshot
+// for that cluster name alongside the invariant "management" snapshot.
+// PackExecution Gate 3 checks snapshot-{targetClusterRef}, so every known
+// cluster name must appear in at least one RBACProfile's targetClusters.
 func allOperators(version, registry, clusterName, dsnsIP string) []operatorSpec {
-	result := []operatorSpec{conductorOp(version, registry, clusterName), guardianOp(version, registry)}
-	result = append(result, platformWrapperOps(version, registry, dsnsIP)...)
+	var extra []string
+	if clusterName != "" {
+		extra = []string{clusterName}
+	}
+	cdt := conductorOp(version, registry, clusterName)
+	cdt.AdditionalTargetClusters = extra
+	grd := guardianOp(version, registry)
+	grd.AdditionalTargetClusters = extra
+	result := []operatorSpec{cdt, grd}
+	for _, op := range platformWrapperOps(version, registry, dsnsIP) {
+		op.AdditionalTargetClusters = extra
+		result = append(result, op)
+	}
 	return result
 }
 
@@ -310,6 +332,19 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 	gdn := guardianOp(version, registry)
 	pwOps := platformWrapperOps(version, registry, dsnsIP)
 	cdt := conductorOp(version, registry, clusterName)
+
+	// Stamp AdditionalTargetClusters on all operator specs so RBACProfiles include the
+	// management cluster's actual name alongside the logical "management" entry.
+	// This ensures EPGReconciler generates snapshot-{clusterName} which PackExecution
+	// Gate 3 requires before deploying to that cluster.
+	if clusterName != "" {
+		extra := []string{clusterName}
+		gdn.AdditionalTargetClusters = extra
+		cdt.AdditionalTargetClusters = extra
+		for i := range pwOps {
+			pwOps[i].AdditionalTargetClusters = extra
+		}
+	}
 
 	if err := writePhase0InfrastructureDependencies(output); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
@@ -2637,6 +2672,22 @@ func writeLeaderElectionYAML(dir string, operators []operatorSpec) error {
 }
 
 // buildOperatorRBACProfile constructs a Guardian RBACProfile CR for one Seam operator SA.
+// buildTargetClusters returns the targetClusters list for an operator RBACProfile.
+// "management" is always included. Any unique additional cluster names are appended in
+// sorted order so the generated YAML is deterministic.
+func buildTargetClusters(additional []string) []string {
+	seen := map[string]struct{}{"management": {}}
+	result := []string{"management"}
+	for _, c := range additional {
+		if _, ok := seen[c]; !ok && c != "" {
+			seen[c] = struct{}{}
+			result = append(result, c)
+		}
+	}
+	sort.Strings(result[1:])
+	return result
+}
+
 // Uses the security.ontai.dev/v1alpha1 schema from guardian-schema.md §7.
 //
 // All RBACProfile CRs live in seam-system regardless of the operator's runtime
@@ -2670,9 +2721,7 @@ func buildOperatorRBACProfile(op operatorSpec) map[string]interface{} {
 			// guardian-schema.md §6 RBACProfile principalRef contract.
 			"principalRef":  "system:serviceaccount:" + op.Namespace + ":" + op.ServiceAccount,
 			"rbacPolicyRef": "seam-platform-rbac-policy",
-			"targetClusters": []string{
-				"management",
-			},
+			"targetClusters": buildTargetClusters(op.AdditionalTargetClusters),
 			"permissionDeclarations": []map[string]interface{}{
 				{
 					"permissionSetRef": op.Name + "-permissions",
