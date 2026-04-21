@@ -14,8 +14,8 @@ func ParsePackManifests(multiYAML string) ([]PackManifest, error) {
 	return packbuild.ParseManifests(multiYAML)
 }
 
-// splitRBACAndWorkload partitions a PackManifest slice into RBAC and workload slices.
+// SplitRBACAndWorkload partitions a PackManifest slice into RBAC and workload slices.
 // Delegates to packbuild.SplitRBACAndWorkload. Pure function with no side effects.
-func splitRBACAndWorkload(manifests []PackManifest) (rbac, workload []PackManifest) {
+func SplitRBACAndWorkload(manifests []PackManifest) (rbac, workload []PackManifest) {
 	return packbuild.SplitRBACAndWorkload(manifests)
 }
