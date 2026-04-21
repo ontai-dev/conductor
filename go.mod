@@ -17,8 +17,8 @@ require (
 	github.com/onsi/gomega v1.38.2
 	github.com/ontai-dev/guardian v0.0.0-00010101000000-000000000000
 	github.com/ontai-dev/platform v0.0.0-00010101000000-000000000000
-	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260421091707-a688712f9dff
-	github.com/ontai-dev/wrapper v0.0.0-00010101000000-000000000000
+	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260421234425-2e1c775ba8f9
+	github.com/ontai-dev/wrapper v0.1.0-alpha.0.20260421234458-225222812dea
 	github.com/prometheus/client_golang v1.23.2
 	github.com/siderolabs/talos/pkg/machinery v1.12.6
 	google.golang.org/grpc v1.79.3
