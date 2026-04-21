@@ -2487,12 +2487,28 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{""},
-				Resources: []string{"configmaps", "secrets", "serviceaccounts", "services"},
-				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+				Resources: []string{"configmaps", "secrets", "serviceaccounts", "services",
+					"persistentvolumeclaims", "endpoints", "pods"},
+				Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"apps"},
-				Resources: []string{"deployments", "daemonsets", "statefulsets"},
+				Resources: []string{"deployments", "daemonsets", "statefulsets", "replicasets"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"ingresses", "ingressclasses"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"batch"},
+				Resources: []string{"jobs", "cronjobs"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"autoscaling"},
+				Resources: []string{"horizontalpodautoscalers"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
@@ -2504,11 +2520,6 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 				APIGroups: []string{"runner.ontai.dev"},
 				Resources: []string{"runnerconfigs"},
 				Verbs:     []string{"get", "list", "watch", "patch", "update"},
-			},
-			{
-				APIGroups: []string{"rbac.authorization.k8s.io"},
-				Resources: []string{"roles", "rolebindings", "clusterroles", "clusterrolebindings"},
-				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 		},
 	}
