@@ -118,11 +118,18 @@ func BuildExecuteContext() (ExecutionContext, error) {
 }
 
 // BuildAgentContext constructs an ExecutionContext for agent mode.
-// ClusterRef identifies which cluster this agent instance governs.
-func BuildAgentContext(clusterRef string) (ExecutionContext, error) {
+// ClusterRef is resolved from the CLUSTER_REF environment variable first,
+// then from the clusterRefFlag CLI argument. The env var takes precedence so
+// the Deployment can inject the value via a downward API fieldRef without
+// requiring args to change between clusters.
+func BuildAgentContext(clusterRefFlag string) (ExecutionContext, error) {
+	clusterRef := os.Getenv(EnvClusterRef)
+	if clusterRef == "" {
+		clusterRef = clusterRefFlag
+	}
 	if clusterRef == "" {
 		return ExecutionContext{}, errors.New(
-			"agent mode: cluster-ref is required — set via --cluster-ref flag",
+			"agent mode: cluster ref required -- set CLUSTER_REF env var or --cluster-ref flag",
 		)
 	}
 	ns := os.Getenv(EnvPodNamespace)
