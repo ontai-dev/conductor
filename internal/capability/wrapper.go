@@ -53,6 +53,7 @@ var (
 	deploymentGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	statefulSetGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
 	daemonSetGVR   = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+	jobGVR         = schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 	pvcGVR         = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}
 )
 
@@ -839,7 +840,7 @@ func applyStageManifests(ctx context.Context, dynClient dynamic.Interface, manif
 // wrapper-schema.md §2.2.
 func needsReadinessWait(kind string) bool {
 	switch kind {
-	case "Deployment", "StatefulSet", "DaemonSet", "PersistentVolumeClaim":
+	case "Deployment", "StatefulSet", "DaemonSet", "Job", "PersistentVolumeClaim":
 		return true
 	}
 	return false
@@ -896,6 +897,31 @@ func isResourceReady(ctx context.Context, dynClient dynamic.Interface, m parsedM
 		desired, _, _ := unstructuredInt64(obj.Object, "status", "desiredNumberScheduled")
 		ready, _, _ := unstructuredInt64(obj.Object, "status", "numberReady")
 		return desired > 0 && ready >= desired, nil
+
+	case "Job":
+		obj, err := dynClient.Resource(jobGVR).Namespace(m.namespace).
+			Get(ctx, m.name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("get Job %s/%s: %w", m.namespace, m.name, err)
+		}
+		// A Job is complete when succeeded >= spec.completions (default 1).
+		completions, ok, _ := unstructuredInt64(obj.Object, "spec", "completions")
+		if !ok {
+			completions = 1
+		}
+		succeeded, _, _ := unstructuredInt64(obj.Object, "status", "succeeded")
+		// Also treat a failed Job as terminal to avoid infinite wait.
+		conditions, _, _ := unstructuredList(obj.Object, "status", "conditions")
+		for _, c := range conditions {
+			cmap, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cmap["type"] == "Failed" && cmap["status"] == "True" {
+				return false, fmt.Errorf("Job %s/%s has condition Failed=True", m.namespace, m.name)
+			}
+		}
+		return succeeded >= completions, nil
 
 	case "PersistentVolumeClaim":
 		obj, err := dynClient.Resource(pvcGVR).Namespace(m.namespace).
