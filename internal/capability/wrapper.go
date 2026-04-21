@@ -52,6 +52,7 @@ var clusterPackGVR = schema.GroupVersionResource{
 var (
 	deploymentGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	statefulSetGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
+	daemonSetGVR   = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
 	pvcGVR         = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}
 )
 
@@ -191,16 +192,18 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("extract tar.gz artifact blob[%d]: %v", blobIdx, err)), nil
 		}
-		for i, yamlData := range yamlFiles {
-			pm, err := parseManifestYAML(yamlData)
-			if err != nil {
-				return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
-					fmt.Sprintf("parse manifest blob[%d][%d]: %v", blobIdx, i, err)), nil
+		for fileIdx, yamlData := range yamlFiles {
+			for docIdx, doc := range splitYAMLDocuments(yamlData) {
+				pm, err := parseManifestYAML(doc)
+				if err != nil {
+					return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+						fmt.Sprintf("parse manifest blob[%d][%d][%d]: %v", blobIdx, fileIdx, docIdx, err)), nil
+				}
+				if pm == nil {
+					continue
+				}
+				allManifests = append(allManifests, *pm)
 			}
-			if pm == nil {
-				continue // blank or incomplete manifest
-			}
-			allManifests = append(allManifests, *pm)
 		}
 	}
 
@@ -209,7 +212,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   step1Start,
 		CompletedAt: step1End,
-		Message:     fmt.Sprintf("%d manifests fetched", len(blobs)),
+		Message:     fmt.Sprintf("%d manifests fetched", len(allManifests)),
 	}
 
 	// Pre-flight step: ensure all namespaces referenced by manifests exist.
@@ -250,6 +253,40 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			applied++
 		}
 		step2End := time.Now().UTC()
+		applyStep := runnerlib.StepResult{
+			Name:        "apply-manifests",
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   step2Start,
+			CompletedAt: step2End,
+			Message:     fmt.Sprintf("%d manifests applied", applied),
+		}
+		readyStart := time.Now().UTC()
+		if waitErr := waitForStageReady(ctx, params.DynamicClient, allManifests); waitErr != nil {
+			return runnerlib.OperationResultSpec{
+				Capability:  runnerlib.CapabilityPackDeploy,
+				Status:      runnerlib.ResultFailed,
+				StartedAt:   now,
+				CompletedAt: time.Now().UTC(),
+				Artifacts:   artifacts,
+				Steps: []runnerlib.StepResult{
+					pullStep,
+					preflightStep,
+					applyStep,
+					{
+						Name:        "wait-ready",
+						Status:      runnerlib.ResultFailed,
+						StartedAt:   readyStart,
+						CompletedAt: time.Now().UTC(),
+						Message:     waitErr.Error(),
+					},
+				},
+				FailureReason: &runnerlib.FailureReason{
+					Category:   runnerlib.ExecutionFailure,
+					Reason:     fmt.Sprintf("readiness wait failed: %v", waitErr),
+					FailedStep: "wait-ready",
+				},
+			}, nil
+		}
 		return runnerlib.OperationResultSpec{
 			Capability:  runnerlib.CapabilityPackDeploy,
 			Status:      runnerlib.ResultSucceeded,
@@ -259,12 +296,13 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			Steps: []runnerlib.StepResult{
 				pullStep,
 				preflightStep,
+				applyStep,
 				{
-					Name:        "apply-manifests",
+					Name:        "wait-ready",
 					Status:      runnerlib.ResultSucceeded,
-					StartedAt:   step2Start,
-					CompletedAt: step2End,
-					Message:     fmt.Sprintf("%d manifests applied", applied),
+					StartedAt:   readyStart,
+					CompletedAt: time.Now().UTC(),
+					Message:     fmt.Sprintf("%d manifests applied and ready", applied),
 				},
 			},
 		}, nil
@@ -408,8 +446,10 @@ func (h *packDeployHandler) executeSplitPath(
 				fmt.Sprintf("extract RBAC tar.gz blob[%d]: %v", blobIdx, err)), nil
 		}
 		for _, data := range yamlFiles {
-			if len(bytes.TrimSpace(data)) > 0 {
-				rbacYAMLs = append(rbacYAMLs, string(data))
+			for _, doc := range splitYAMLDocuments(data) {
+				if len(doc) > 0 {
+					rbacYAMLs = append(rbacYAMLs, string(doc))
+				}
 			}
 		}
 	}
@@ -503,14 +543,16 @@ func (h *packDeployHandler) executeSplitPath(
 				return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 					fmt.Sprintf("extract workload tar.gz blob[%d]: %v", blobIdx, err)), nil
 			}
-			for i, data := range yamlFiles {
-				pm, err := parseManifestYAML(data)
-				if err != nil {
-					return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
-						fmt.Sprintf("parse workload manifest blob[%d][%d]: %v", blobIdx, i, err)), nil
-				}
-				if pm != nil {
-					workloadManifests = append(workloadManifests, *pm)
+			for fileIdx, data := range yamlFiles {
+				for docIdx, doc := range splitYAMLDocuments(data) {
+					pm, err := parseManifestYAML(doc)
+					if err != nil {
+						return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+							fmt.Sprintf("parse workload manifest blob[%d][%d][%d]: %v", blobIdx, fileIdx, docIdx, err)), nil
+					}
+					if pm != nil {
+						workloadManifests = append(workloadManifests, *pm)
+					}
 				}
 			}
 		}
@@ -580,13 +622,47 @@ func (h *packDeployHandler) executeSplitPath(
 		Message:     fmt.Sprintf("%d workload manifests applied", applied),
 	}
 
+	// Step 7 — Wait for workload Deployments, StatefulSets, and DaemonSets to become ready.
+	readyStart := time.Now().UTC()
+	if waitErr := waitForStageReady(ctx, params.DynamicClient, workloadManifests); waitErr != nil {
+		return runnerlib.OperationResultSpec{
+			Capability:  runnerlib.CapabilityPackDeploy,
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   now,
+			CompletedAt: time.Now().UTC(),
+			Artifacts:   artifacts,
+			Steps: []runnerlib.StepResult{
+				pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep,
+				{
+					Name:        "wait-ready",
+					Status:      runnerlib.ResultFailed,
+					StartedAt:   readyStart,
+					CompletedAt: time.Now().UTC(),
+					Message:     waitErr.Error(),
+				},
+			},
+			FailureReason: &runnerlib.FailureReason{
+				Category:   runnerlib.ExecutionFailure,
+				Reason:     fmt.Sprintf("workload readiness wait failed: %v", waitErr),
+				FailedStep: "wait-ready",
+			},
+		}, nil
+	}
+	readyStep := runnerlib.StepResult{
+		Name:        "wait-ready",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   readyStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d workload manifests applied and ready", applied),
+	}
+
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityPackDeploy,
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   artifacts,
-		Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep},
+		Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep, readyStep},
 	}, nil
 }
 
@@ -763,7 +839,7 @@ func applyStageManifests(ctx context.Context, dynClient dynamic.Interface, manif
 // wrapper-schema.md §2.2.
 func needsReadinessWait(kind string) bool {
 	switch kind {
-	case "Deployment", "StatefulSet", "PersistentVolumeClaim":
+	case "Deployment", "StatefulSet", "DaemonSet", "PersistentVolumeClaim":
 		return true
 	}
 	return false
@@ -810,6 +886,16 @@ func isResourceReady(ctx context.Context, dynClient dynamic.Interface, m parsedM
 		}
 		readyReplicas, _, _ := unstructuredInt64(obj.Object, "status", "readyReplicas")
 		return replicas > 0 && readyReplicas >= replicas, nil
+
+	case "DaemonSet":
+		obj, err := dynClient.Resource(daemonSetGVR).Namespace(m.namespace).
+			Get(ctx, m.name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("get DaemonSet %s/%s: %w", m.namespace, m.name, err)
+		}
+		desired, _, _ := unstructuredInt64(obj.Object, "status", "desiredNumberScheduled")
+		ready, _, _ := unstructuredInt64(obj.Object, "status", "numberReady")
+		return desired > 0 && ready >= desired, nil
 
 	case "PersistentVolumeClaim":
 		obj, err := dynClient.Resource(pvcGVR).Namespace(m.namespace).
@@ -908,6 +994,22 @@ func extractYAMLsFromTarGz(data []byte) ([][]byte, error) {
 		result = append(result, content)
 	}
 	return result, nil
+}
+
+// splitYAMLDocuments splits a multi-document YAML byte slice on "---" separators.
+// OCI pack artifacts contain a single file with all manifests separated by "---".
+// sigsyaml.YAMLToJSON only converts the first document, so each file must be
+// split before calling parseManifestYAML. Returns individual non-empty documents.
+func splitYAMLDocuments(data []byte) [][]byte {
+	var docs [][]byte
+	for _, part := range bytes.Split(data, []byte("\n---")) {
+		trimmed := bytes.TrimPrefix(bytes.TrimSpace(part), []byte("---"))
+		trimmed = bytes.TrimSpace(trimmed)
+		if len(trimmed) > 0 {
+			docs = append(docs, trimmed)
+		}
+	}
+	return docs
 }
 
 // computeManifestChecksum computes SHA256 of the concatenated raw artifact bytes
