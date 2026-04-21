@@ -2521,6 +2521,14 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 				Resources: []string{"runnerconfigs"},
 				Verbs:     []string{"get", "list", "watch", "patch", "update"},
 			},
+			{
+				// Read-only access to RBACProfile so the pack-deploy split path can
+				// poll for provisioned=true after submitting RBAC to guardian intake.
+				// wrapper-schema.md §4, INV-004.
+				APIGroups: []string{"security.ontai.dev"},
+				Resources: []string{"rbacprofiles"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
 		},
 	}
 
