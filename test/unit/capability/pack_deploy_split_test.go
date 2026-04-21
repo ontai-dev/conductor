@@ -372,9 +372,9 @@ metadata:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// The tar.gz has one file containing two YAML documents. After extraction,
-	// the raw file content is submitted as a single string to guardian.
-	if len(guardian.submitted) != 1 {
-		t.Errorf("expected 1 YAML string submitted (one file); got %d", len(guardian.submitted))
+	// The tar.gz has one file containing two YAML documents. After splitting on ---
+	// separators, each document is submitted as an individual string to guardian.
+	if len(guardian.submitted) != 2 {
+		t.Errorf("expected 2 YAML strings submitted (one per document); got %d", len(guardian.submitted))
 	}
 }
