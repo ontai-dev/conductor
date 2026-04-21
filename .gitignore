@@ -1,7 +1,7 @@
 # Binaries
 bin/
-compiler
-conductor
+/compiler
+/conductor
 *.exe
 *.exe~
 *.dll
