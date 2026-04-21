@@ -1088,7 +1088,13 @@ func splitAPIVersion(apiVersion string) (string, string) {
 }
 
 // lowercasePlural converts a Kind (e.g., "Deployment") to its lowercase plural
-// resource name (e.g., "deployments") using the conventional 's' suffix.
+// resource name (e.g., "deployments"). Three pluralization rules apply:
+//
+//  1. Kinds ending in 's' (e.g., "IngressClass", "Ingress") → append "es"
+//     ("ingressclasses", "ingresses").
+//  2. Kinds ending in 'y' preceded by a consonant (e.g., "NetworkPolicy") →
+//     replace 'y' with "ies" ("networkpolicies").
+//  3. All other kinds → append "s".
 func lowercasePlural(kind string) string {
 	if len(kind) == 0 {
 		return kind
@@ -1102,5 +1108,18 @@ func lowercasePlural(kind string) string {
 			lower[i] = c
 		}
 	}
-	return string(lower) + "s"
+	s := string(lower)
+	switch {
+	case len(s) > 0 && s[len(s)-1] == 's':
+		return s + "es"
+	case len(s) > 1 && s[len(s)-1] == 'y' && !isVowel(s[len(s)-2]):
+		return s[:len(s)-1] + "ies"
+	default:
+		return s + "s"
+	}
+}
+
+// isVowel returns true for lowercase ASCII vowels.
+func isVowel(c byte) bool {
+	return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u'
 }
