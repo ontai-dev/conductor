@@ -65,6 +65,22 @@ type OCIRegistryClient interface {
 	PullManifests(ctx context.Context, ref string) ([][]byte, error)
 }
 
+// GuardianIntakeClient abstracts the guardian /rbac-intake/pack HTTP endpoint.
+// Used by pack-deploy to submit the RBAC layer of a ClusterPack for guardian
+// wrapping before applying the workload layer. INV-004: guardian owns all RBAC;
+// pack-deploy never writes RBAC resources directly. wrapper-schema.md §4.
+type GuardianIntakeClient interface {
+	// SubmitPackRBACLayer sends YAML manifests from the RBAC OCI layer to
+	// guardian's /rbac-intake/pack endpoint. Returns the count of wrapped
+	// resources on success.
+	SubmitPackRBACLayer(ctx context.Context, componentName string, manifests []string, targetCluster string) (int, error)
+
+	// WaitForRBACProfileProvisioned polls until the RBACProfile for componentName
+	// in the tenant-{targetCluster} namespace reaches provisioned=true, or until
+	// ctx is cancelled. Returns nil when provisioned. guardian-schema.md §7.
+	WaitForRBACProfileProvisioned(ctx context.Context, targetCluster, componentName string) error
+}
+
 // ExecuteClients bundles the client dependencies injected into every capability
 // execution. Fields may be nil when the handler is running in a test context;
 // handlers that require a non-nil client return ValidationFailure when they
@@ -91,6 +107,13 @@ type ExecuteClients struct {
 	// OCIClient is the OCI registry client for ClusterPack artifact fetching.
 	// Non-nil only for pack-deploy.
 	OCIClient OCIRegistryClient
+
+	// GuardianClient is the guardian intake client for RBAC layer submission.
+	// Non-nil only for pack-deploy when the ClusterPack has rbacDigest set.
+	// When nil and rbacDigest is absent, pack-deploy uses the legacy path.
+	// When nil and rbacDigest is present, pack-deploy returns ValidationFailure.
+	// INV-004, wrapper-schema.md §4.
+	GuardianClient GuardianIntakeClient
 
 	// SigningPublicKey is the Ed25519 public key used to verify PermissionSnapshot
 	// and PackInstance signatures authored by the management cluster Conductor.

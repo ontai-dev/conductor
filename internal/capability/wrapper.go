@@ -28,6 +28,10 @@ import (
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
+// namespaceGVR is the GroupVersionResource for Kubernetes Namespace resources.
+// Used by ensureNamespaces to pre-create missing namespaces before manifest apply.
+var namespaceGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+
 // packExecutionGVR is the GroupVersionResource for PackExecution.
 // infra.ontai.dev/v1alpha1/packexecutions — wrapper-schema.md §4.
 var packExecutionGVR = schema.GroupVersionResource{
@@ -105,7 +109,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("list ClusterPack in %s: %v", peTenantNS, err)), nil
 	}
 
-	var ociRef, expectedChecksum string
+	var ociRef, expectedChecksum, rbacDigest, workloadDigest string
 	var executionStages []string // stage names in declared order; empty → single-pass fallback
 	for _, item := range cpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
@@ -125,6 +129,8 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			ociRef = url
 		}
 		expectedChecksum, _, _ = unstructuredString(item.Object, "spec", "checksum")
+		rbacDigest, _, _ = unstructuredString(item.Object, "spec", "rbacDigest")
+		workloadDigest, _, _ = unstructuredString(item.Object, "spec", "workloadDigest")
 
 		// Read spec.executionOrder — ordered list of stage objects with a "name" field.
 		// When present and non-empty, staged execution is used. wrapper-schema.md §2.2.
@@ -147,6 +153,14 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	if ociRef == "" {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("ClusterPack %s/%s has no registryRef", clusterPackName, clusterPackVersion)), nil
+	}
+
+	// When rbacDigest is present, the ClusterPack uses the two-layer OCI artifact
+	// contract. RBAC manifests are submitted to guardian /rbac-intake/pack and the
+	// workload layer is applied separately after guardian acknowledges. INV-004,
+	// wrapper-schema.md §4. Legacy packs (no rbacDigest) fall through to single-layer path.
+	if rbacDigest != "" {
+		return h.executeSplitPath(ctx, params, now, clusterPackName, ociRef, workloadDigest, rbacDigest, expectedChecksum, executionStages)
 	}
 
 	// Step 1 — Fetch manifests from OCI registry.
@@ -198,6 +212,24 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		Message:     fmt.Sprintf("%d manifests fetched", len(blobs)),
 	}
 
+	// Pre-flight step: ensure all namespaces referenced by manifests exist.
+	// Many Helm charts (e.g., ingress-nginx) render resources into a namespace that
+	// is not itself declared as a Namespace manifest. wrapper-schema.md §4.
+	preflightStart := time.Now().UTC()
+	nsCreated, preflightErr := ensureNamespaces(ctx, params.DynamicClient, allManifests)
+	preflightEnd := time.Now().UTC()
+	if preflightErr != nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("pre-flight namespace creation failed: %v", preflightErr)), nil
+	}
+	preflightStep := runnerlib.StepResult{
+		Name:        "ensure-namespaces",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   preflightStart,
+		CompletedAt: preflightEnd,
+		Message:     fmt.Sprintf("%d namespace(s) pre-created", nsCreated),
+	}
+
 	artifacts := []runnerlib.ArtifactRef{{
 		Name:      "cluster-pack",
 		Kind:      "OCIImage",
@@ -226,6 +258,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			Artifacts:   artifacts,
 			Steps: []runnerlib.StepResult{
 				pullStep,
+				preflightStep,
 				{
 					Name:        "apply-manifests",
 					Status:      runnerlib.ResultSucceeded,
@@ -252,7 +285,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		byStage[stage] = append(byStage[stage], m)
 	}
 
-	stageSteps := []runnerlib.StepResult{pullStep}
+	stageSteps := []runnerlib.StepResult{pullStep, preflightStep}
 
 	for _, stageName := range executionStages {
 		stageStart := time.Now().UTC()
@@ -324,6 +357,279 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		Artifacts:   artifacts,
 		Steps:       stageSteps,
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Split path (two-layer OCI artifact) -- INV-004, wrapper-schema.md §4
+// ---------------------------------------------------------------------------
+
+// executeSplitPath implements the pack-deploy execution path for ClusterPack
+// artifacts that carry separate RBAC and workload OCI layers (rbacDigest set).
+// Steps: (1) pull RBAC layer, (2) submit to guardian intake, (3) wait for
+// RBACProfile provisioned, (4) pull workload layer, (5) ensureNamespaces,
+// (6) apply workload. INV-004, wrapper-schema.md §4.
+func (h *packDeployHandler) executeSplitPath(
+	ctx context.Context,
+	params ExecuteParams,
+	now time.Time,
+	componentName, registryURL, workloadDigest, rbacDigest, expectedChecksum string,
+	executionStages []string,
+) (runnerlib.OperationResultSpec, error) {
+	if params.GuardianClient == nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
+			"pack-deploy split path requires GuardianClient; rbacDigest is set but no client provided (INV-004)"), nil
+	}
+
+	rbacRef := registryURL + "@" + rbacDigest
+	artifacts := []runnerlib.ArtifactRef{
+		{Name: "rbac-layer", Kind: "OCIImage", Reference: rbacRef},
+	}
+	if workloadDigest != "" {
+		artifacts = append(artifacts, runnerlib.ArtifactRef{
+			Name:      "workload-layer",
+			Kind:      "OCIImage",
+			Reference: registryURL + "@" + workloadDigest,
+			Checksum:  expectedChecksum,
+		})
+	}
+
+	// Step 1 — Pull RBAC layer.
+	step1Start := time.Now().UTC()
+	rbacBlobs, err := params.OCIClient.PullManifests(ctx, rbacRef)
+	if err != nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExternalDependencyFailure,
+			fmt.Sprintf("pull RBAC layer %s: %v", rbacRef, err)), nil
+	}
+	var rbacYAMLs []string
+	for blobIdx, blob := range rbacBlobs {
+		yamlFiles, err := extractYAMLsFromTarGz(blob)
+		if err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("extract RBAC tar.gz blob[%d]: %v", blobIdx, err)), nil
+		}
+		for _, data := range yamlFiles {
+			if len(bytes.TrimSpace(data)) > 0 {
+				rbacYAMLs = append(rbacYAMLs, string(data))
+			}
+		}
+	}
+	pullRBACStep := runnerlib.StepResult{
+		Name:        "pull-rbac-layer",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   step1Start,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d RBAC manifests fetched", len(rbacYAMLs)),
+	}
+
+	// Step 2 — Submit RBAC manifests to guardian intake. INV-004.
+	intakeStart := time.Now().UTC()
+	wrapped, intakeErr := params.GuardianClient.SubmitPackRBACLayer(ctx, componentName, rbacYAMLs, params.ClusterRef)
+	if intakeErr != nil {
+		steps := []runnerlib.StepResult{pullRBACStep, {
+			Name:        "rbac-intake",
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   intakeStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     intakeErr.Error(),
+		}}
+		return runnerlib.OperationResultSpec{
+			Capability:  runnerlib.CapabilityPackDeploy,
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   now,
+			CompletedAt: time.Now().UTC(),
+			Artifacts:   artifacts,
+			Steps:       steps,
+			FailureReason: &runnerlib.FailureReason{
+				Category:   runnerlib.ExecutionFailure,
+				Reason:     fmt.Sprintf("guardian rbac-intake failed: %v", intakeErr),
+				FailedStep: "rbac-intake",
+			},
+		}, nil
+	}
+	intakeStep := runnerlib.StepResult{
+		Name:        "rbac-intake",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   intakeStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d RBAC resources wrapped by guardian", wrapped),
+	}
+
+	// Step 3 — Wait for guardian RBACProfile provisioned=true.
+	waitStart := time.Now().UTC()
+	if waitErr := params.GuardianClient.WaitForRBACProfileProvisioned(ctx, params.ClusterRef, componentName); waitErr != nil {
+		steps := []runnerlib.StepResult{pullRBACStep, intakeStep, {
+			Name:        "wait-rbac-profile",
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   waitStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     waitErr.Error(),
+		}}
+		return runnerlib.OperationResultSpec{
+			Capability:  runnerlib.CapabilityPackDeploy,
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   now,
+			CompletedAt: time.Now().UTC(),
+			Artifacts:   artifacts,
+			Steps:       steps,
+			FailureReason: &runnerlib.FailureReason{
+				Category:   runnerlib.ExecutionFailure,
+				Reason:     fmt.Sprintf("wait RBACProfile provisioned: %v", waitErr),
+				FailedStep: "wait-rbac-profile",
+			},
+		}, nil
+	}
+	waitStep := runnerlib.StepResult{
+		Name:        "wait-rbac-profile",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   waitStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     "RBACProfile provisioned=true",
+	}
+
+	// Step 4 — Pull workload layer (absent on RBAC-only packs).
+	var workloadManifests []parsedManifest
+	var pullWorkloadStep runnerlib.StepResult
+	if workloadDigest != "" {
+		wRef := registryURL + "@" + workloadDigest
+		wStart := time.Now().UTC()
+		wBlobs, err := params.OCIClient.PullManifests(ctx, wRef)
+		if err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExternalDependencyFailure,
+				fmt.Sprintf("pull workload layer %s: %v", wRef, err)), nil
+		}
+		for blobIdx, blob := range wBlobs {
+			yamlFiles, err := extractYAMLsFromTarGz(blob)
+			if err != nil {
+				return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("extract workload tar.gz blob[%d]: %v", blobIdx, err)), nil
+			}
+			for i, data := range yamlFiles {
+				pm, err := parseManifestYAML(data)
+				if err != nil {
+					return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+						fmt.Sprintf("parse workload manifest blob[%d][%d]: %v", blobIdx, i, err)), nil
+				}
+				if pm != nil {
+					workloadManifests = append(workloadManifests, *pm)
+				}
+			}
+		}
+		pullWorkloadStep = runnerlib.StepResult{
+			Name:        "pull-workload-layer",
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   wStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     fmt.Sprintf("%d workload manifests fetched", len(workloadManifests)),
+		}
+	}
+
+	// Step 5 — Pre-create namespaces referenced by workload manifests.
+	nsStart := time.Now().UTC()
+	nsCreated, nsErr := ensureNamespaces(ctx, params.DynamicClient, workloadManifests)
+	nsStep := runnerlib.StepResult{
+		Name:        "ensure-namespaces",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   nsStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d namespace(s) pre-created", nsCreated),
+	}
+	if nsErr != nil {
+		nsStep.Status = runnerlib.ResultFailed
+		nsStep.Message = nsErr.Error()
+		return runnerlib.OperationResultSpec{
+			Capability:  runnerlib.CapabilityPackDeploy,
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   now,
+			CompletedAt: time.Now().UTC(),
+			Artifacts:   artifacts,
+			Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep},
+			FailureReason: &runnerlib.FailureReason{
+				Category:   runnerlib.ExecutionFailure,
+				Reason:     fmt.Sprintf("pre-flight namespace creation failed: %v", nsErr),
+				FailedStep: "ensure-namespaces",
+			},
+		}, nil
+	}
+
+	// Step 6 — Apply workload manifests (single-pass; staged apply deferred to future).
+	applyStart := time.Now().UTC()
+	applied := 0
+	for _, m := range workloadManifests {
+		if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+			return runnerlib.OperationResultSpec{
+				Capability:  runnerlib.CapabilityPackDeploy,
+				Status:      runnerlib.ResultFailed,
+				StartedAt:   now,
+				CompletedAt: time.Now().UTC(),
+				Artifacts:   artifacts,
+				Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep},
+				FailureReason: &runnerlib.FailureReason{
+					Category:   runnerlib.ExecutionFailure,
+					Reason:     fmt.Sprintf("apply workload %s %s/%s: %v", m.kind, m.namespace, m.name, err),
+					FailedStep: "apply-workload",
+				},
+			}, nil
+		}
+		applied++
+	}
+	applyStep := runnerlib.StepResult{
+		Name:        "apply-workload",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   applyStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d workload manifests applied", applied),
+	}
+
+	return runnerlib.OperationResultSpec{
+		Capability:  runnerlib.CapabilityPackDeploy,
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   now,
+		CompletedAt: time.Now().UTC(),
+		Artifacts:   artifacts,
+		Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Namespace pre-creation
+// ---------------------------------------------------------------------------
+
+// ensureNamespaces scans manifests for namespace-scoped resources and
+// pre-creates any referenced namespace that is not already represented as
+// an explicit Namespace manifest in the set. This prevents the first SSA patch
+// from failing with "namespace not found" when the Helm chart does not include
+// a Namespace manifest for its own namespace. wrapper-schema.md §4.
+func ensureNamespaces(ctx context.Context, dynClient dynamic.Interface, manifests []parsedManifest) (int, error) {
+	explicit := make(map[string]struct{})
+	for _, m := range manifests {
+		if strings.EqualFold(m.kind, "Namespace") && m.namespace == "" {
+			explicit[m.name] = struct{}{}
+		}
+	}
+	needed := make(map[string]struct{})
+	for _, m := range manifests {
+		if m.namespace == "" {
+			continue
+		}
+		if _, ok := explicit[m.namespace]; ok {
+			continue
+		}
+		needed[m.namespace] = struct{}{}
+	}
+	created := 0
+	for ns := range needed {
+		nsJSON := []byte(fmt.Sprintf(
+			`{"apiVersion":"v1","kind":"Namespace","metadata":{"name":%q}}`, ns))
+		_, err := dynClient.Resource(namespaceGVR).Patch(
+			ctx, ns, types.ApplyPatchType, nsJSON,
+			metav1.PatchOptions{FieldManager: "conductor-pack-deploy"},
+		)
+		if err != nil {
+			return created, fmt.Errorf("pre-create namespace %q: %w", ns, err)
+		}
+		created++
+	}
+	return created, nil
 }
 
 // ---------------------------------------------------------------------------
