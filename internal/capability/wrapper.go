@@ -54,6 +54,7 @@ var (
 	statefulSetGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
 	daemonSetGVR   = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
 	jobGVR         = schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+	cronJobGVR     = schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}
 	pvcGVR         = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}
 )
 
@@ -840,7 +841,7 @@ func applyStageManifests(ctx context.Context, dynClient dynamic.Interface, manif
 // wrapper-schema.md §2.2.
 func needsReadinessWait(kind string) bool {
 	switch kind {
-	case "Deployment", "StatefulSet", "DaemonSet", "Job", "PersistentVolumeClaim":
+	case "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "PersistentVolumeClaim":
 		return true
 	}
 	return false
@@ -922,6 +923,20 @@ func isResourceReady(ctx context.Context, dynClient dynamic.Interface, m parsedM
 			}
 		}
 		return succeeded >= completions, nil
+
+	case "CronJob":
+		// A CronJob has no terminal ready state -- it schedules Jobs on a recurring basis.
+		// Ready when: the resource exists and spec.suspend is not true.
+		obj, err := dynClient.Resource(cronJobGVR).Namespace(m.namespace).
+			Get(ctx, m.name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("get CronJob %s/%s: %w", m.namespace, m.name, err)
+		}
+		spec, _ := obj.Object["spec"].(map[string]interface{})
+		if suspend, _ := spec["suspend"].(bool); suspend {
+			return false, fmt.Errorf("CronJob %s/%s has spec.suspend=true", m.namespace, m.name)
+		}
+		return true, nil
 
 	case "PersistentVolumeClaim":
 		obj, err := dynClient.Resource(pvcGVR).Namespace(m.namespace).
