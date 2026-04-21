@@ -22,18 +22,29 @@ import (
 	"net/http"
 	"os"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	seamv1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/internal/config"
 	"github.com/ontai-dev/conductor/internal/kernel"
 	"github.com/ontai-dev/conductor/internal/persistence"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+var seamScheme = runtime.NewScheme()
+
+func init() {
+	if err := seamv1alpha1.AddToScheme(seamScheme); err != nil {
+		panic("conductor: failed to register seam-core scheme: " + err.Error())
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -169,7 +180,12 @@ func runExecute() {
 		GuardianClient: guardianClient,
 	}
 
-	writer := persistence.NewKubeConfigMapWriter(kubeClient)
+	ctrlClient, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: seamScheme})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: build ctrl-runtime client: %v\n", err)
+		os.Exit(1)
+	}
+	writer := persistence.NewKubeOperationResultWriter(ctrlClient, execCtx.ClusterRef)
 
 	// capabilityStepExecutor wraps the registry and persistence writer to
 	// implement kernel.StepExecutor — dispatches each step's capability inline.
@@ -295,7 +311,7 @@ func printUsage() {
 // architecture evolves to create a Kueue child Job per step.
 type capabilityStepExecutor struct {
 	reg     *capability.Registry
-	writer  persistence.ConfigMapWriter
+	writer  persistence.OperationResultWriter
 	clients capability.ExecuteClients
 }
 
