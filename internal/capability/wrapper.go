@@ -405,9 +405,22 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 
 // executeSplitPath implements the pack-deploy execution path for ClusterPack
 // artifacts that carry separate RBAC and workload OCI layers (rbacDigest set).
-// Steps: (1) pull RBAC layer, (2) submit to guardian intake, (3) wait for
-// RBACProfile provisioned, (4) pull workload layer, (5) ensureNamespaces,
-// (6) apply workload. INV-004, wrapper-schema.md §4.
+//
+// Steps:
+//  1. Pull RBAC layer.
+//  2. Pull workload layer early (needed for Namespace pre-apply before rbac-intake).
+//  3. Apply Namespace manifests from the workload layer to the target cluster.
+//     This ensures the namespace exists before guardian rbac-intake tries to
+//     apply ServiceAccounts into it. Namespace is in the workload layer (not
+//     RBAC) because guardian targets the management cluster and may not be
+//     present on all tenant clusters. Manifests are baked into the pack by
+//     compiler packbuild (not synthesised at runtime). Governor-approved session/13.
+//  4. Submit RBAC manifests to guardian intake.
+//  5. Wait for RBACProfile provisioned.
+//  6. Apply all workload manifests (SSA idempotent -- Namespace already exists).
+//  7. Wait for workload readiness.
+//
+// INV-004, wrapper-schema.md §4.
 func (h *packDeployHandler) executeSplitPath(
 	ctx context.Context,
 	params ExecuteParams,
@@ -463,72 +476,8 @@ func (h *packDeployHandler) executeSplitPath(
 		Message:     fmt.Sprintf("%d RBAC manifests fetched", len(rbacYAMLs)),
 	}
 
-	// Step 2 — Submit RBAC manifests to guardian intake. INV-004.
-	intakeStart := time.Now().UTC()
-	wrapped, intakeErr := params.GuardianClient.SubmitPackRBACLayer(ctx, componentName, rbacYAMLs, params.ClusterRef)
-	if intakeErr != nil {
-		steps := []runnerlib.StepResult{pullRBACStep, {
-			Name:        "rbac-intake",
-			Status:      runnerlib.ResultFailed,
-			StartedAt:   intakeStart,
-			CompletedAt: time.Now().UTC(),
-			Message:     intakeErr.Error(),
-		}}
-		return runnerlib.OperationResultSpec{
-			Capability:  runnerlib.CapabilityPackDeploy,
-			Status:      runnerlib.ResultFailed,
-			StartedAt:   now,
-			CompletedAt: time.Now().UTC(),
-			Artifacts:   artifacts,
-			Steps:       steps,
-			FailureReason: &runnerlib.FailureReason{
-				Category:   runnerlib.ExecutionFailure,
-				Reason:     fmt.Sprintf("guardian rbac-intake failed: %v", intakeErr),
-				FailedStep: "rbac-intake",
-			},
-		}, nil
-	}
-	intakeStep := runnerlib.StepResult{
-		Name:        "rbac-intake",
-		Status:      runnerlib.ResultSucceeded,
-		StartedAt:   intakeStart,
-		CompletedAt: time.Now().UTC(),
-		Message:     fmt.Sprintf("%d RBAC resources wrapped by guardian", wrapped),
-	}
-
-	// Step 3 — Wait for guardian RBACProfile provisioned=true.
-	waitStart := time.Now().UTC()
-	if waitErr := params.GuardianClient.WaitForRBACProfileProvisioned(ctx, params.ClusterRef, componentName); waitErr != nil {
-		steps := []runnerlib.StepResult{pullRBACStep, intakeStep, {
-			Name:        "wait-rbac-profile",
-			Status:      runnerlib.ResultFailed,
-			StartedAt:   waitStart,
-			CompletedAt: time.Now().UTC(),
-			Message:     waitErr.Error(),
-		}}
-		return runnerlib.OperationResultSpec{
-			Capability:  runnerlib.CapabilityPackDeploy,
-			Status:      runnerlib.ResultFailed,
-			StartedAt:   now,
-			CompletedAt: time.Now().UTC(),
-			Artifacts:   artifacts,
-			Steps:       steps,
-			FailureReason: &runnerlib.FailureReason{
-				Category:   runnerlib.ExecutionFailure,
-				Reason:     fmt.Sprintf("wait RBACProfile provisioned: %v", waitErr),
-				FailedStep: "wait-rbac-profile",
-			},
-		}, nil
-	}
-	waitStep := runnerlib.StepResult{
-		Name:        "wait-rbac-profile",
-		Status:      runnerlib.ResultSucceeded,
-		StartedAt:   waitStart,
-		CompletedAt: time.Now().UTC(),
-		Message:     "RBACProfile provisioned=true",
-	}
-
-	// Step 4 — Pull workload layer (absent on RBAC-only packs).
+	// Step 2 — Pull workload layer early so Namespace manifests can be applied
+	// before guardian rbac-intake. Absent on RBAC-only packs.
 	var workloadManifests []parsedManifest
 	var pullWorkloadStep runnerlib.StepResult
 	if workloadDigest != "" {
@@ -567,35 +516,117 @@ func (h *packDeployHandler) executeSplitPath(
 		}
 	}
 
-	// Step 5 — Pre-create namespaces referenced by workload manifests.
+	// Step 3 — Apply Namespace manifests from the workload layer to the target
+	// cluster BEFORE calling guardian rbac-intake. The compiler packbuild injects
+	// Namespace manifests into the workload OCI layer for any namespace referenced
+	// by RBAC resources that Helm does not emit. Applying them first ensures the
+	// namespace exists when guardian applies ServiceAccounts into it.
+	// These are from the pack artifact -- not synthesised at runtime. Governor-approved session/13.
 	nsStart := time.Now().UTC()
-	nsCreated, nsErr := ensureNamespaces(ctx, params.DynamicClient, workloadManifests)
-	nsStep := runnerlib.StepResult{
-		Name:        "ensure-namespaces",
+	nsApplied := 0
+	for _, m := range workloadManifests {
+		if !strings.EqualFold(m.kind, "Namespace") {
+			continue
+		}
+		if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+			nsStep := runnerlib.StepResult{
+				Name:        "apply-namespaces",
+				Status:      runnerlib.ResultFailed,
+				StartedAt:   nsStart,
+				CompletedAt: time.Now().UTC(),
+				Message:     fmt.Sprintf("apply Namespace %s: %v", m.name, err),
+			}
+			return runnerlib.OperationResultSpec{
+				Capability:  runnerlib.CapabilityPackDeploy,
+				Status:      runnerlib.ResultFailed,
+				StartedAt:   now,
+				CompletedAt: time.Now().UTC(),
+				Artifacts:   artifacts,
+				Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, nsStep},
+				FailureReason: &runnerlib.FailureReason{
+					Category:   runnerlib.ExecutionFailure,
+					Reason:     fmt.Sprintf("apply Namespace %s: %v", m.name, err),
+					FailedStep: "apply-namespaces",
+				},
+			}, nil
+		}
+		nsApplied++
+	}
+	applyNSStep := runnerlib.StepResult{
+		Name:        "apply-namespaces",
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   nsStart,
 		CompletedAt: time.Now().UTC(),
-		Message:     fmt.Sprintf("%d namespace(s) pre-created", nsCreated),
+		Message:     fmt.Sprintf("%d namespace(s) applied", nsApplied),
 	}
-	if nsErr != nil {
-		nsStep.Status = runnerlib.ResultFailed
-		nsStep.Message = nsErr.Error()
+
+	// Step 4 — Submit RBAC manifests to guardian intake. INV-004.
+	intakeStart := time.Now().UTC()
+	wrapped, intakeErr := params.GuardianClient.SubmitPackRBACLayer(ctx, componentName, rbacYAMLs, params.ClusterRef)
+	if intakeErr != nil {
+		steps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, {
+			Name:        "rbac-intake",
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   intakeStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     intakeErr.Error(),
+		}}
 		return runnerlib.OperationResultSpec{
 			Capability:  runnerlib.CapabilityPackDeploy,
 			Status:      runnerlib.ResultFailed,
 			StartedAt:   now,
 			CompletedAt: time.Now().UTC(),
 			Artifacts:   artifacts,
-			Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep},
+			Steps:       steps,
 			FailureReason: &runnerlib.FailureReason{
 				Category:   runnerlib.ExecutionFailure,
-				Reason:     fmt.Sprintf("pre-flight namespace creation failed: %v", nsErr),
-				FailedStep: "ensure-namespaces",
+				Reason:     fmt.Sprintf("guardian rbac-intake failed: %v", intakeErr),
+				FailedStep: "rbac-intake",
 			},
 		}, nil
 	}
+	intakeStep := runnerlib.StepResult{
+		Name:        "rbac-intake",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   intakeStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     fmt.Sprintf("%d RBAC resources wrapped by guardian", wrapped),
+	}
 
-	// Step 6 — Apply workload manifests (single-pass; staged apply deferred to future).
+	// Step 5 — Wait for guardian RBACProfile provisioned=true.
+	waitStart := time.Now().UTC()
+	if waitErr := params.GuardianClient.WaitForRBACProfileProvisioned(ctx, params.ClusterRef, componentName); waitErr != nil {
+		steps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, {
+			Name:        "wait-rbac-profile",
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   waitStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     waitErr.Error(),
+		}}
+		return runnerlib.OperationResultSpec{
+			Capability:  runnerlib.CapabilityPackDeploy,
+			Status:      runnerlib.ResultFailed,
+			StartedAt:   now,
+			CompletedAt: time.Now().UTC(),
+			Artifacts:   artifacts,
+			Steps:       steps,
+			FailureReason: &runnerlib.FailureReason{
+				Category:   runnerlib.ExecutionFailure,
+				Reason:     fmt.Sprintf("wait RBACProfile provisioned: %v", waitErr),
+				FailedStep: "wait-rbac-profile",
+			},
+		}, nil
+	}
+	waitStep := runnerlib.StepResult{
+		Name:        "wait-rbac-profile",
+		Status:      runnerlib.ResultSucceeded,
+		StartedAt:   waitStart,
+		CompletedAt: time.Now().UTC(),
+		Message:     "RBACProfile provisioned=true",
+	}
+
+	// Step 6 — Apply all workload manifests. SSA is idempotent -- Namespace
+	// manifests applied in step 3 are safely re-applied without effect.
 	applyStart := time.Now().UTC()
 	applied := 0
 	for _, m := range workloadManifests {
@@ -606,7 +637,7 @@ func (h *packDeployHandler) executeSplitPath(
 				StartedAt:   now,
 				CompletedAt: time.Now().UTC(),
 				Artifacts:   artifacts,
-				Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep},
+				Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep},
 				FailureReason: &runnerlib.FailureReason{
 					Category:   runnerlib.ExecutionFailure,
 					Reason:     fmt.Sprintf("apply workload %s %s/%s: %v", m.kind, m.namespace, m.name, err),
@@ -634,7 +665,7 @@ func (h *packDeployHandler) executeSplitPath(
 			CompletedAt: time.Now().UTC(),
 			Artifacts:   artifacts,
 			Steps: []runnerlib.StepResult{
-				pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep,
+				pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep,
 				{
 					Name:        "wait-ready",
 					Status:      runnerlib.ResultFailed,
@@ -664,7 +695,7 @@ func (h *packDeployHandler) executeSplitPath(
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   artifacts,
-		Steps:       []runnerlib.StepResult{pullRBACStep, intakeStep, waitStep, pullWorkloadStep, nsStep, applyStep, readyStep},
+		Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep, readyStep},
 	}, nil
 }
 
