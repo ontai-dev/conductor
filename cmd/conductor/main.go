@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -141,12 +142,31 @@ func runExecute() {
 	// OCIClient: always constructed; uses only stdlib net/http.
 	ociClient := capability.NewOCIRegistryClientAdapter()
 
+	// GuardianClient: always constructed for pack-deploy split path (INV-004, wrapper-schema.md §4).
+	// GUARDIAN_BASE_URL defaults to https://guardian.seam-system.svc:443.
+	// TLS verification is skipped because the guardian cert is cluster-internal (cert-manager CA).
+	guardianBaseURL := os.Getenv("GUARDIAN_BASE_URL")
+	if guardianBaseURL == "" {
+		guardianBaseURL = "https://guardian.seam-system.svc:443"
+	}
+	guardianHTTPClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		},
+	}
+	var guardianClient capability.GuardianIntakeClient = capability.NewGuardianIntakeClientAdapter(
+		guardianBaseURL,
+		dynamicClient,
+		guardianHTTPClient,
+	)
+
 	clients := capability.ExecuteClients{
 		KubeClient:    kubeClient,
 		DynamicClient: dynamicClient,
 		TalosClient:   talosClient,
 		StorageClient: storageClient,
 		OCIClient:     ociClient,
+		GuardianClient: guardianClient,
 	}
 
 	writer := persistence.NewKubeConfigMapWriter(kubeClient)

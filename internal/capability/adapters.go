@@ -58,11 +58,15 @@ type GuardianIntakeClientAdapter struct {
 }
 
 // NewGuardianIntakeClientAdapter creates a GuardianIntakeClientAdapter.
-// guardianBaseURL is the base URL of the guardian service (e.g., "https://guardian.ont-system").
+// guardianBaseURL is the base URL of the guardian service (e.g., "https://guardian.seam-system.svc:443").
 // managementClient is a dynamic client for the management cluster, used to poll RBACProfile status.
-func NewGuardianIntakeClientAdapter(guardianBaseURL string, managementClient dynamic.Interface) *GuardianIntakeClientAdapter {
+// httpClient is optional; nil uses the default http.Client.
+func NewGuardianIntakeClientAdapter(guardianBaseURL string, managementClient dynamic.Interface, httpClient *http.Client) *GuardianIntakeClientAdapter {
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
 	return &GuardianIntakeClientAdapter{
-		httpClient:       &http.Client{},
+		httpClient:       httpClient,
 		guardianBaseURL:  strings.TrimRight(guardianBaseURL, "/"),
 		managementClient: managementClient,
 	}
