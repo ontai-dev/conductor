@@ -465,8 +465,9 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.RegistryURL == "" {
 		return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required", path)
 	}
-	if in.Digest == "" {
-		return PackBuildInput{}, fmt.Errorf("input file %q: digest is required", path)
+	hasSplitDigests := in.RBACDigest != "" && in.WorkloadDigest != ""
+	if in.Digest == "" && !hasSplitDigests {
+		return PackBuildInput{}, fmt.Errorf("input file %q: digest is required (or both rbacDigest and workloadDigest for two-layer packs)", path)
 	}
 	return in, nil
 }
