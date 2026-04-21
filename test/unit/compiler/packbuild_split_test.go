@@ -68,7 +68,8 @@ func TestSplit_RBACResourcesLandInRBACSlice(t *testing.T) {
 }
 
 // TestSplit_WorkloadResourcesLandInWorkloadSlice verifies that Deployment and Service
-// manifests land in the workload slice from a nginx-like input.
+// manifests land in the workload slice from a nginx-like input. The injected
+// Namespace manifest for ingress-nginx is also expected (namespace injection).
 func TestSplit_WorkloadResourcesLandInWorkloadSlice(t *testing.T) {
 	manifests, err := packbuild.ParseManifests(nginxLikeManifests)
 	if err != nil {
@@ -82,13 +83,80 @@ func TestSplit_WorkloadResourcesLandInWorkloadSlice(t *testing.T) {
 		workloadKinds[m.Kind] = true
 	}
 
-	for _, want := range []string{"Deployment", "Service"} {
+	for _, want := range []string{"Deployment", "Service", "Namespace"} {
 		if !workloadKinds[want] {
 			t.Errorf("workload slice missing kind %q; got kinds: %v", want, collectKinds(workload))
 		}
 	}
-	if len(workload) != 2 {
-		t.Errorf("expected 2 workload manifests; got %d: %v", len(workload), collectKinds(workload))
+	// 3: Namespace (injected) + Deployment + Service
+	if len(workload) != 3 {
+		t.Errorf("expected 3 workload manifests (Namespace+Deployment+Service); got %d: %v", len(workload), collectKinds(workload))
+	}
+}
+
+// TestSplit_NamespaceInjectedForRBACNamespace verifies that when a ServiceAccount
+// references a namespace not declared by any Namespace manifest, a synthetic
+// Namespace manifest is prepended to the workload slice. This ensures the
+// target cluster has the namespace before guardian rbac-intake applies the
+// ServiceAccount into it. wrapper-schema.md §4, Governor-approved session/13.
+func TestSplit_NamespaceInjectedForRBACNamespace(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(nginxLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	_, workload := packbuild.SplitRBACAndWorkload(manifests)
+
+	if len(workload) == 0 {
+		t.Fatal("workload slice is empty; expected injected Namespace manifest")
+	}
+	// Injected Namespace must be the FIRST manifest in the workload slice so it
+	// is applied before other workload resources.
+	first := workload[0]
+	if first.Kind != "Namespace" {
+		t.Errorf("first workload manifest: got Kind=%q; want Namespace", first.Kind)
+	}
+	if first.Name != "ingress-nginx" {
+		t.Errorf("injected Namespace: got Name=%q; want ingress-nginx", first.Name)
+	}
+}
+
+// TestSplit_ExplicitNamespaceNotDuplicated verifies that when the full manifest set
+// already includes an explicit Namespace manifest for a namespace referenced by
+// RBAC resources, no second Namespace manifest is injected.
+func TestSplit_ExplicitNamespaceNotDuplicated(t *testing.T) {
+	const withExplicitNS = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx`
+
+	manifests, err := packbuild.ParseManifests(withExplicitNS)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	_, workload := packbuild.SplitRBACAndWorkload(manifests)
+
+	nsCount := 0
+	for _, m := range workload {
+		if m.Kind == "Namespace" {
+			nsCount++
+		}
+	}
+	if nsCount != 1 {
+		t.Errorf("expected exactly 1 Namespace manifest in workload; got %d (kinds: %v)", nsCount, collectKinds(workload))
 	}
 }
 

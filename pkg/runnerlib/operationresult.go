@@ -35,6 +35,13 @@ type OperationResultSpec struct {
 	// Steps contains individual step results for multi-step capabilities.
 	// Empty for single-step capabilities.
 	Steps []StepResult
+
+	// DeployedResources is the list of Kubernetes resources applied during
+	// this execution. Populated by pack-deploy on success. Used by the wrapper
+	// PackInstanceReconciler to write PackInstance.Status.DeployedResources for
+	// deletion cleanup. wrapper-schema.md §3, Decision 11.
+	// +optional
+	DeployedResources []DeployedResource
 }
 
 // ResultStatus is a typed string representing the terminal status of a capability
@@ -124,6 +131,24 @@ const (
 	// conductor-design.md Section 5.6, conductor-schema.md Section 7.
 	StorageUnavailable FailureCategory = "StorageUnavailable"
 )
+
+// DeployedResource records a single Kubernetes resource applied by a pack-deploy
+// capability. Stored in OperationResultSpec.DeployedResources so the wrapper
+// PackInstanceReconciler can write the list to PackInstance.Status.DeployedResources
+// for use by the deletion handler. wrapper-schema.md §3, Decision 11.
+type DeployedResource struct {
+	// APIVersion is the Kubernetes apiVersion (e.g., apps/v1, v1).
+	APIVersion string `json:"apiVersion"`
+
+	// Kind is the Kubernetes resource Kind (e.g., Deployment, Namespace).
+	Kind string `json:"kind"`
+
+	// Namespace is the resource namespace. Empty for cluster-scoped resources.
+	Namespace string `json:"namespace,omitempty"`
+
+	// Name is the resource name.
+	Name string `json:"name"`
+}
 
 // StepResult is the execution result for one step within a multi-step capability.
 // Aggregated into OperationResultSpec.Steps for multi-step capabilities.
