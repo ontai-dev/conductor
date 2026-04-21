@@ -143,7 +143,7 @@ func (l *SigningLoop) Run(ctx context.Context, interval time.Duration) {
 // management cluster (Gap 28).
 func (l *SigningLoop) signAll(ctx context.Context) {
 	l.signPackInstances(ctx)
-	l.signGVR(ctx, permissionSnapshotGVR, managementSignatureAnnotation)
+	l.signPermissionSnapshots(ctx)
 	l.signGVR(ctx, clusterPackGVR, clusterPackSignatureAnnotation)
 }
 
@@ -207,6 +207,84 @@ func (l *SigningLoop) signPackInstances(ctx context.Context) {
 		// Target cluster PackInstancePullLoop polls these Secrets. Gap 28.
 		spec, _, _ := unstructuredNestedMap(item.Object, "spec")
 		l.storeSignedArtifactSecret(ctx, item.GetName(), spec, sigB64)
+	}
+}
+
+// signPermissionSnapshots signs any PermissionSnapshot CRs that are missing
+// the management-signature annotation, then ensures status.signed=true on all
+// snapshots that carry the annotation. INV-026.
+func (l *SigningLoop) signPermissionSnapshots(ctx context.Context) {
+	list, err := l.client.Resource(permissionSnapshotGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+
+	for _, item := range list.Items {
+		annotations := item.GetAnnotations()
+		sigB64 := ""
+		if annotations != nil {
+			sigB64 = annotations[managementSignatureAnnotation]
+		}
+
+		if sigB64 == "" {
+			spec, _, _ := unstructuredNestedMap(item.Object, "spec")
+			message, err := json.Marshal(spec)
+			if err != nil {
+				continue
+			}
+			sig := ed25519.Sign(l.privKey, message)
+			sigB64 = base64.StdEncoding.EncodeToString(sig)
+
+			patch := map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"annotations": map[string]interface{}{
+						managementSignatureAnnotation: sigB64,
+					},
+				},
+			}
+			patchBytes, err := json.Marshal(patch)
+			if err != nil {
+				continue
+			}
+			ns := item.GetNamespace()
+			if _, err := l.client.Resource(permissionSnapshotGVR).Namespace(ns).Patch(
+				ctx,
+				item.GetName(),
+				types.MergePatchType,
+				patchBytes,
+				metav1.PatchOptions{},
+			); err != nil {
+				continue
+			}
+		}
+
+		// Ensure status.signed=true. The status subresource must be patched
+		// separately from metadata. Skip if already true.
+		rawSigned, _, _ := unstructured.NestedBool(item.Object, "status", "signed")
+		if rawSigned {
+			continue
+		}
+		statusPatch := map[string]interface{}{
+			"apiVersion": permissionSnapshotGVR.Group + "/v1alpha1",
+			"kind":       "PermissionSnapshot",
+			"metadata": map[string]interface{}{
+				"name":      item.GetName(),
+				"namespace": item.GetNamespace(),
+			},
+			"status": map[string]interface{}{
+				"signed": true,
+			},
+		}
+		statusPatchBytes, err := json.Marshal(statusPatch)
+		if err != nil {
+			continue
+		}
+		ns := item.GetNamespace()
+		if _, err := l.client.Resource(permissionSnapshotGVR).Namespace(ns).
+			Patch(ctx, item.GetName(), types.MergePatchType, statusPatchBytes,
+				metav1.PatchOptions{}, "status"); err != nil {
+			_ = err
+		}
 	}
 }
 
