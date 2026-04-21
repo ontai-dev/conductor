@@ -15,6 +15,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -22,6 +28,155 @@ import (
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 )
+
+// ── GuardianIntakeClientAdapter ──────────────────────────────────────────────
+
+// rbacProfileGVR is the GroupVersionResource for guardian RBACProfile.
+// security.ontai.dev/v1alpha1/rbacprofiles -- guardian-schema.md §7.
+var rbacProfileGVR = schema.GroupVersionResource{
+	Group:    "security.ontai.dev",
+	Version:  "v1alpha1",
+	Resource: "rbacprofiles",
+}
+
+// rbacProfileProvisionedTimeout is the default time to wait for an RBACProfile
+// to reach provisioned=true after submitting the RBAC layer to guardian intake.
+const rbacProfileProvisionedTimeout = 120 * time.Second
+
+// rbacProfilePollInterval is the frequency at which WaitForRBACProfileProvisioned
+// polls the management cluster for RBACProfile status.
+const rbacProfilePollInterval = 5 * time.Second
+
+// GuardianIntakeClientAdapter implements GuardianIntakeClient for production use.
+// It calls guardian's /rbac-intake/pack HTTP endpoint for RBAC layer submission
+// and polls the management cluster for RBACProfile provisioned status.
+// INV-004, wrapper-schema.md §4.
+type GuardianIntakeClientAdapter struct {
+	httpClient       *http.Client
+	guardianBaseURL  string
+	managementClient dynamic.Interface
+}
+
+// NewGuardianIntakeClientAdapter creates a GuardianIntakeClientAdapter.
+// guardianBaseURL is the base URL of the guardian service (e.g., "https://guardian.ont-system").
+// managementClient is a dynamic client for the management cluster, used to poll RBACProfile status.
+func NewGuardianIntakeClientAdapter(guardianBaseURL string, managementClient dynamic.Interface) *GuardianIntakeClientAdapter {
+	return &GuardianIntakeClientAdapter{
+		httpClient:       &http.Client{},
+		guardianBaseURL:  strings.TrimRight(guardianBaseURL, "/"),
+		managementClient: managementClient,
+	}
+}
+
+// SubmitPackRBACLayer POSTs YAML manifests from the RBAC OCI layer to guardian
+// /rbac-intake/pack. Returns the count of wrapped resources on success.
+func (a *GuardianIntakeClientAdapter) SubmitPackRBACLayer(ctx context.Context, componentName string, manifests []string, targetCluster string) (int, error) {
+	body, err := json.Marshal(map[string]interface{}{
+		"componentName": componentName,
+		"manifests":     manifests,
+		"targetCluster": targetCluster,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("marshal pack intake request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		a.guardianBaseURL+"/rbac-intake/pack", bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("build pack intake request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST /rbac-intake/pack: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("POST /rbac-intake/pack returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		Wrapped int `json:"wrapped"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("decode pack intake response: %w", err)
+	}
+	return result.Wrapped, nil
+}
+
+// WaitForRBACProfileProvisioned polls the management cluster until the RBACProfile
+// for componentName in tenant-{targetCluster} namespace reaches provisioned=true,
+// or until the default timeout elapses. guardian-schema.md §7, INV-004.
+func (a *GuardianIntakeClientAdapter) WaitForRBACProfileProvisioned(ctx context.Context, targetCluster, componentName string) error {
+	return WaitForRBACProfileProvisioned(
+		ctx,
+		a.managementClient,
+		componentName,
+		"tenant-"+targetCluster,
+		rbacProfileProvisionedTimeout,
+		rbacProfilePollInterval,
+	)
+}
+
+// WaitForRBACProfileProvisioned polls kubeClient until the RBACProfile named
+// rbacProfileName in namespace reaches a Provisioned=True status condition, or
+// until timeout elapses. NotFound is retried; any other API error is fatal.
+// pollInterval controls how frequently the profile is re-fetched.
+// guardian-schema.md §7.
+func WaitForRBACProfileProvisioned(
+	ctx context.Context,
+	kubeClient dynamic.Interface,
+	rbacProfileName string,
+	namespace string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		profile, err := kubeClient.Resource(rbacProfileGVR).
+			Namespace(namespace).
+			Get(ctx, rbacProfileName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				if time.Now().After(deadline) {
+					return fmt.Errorf("RBACProfile %s/%s did not reach provisioned=true within %s",
+						namespace, rbacProfileName, timeout)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(pollInterval):
+					continue
+				}
+			}
+			return fmt.Errorf("get RBACProfile %s/%s: %w", namespace, rbacProfileName, err)
+		}
+
+		conditions, _, _ := unstructuredList(profile.Object, "status", "conditions")
+		for _, c := range conditions {
+			cond, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cond["type"] == "Provisioned" && cond["status"] == "True" {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("RBACProfile %s/%s did not reach provisioned=true within %s",
+				namespace, rbacProfileName, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
 
 // ── TalosClientAdapter ───────────────────────────────────────────────────────
 
