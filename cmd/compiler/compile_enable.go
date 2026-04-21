@@ -88,7 +88,7 @@ type operatorSpec struct {
 	// LeaderElectionLease is the name of the leader election Lease.
 	LeaderElectionLease string
 	// Args are extra command-line arguments appended after the binary entrypoint.
-	// For Conductor: ["agent", "--cluster-ref=<cluster-name>"]. conductor-schema.md §15.
+	// For Conductor: ["agent"]. CLUSTER_REF injected via downward API annotation fieldRef. conductor-schema.md §15.
 	Args []string
 	// WebhookSecret is the name of the TLS Secret to mount as webhook certs at
 	// /tmp/k8s-webhook-server/serving-certs. Non-empty for Guardian, Platform,
@@ -102,6 +102,14 @@ type operatorSpec struct {
 	// DSNSServiceIP is the DSNS LoadBalancer IP injected as DSNS_SERVICE_IP into
 	// the seam-core Deployment. Non-empty when --dsns-ip is provided to compiler enable.
 	DSNSServiceIP string
+	// ClusterRef is the cluster name for Conductor deployments. Stamped as the
+	// platform.ontai.dev/cluster-ref annotation on the Deployment and injected as
+	// the CLUSTER_REF env var via downward API fieldRef. Non-empty for Conductor only.
+	ClusterRef string
+	// Role is the operator role for Conductor deployments. Stamped as the
+	// platform.ontai.dev/role annotation on the Deployment and injected as the
+	// CONDUCTOR_ROLE env var via downward API fieldRef. Non-empty for Conductor only.
+	Role string
 }
 
 // phaseMeta is the structure written to phase-meta.yaml in each phase directory.
@@ -172,8 +180,9 @@ func platformWrapperOps(version, registry, dsnsIP string) []operatorSpec {
 }
 
 // conductorOp returns the operatorSpec for the Conductor operator.
-// clusterName is the management cluster name used to populate --cluster-ref arg.
-// Pass empty string to omit the args (used in tests without a real cluster name).
+// clusterName is the cluster name stamped as platform.ontai.dev/cluster-ref annotation
+// and injected as CLUSTER_REF env var via downward API. Pass empty string for
+// tests that do not need a real cluster name.
 func conductorOp(version, registry, clusterName string) operatorSpec {
 	// Conductor lease name is conductor-{clusterName} when clusterName is known,
 	// falling back to conductor-management for test/dry-run invocations without
@@ -188,10 +197,15 @@ func conductorOp(version, registry, clusterName string) operatorSpec {
 		Image:               registry + "/conductor:" + version,
 		ServiceAccount:      "conductor",
 		LeaderElectionLease: leaderLease,
+		// Role is always management for compiler-enable-generated deployments.
+		// Tenant cluster Conductor deployments are created by Platform.
+		Role:      "management",
+		ClusterRef: clusterName,
 	}
-	if clusterName != "" {
-		op.Args = []string{"agent", "--cluster-ref=" + clusterName}
-	}
+	// Args carries the subcommand only. CLUSTER_REF is injected via downward API
+	// annotation fieldRef so the same Deployment template works across clusters.
+	// The --cluster-ref CLI flag remains as a development fallback (BuildAgentContext).
+	op.Args = []string{"agent"}
 	return op
 }
 
@@ -2067,13 +2081,29 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 		)
 	}
 
-	// Conductor Deployment MUST carry CONDUCTOR_ROLE=management.
-	// This is a first-class field stamped by compiler enable. §15.
+	// Conductor Deployment carries CONDUCTOR_ROLE and CLUSTER_REF via downward API
+	// annotation fieldRefs. The annotations are stamped on the Deployment ObjectMeta
+	// so fieldRef reads are stable across pod restarts and cluster renames.
+	// conductor-schema.md §15 Role Declaration Contract.
 	if op.Name == "conductor" {
-		env = append(env, corev1.EnvVar{
-			Name:  "CONDUCTOR_ROLE",
-			Value: "management",
-		})
+		env = append(env,
+			corev1.EnvVar{
+				Name: "CONDUCTOR_ROLE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.annotations['platform.ontai.dev/role']",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "CLUSTER_REF",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.annotations['platform.ontai.dev/cluster-ref']",
+					},
+				},
+			},
+		)
 	}
 
 	// Conductor mounts the Ed25519 signing key Secret emitted in phase 04.
@@ -2151,20 +2181,32 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 		})
 	}
 
+	objMeta := metav1.ObjectMeta{
+		Name:      op.Name,
+		Namespace: op.Namespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/name":      op.Name,
+			"app.kubernetes.io/component": "operator",
+			"ontai.dev/managed-by":        "compiler",
+		},
+	}
+	// Conductor Deployment carries role and cluster-ref as annotations so the
+	// downward API fieldRefs in the env block resolve at pod startup.
+	if op.Name == "conductor" {
+		objMeta.Annotations = map[string]string{
+			"platform.ontai.dev/role": op.Role,
+		}
+		if op.ClusterRef != "" {
+			objMeta.Annotations["platform.ontai.dev/cluster-ref"] = op.ClusterRef
+		}
+	}
+
 	return appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      op.Name,
-			Namespace: op.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      op.Name,
-				"app.kubernetes.io/component": "operator",
-				"ontai.dev/managed-by":        "compiler",
-			},
-		},
+		ObjectMeta: objMeta,
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{

@@ -96,19 +96,30 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 }
 
 // TestEnable_ConductorDeploymentCarriesManagementRole verifies that the Conductor
-// Deployment in 04-conductor/conductor-deployment.yaml carries CONDUCTOR_ROLE=management.
-// This is the Role Declaration Contract stamped by compiler enable. §15.
+// Deployment carries CONDUCTOR_ROLE and CLUSTER_REF via downward API annotation
+// fieldRefs, not as static env values. conductor-schema.md §15.
 func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "v1.9.3-r1", defaultRegistry, "", false, "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "v1.9.3-r1", defaultRegistry, "", false, "ccs-mgmt", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
 	content := readPhaseFile(t, outDir, "04-conductor", "conductor-deployment.yaml")
 
-	// Conductor Deployment must have CONDUCTOR_ROLE=management. §15.
+	// CONDUCTOR_ROLE must be present as a downward API env var. §15.
 	assertContainsStr(t, content, "CONDUCTOR_ROLE")
+	// CLUSTER_REF must be present as a downward API env var.
+	assertContainsStr(t, content, "CLUSTER_REF")
+	// Both must use fieldRef (downward API), not static Value.
+	assertContainsStr(t, content, "platform.ontai.dev/role")
+	assertContainsStr(t, content, "platform.ontai.dev/cluster-ref")
+	// The annotations must be stamped on the Deployment.
 	assertContainsStr(t, content, "management")
+	assertContainsStr(t, content, "ccs-mgmt")
+	// --cluster-ref arg must not appear in the Deployment args.
+	if strings.Contains(content, "--cluster-ref") {
+		t.Error("conductor-deployment.yaml must not contain --cluster-ref arg; CLUSTER_REF is now injected via downward API")
+	}
 }
 
 // TestEnable_Phase00aNamespacesContent verifies that 00a-namespaces/namespaces.yaml
