@@ -44,7 +44,7 @@ func (h *bootstrapHandler) Execute(ctx context.Context, params ExecuteParams) (r
 
 	// Read the TalosCluster CR to confirm the bootstrap target.
 	// For the management cluster, TalosCluster lives in ont-system.
-	// For target clusters, it lives in tenant-{clusterRef}.
+	// For target clusters, it lives in seam-tenant-{clusterRef}.
 	// The execute-mode Job receives the ClusterRef; derive namespace.
 	ns := params.Namespace // ont-system for management cluster Jobs
 	crList, err := params.DynamicClient.Resource(talosClusterGVR).Namespace(ns).

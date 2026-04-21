@@ -398,7 +398,7 @@ func TestNodePatch_AppliesConfigFromSecret(t *testing.T) {
 	h, _ := reg.Resolve(runnerlib.CapabilityNodePatch)
 
 	clusterRef := "ccs-test"
-	ns := "tenant-" + clusterRef
+	ns := "seam-tenant-" + clusterRef
 	kubeClient := fake.NewSimpleClientset()
 	_, _ = kubeClient.CoreV1().Secrets(ns).Create(context.Background(), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "mc-patch-secret", Namespace: ns},
@@ -497,7 +497,7 @@ func TestNodeScaleUp_WritesRequestConfigMap(t *testing.T) {
 	h, _ := reg.Resolve(runnerlib.CapabilityNodeScaleUp)
 
 	clusterRef := "ccs-test"
-	ns := "tenant-" + clusterRef
+	ns := "seam-tenant-" + clusterRef
 	kubeClient := fake.NewSimpleClientset()
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
@@ -720,7 +720,7 @@ func upgradePolicyCR(clusterRef, upgradeType, talosVersion, kubeVersion string) 
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "platform.ontai.dev/v1alpha1",
 		"kind": "UpgradePolicy",
-		"metadata":   map[string]interface{}{"name": "up-" + clusterRef, "namespace": "tenant-" + clusterRef},
+		"metadata":   map[string]interface{}{"name": "up-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
 		"spec":       spec,
 	}}
 }
@@ -740,7 +740,7 @@ func nodeOperationCR(clusterRef, operation string, targetNodes []string, replica
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "platform.ontai.dev/v1alpha1",
 		"kind": "NodeOperation",
-		"metadata":   map[string]interface{}{"name": "nop-" + clusterRef, "namespace": "tenant-" + clusterRef},
+		"metadata":   map[string]interface{}{"name": "nop-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
 		"spec":       spec,
 	}}
 }
@@ -753,7 +753,7 @@ func nodeMaintenanceCR(clusterRef, operation, patchSecretName string) *unstructu
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "platform.ontai.dev/v1alpha1",
 		"kind": "NodeMaintenance",
-		"metadata":   map[string]interface{}{"name": "nm-" + clusterRef, "namespace": "tenant-" + clusterRef},
+		"metadata":   map[string]interface{}{"name": "nm-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
 		"spec":       spec,
 	}}
 }
@@ -762,7 +762,7 @@ func pkiRotationCR(clusterRef string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "platform.ontai.dev/v1alpha1",
 		"kind": "PKIRotation",
-		"metadata":   map[string]interface{}{"name": "pkir-" + clusterRef, "namespace": "tenant-" + clusterRef},
+		"metadata":   map[string]interface{}{"name": "pkir-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
 		"spec":       map[string]interface{}{},
 	}}
 }
@@ -776,7 +776,7 @@ func clusterResetCR(clusterRef string, approved bool) *unstructured.Unstructured
 		"apiVersion": "platform.ontai.dev/v1alpha1",
 		"kind": "ClusterReset",
 		"metadata": map[string]interface{}{
-			"name": "crst-" + clusterRef, "namespace": "tenant-" + clusterRef,
+			"name": "crst-" + clusterRef, "namespace": "seam-tenant-" + clusterRef,
 			"annotations": annotations,
 		},
 		"spec": map[string]interface{}{"drainGracePeriodSeconds": "30"},

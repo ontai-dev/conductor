@@ -199,11 +199,8 @@ func (h *etcdRestoreHandler) Execute(ctx context.Context, params ExecuteParams) 
 }
 
 // tenantNamespace returns the Kubernetes namespace where tenant CRDs live.
-// Management cluster CRDs are in ont-system; target cluster CRDs are in
-// tenant-{clusterRef}. platform-schema.md §2 (Namespace Conventions).
+// seam-tenant-{clusterRef} is the per-cluster namespace for all clusters.
+// Governor ruling 2026-04-21: tenant-{x} pattern abolished.
 func tenantNamespace(clusterRef string) string {
-	// The management cluster uses ont-system. Target clusters use tenant-{name}.
-	// Since the execute-mode Job runs on the management cluster, the target's
-	// tenant namespace is tenant-{clusterRef}.
-	return fmt.Sprintf("tenant-%s", clusterRef)
+	return "seam-tenant-" + clusterRef
 }
