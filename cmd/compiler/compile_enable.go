@@ -2082,8 +2082,8 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 	}
 
 	// Conductor Deployment carries CONDUCTOR_ROLE and CLUSTER_REF via downward API
-	// annotation fieldRefs. The annotations are stamped on the Deployment ObjectMeta
-	// so fieldRef reads are stable across pod restarts and cluster renames.
+	// annotation fieldRefs. The annotations are stamped on the pod template metadata
+	// so fieldRef reads resolve from the pod's own annotations at startup.
 	// conductor-schema.md §15 Role Declaration Contract.
 	if op.Name == "conductor" {
 		env = append(env,
@@ -2190,14 +2190,17 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 			"ontai.dev/managed-by":        "compiler",
 		},
 	}
-	// Conductor Deployment carries role and cluster-ref as annotations so the
-	// downward API fieldRefs in the env block resolve at pod startup.
+	// Conductor Deployment carries role and cluster-ref as pod template annotations
+	// so the downward API fieldRefs in the env block resolve at pod startup.
+	// These must be on the pod template metadata, not the Deployment metadata:
+	// fieldRef metadata.annotations resolves from the pod's own annotations.
+	var podAnnotations map[string]string
 	if op.Name == "conductor" {
-		objMeta.Annotations = map[string]string{
+		podAnnotations = map[string]string{
 			"platform.ontai.dev/role": op.Role,
 		}
 		if op.ClusterRef != "" {
-			objMeta.Annotations["platform.ontai.dev/cluster-ref"] = op.ClusterRef
+			podAnnotations["platform.ontai.dev/cluster-ref"] = op.ClusterRef
 		}
 	}
 
@@ -2220,6 +2223,7 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 						"app.kubernetes.io/name":      op.Name,
 						"app.kubernetes.io/component": "operator",
 					},
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: op.ServiceAccount,
