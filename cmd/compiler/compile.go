@@ -425,6 +425,12 @@ type PackBuildInput struct {
 	// Absent for pre-split artifacts. wrapper-schema.md §4.
 	// +optional
 	WorkloadDigest string `yaml:"workloadDigest,omitempty"`
+
+	// BasePackName is the logical pack name shared across versions (e.g., "nginx-ingress").
+	// When set, PackInstances are named {basePackName}-{clusterName} enabling version
+	// supersession. Decision 11.
+	// +optional
+	BasePackName string `yaml:"basePackName,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -1053,6 +1059,7 @@ func compilePackBuild(input, output string) error {
 			TargetClusters: in.TargetClusters,
 			RBACDigest:     in.RBACDigest,
 			WorkloadDigest: in.WorkloadDigest,
+			BasePackName:   in.BasePackName,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)

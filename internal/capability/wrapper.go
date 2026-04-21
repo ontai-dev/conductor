@@ -689,13 +689,37 @@ func (h *packDeployHandler) executeSplitPath(
 		Message:     fmt.Sprintf("%d workload manifests applied and ready", applied),
 	}
 
+	// Collect deployed resources for PackInstance.Status.DeployedResources.
+	// RBAC resources were applied by guardian rbac-intake; workload resources
+	// were applied by applyParsedManifest. wrapper-schema.md §3, Decision 11.
+	var deployedResources []runnerlib.DeployedResource
+	for _, yaml := range rbacYAMLs {
+		if pm, err := parseManifestYAML([]byte(yaml)); err == nil && pm != nil {
+			deployedResources = append(deployedResources, runnerlib.DeployedResource{
+				APIVersion: pm.apiVersion,
+				Kind:       pm.kind,
+				Namespace:  pm.namespace,
+				Name:       pm.name,
+			})
+		}
+	}
+	for _, m := range workloadManifests {
+		deployedResources = append(deployedResources, runnerlib.DeployedResource{
+			APIVersion: m.apiVersion,
+			Kind:       m.kind,
+			Namespace:  m.namespace,
+			Name:       m.name,
+		})
+	}
+
 	return runnerlib.OperationResultSpec{
-		Capability:  runnerlib.CapabilityPackDeploy,
-		Status:      runnerlib.ResultSucceeded,
-		StartedAt:   now,
-		CompletedAt: time.Now().UTC(),
-		Artifacts:   artifacts,
-		Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep, readyStep},
+		Capability:        runnerlib.CapabilityPackDeploy,
+		Status:            runnerlib.ResultSucceeded,
+		StartedAt:         now,
+		CompletedAt:       time.Now().UTC(),
+		Artifacts:         artifacts,
+		Steps:             []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep, readyStep},
+		DeployedResources: deployedResources,
 	}, nil
 }
 
