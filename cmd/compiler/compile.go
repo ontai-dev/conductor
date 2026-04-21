@@ -465,10 +465,35 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.RegistryURL == "" {
 		return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required", path)
 	}
-	if in.Digest == "" {
-		return PackBuildInput{}, fmt.Errorf("input file %q: digest is required", path)
+	hasSplitDigests := in.RBACDigest != "" && in.WorkloadDigest != ""
+	if in.Digest == "" && !hasSplitDigests {
+		return PackBuildInput{}, fmt.Errorf("input file %q: digest is required (or both rbacDigest and workloadDigest for two-layer packs)", path)
 	}
 	return in, nil
+}
+
+// writeSeamTenantNamespaceManifest writes a Namespace manifest for
+// seam-tenant-{clusterName} to the output directory. The manifest carries the
+// ontai.dev/tenant and ontai.dev/cluster labels required by the namespace model.
+// For mode=import clusters: Platform does not create this namespace, so the compiler
+// bootstrap output must include it for GitOps to apply. Returns the filename.
+// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
+func writeSeamTenantNamespaceManifest(clusterName, output string) (string, error) {
+	ns := corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "seam-tenant-" + clusterName,
+			Labels: map[string]string{
+				"ontai.dev/tenant":  "true",
+				"ontai.dev/cluster": clusterName,
+			},
+		},
+	}
+	const filename = "seam-tenant-namespace.yaml"
+	if err := writeCRYAML(output, "seam-tenant-namespace", ns); err != nil {
+		return "", fmt.Errorf("write seam-tenant namespace manifest: %w", err)
+	}
+	return filename, nil
 }
 
 // writeCRYAML marshals the given object to Kubernetes CR YAML and writes it to
@@ -780,8 +805,16 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	// C-35: When importExistingCluster=true, also emit the talosconfig Secret so
 	// Platform can generate the kubeconfig via ensureKubeconfigSecret. Applies to
 	// both the machineConfigPaths path (local file PKI) and the Kubernetes API path
-	// (Seam clusters). Failure is a warning — the operator can apply manually.
+	// (Seam clusters). Failure is a warning -- the operator can apply manually.
+	// Also emit the seam-tenant namespace manifest (Governor ruling 2026-04-21:
+	// Platform does not create seam-tenant-{name} for mode=import clusters; the
+	// compiler bootstrap output must include it).
 	if in.ImportExistingCluster {
+		nsFile, err := writeSeamTenantNamespaceManifest(in.Name, output)
+		if err != nil {
+			return err
+		}
+		secretNames = append([]string{nsFile}, secretNames...)
 		if tcfgFile, err := writeTalosconfigSecret(in, talosconfigPath, output); err != nil {
 			return err
 		} else if tcfgFile != "" {
@@ -848,10 +881,9 @@ func nodeRoleToMachineType(role string) (machine.Type, error) {
 // cannot be read or written — failure is a warning, not fatal; the operator can apply
 // the Secret manually. platform-schema.md §9, conductor-schema.md §9.
 func writeTalosconfigSecret(in ClusterInput, talosconfigPath, output string) (string, error) {
-	ns := in.Namespace
-	if ns == "" {
-		ns = "seam-system"
-	}
+	// talosconfig Secret lives in seam-tenant-{cluster} per the namespace model.
+	// Governor ruling 2026-04-21: seam-tenant-{cluster} holds talosconfig Secret.
+	ns := "seam-tenant-" + in.Name
 
 	tcfgPath := talosconfigPath
 	if tcfgPath == "" {
@@ -1049,9 +1081,25 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		return fmt.Errorf("compileImportTalosconfigSecret: read talosconfig %q: %w", talosConfigPath, err)
 	}
 
-	ns := in.Namespace
-	if ns == "" {
-		ns = "seam-system"
+	if err := os.MkdirAll(output, 0755); err != nil {
+		return fmt.Errorf("compileImportTalosconfigSecret: create output dir: %w", err)
+	}
+
+	// Emit the seam-tenant namespace manifest so GitOps can create the namespace
+	// before applying the Secrets. For mode=import, Platform does not create
+	// seam-tenant-{name}; the compiler output must include it.
+	// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
+	if _, err := writeSeamTenantNamespaceManifest(in.Name, output); err != nil {
+		return err
+	}
+
+	// talosconfig Secret lives in seam-tenant-{cluster} per the namespace model.
+	// Governor ruling 2026-04-21: seam-tenant-{cluster} holds talosconfig Secret.
+	tenantNS := "seam-tenant-" + in.Name
+	// TalosCluster CR namespace is seam-system (operator-facing CR, not tenant-scoped).
+	crNS := in.Namespace
+	if crNS == "" {
+		crNS = "seam-system"
 	}
 
 	secretName := "seam-mc-" + in.Name + "-talosconfig"
@@ -1062,7 +1110,7 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
-			Namespace: ns,
+			Namespace: tenantNS,
 			Labels: map[string]string{
 				"ontai.dev/cluster":    in.Name,
 				"ontai.dev/managed-by": "compiler",
@@ -1072,10 +1120,6 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		StringData: map[string]string{
 			"talosconfig": string(data),
 		},
-	}
-
-	if err := os.MkdirAll(output, 0755); err != nil {
-		return fmt.Errorf("compileImportTalosconfigSecret: create output dir: %w", err)
 	}
 
 	if err := writeCRYAML(output, secretName, secret); err != nil {
@@ -1098,7 +1142,7 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,
-			Namespace: ns,
+			Namespace: crNS,
 			Annotations: map[string]string{
 				"ontai.dev/owns-runnerconfig": "true",
 			},

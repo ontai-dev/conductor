@@ -86,14 +86,14 @@ func rbacProfileCR(name, namespace string, provisioned bool) *unstructured.Unstr
 // TestWaitForRBACProfileProvisioned_ProvisionedOnFirstPoll verifies that the
 // function returns nil immediately when the profile is already provisioned.
 func TestWaitForRBACProfileProvisioned_ProvisionedOnFirstPoll(t *testing.T) {
-	profile := rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", true)
+	profile := rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", true)
 	client := newRBACProfileDynClient(profile)
 
 	err := capability.WaitForRBACProfileProvisioned(
 		context.Background(),
 		client,
 		"nginx-ingress",
-		"tenant-ccs-mgmt",
+		"seam-tenant-ccs-mgmt",
 		2*time.Second,
 		10*time.Millisecond,
 	)
@@ -106,7 +106,7 @@ func TestWaitForRBACProfileProvisioned_ProvisionedOnFirstPoll(t *testing.T) {
 // function retries when provisioned=false and returns nil after provisioned=true.
 func TestWaitForRBACProfileProvisioned_RetryUntilProvisioned(t *testing.T) {
 	// Start with provisioned=false. After the first Get, switch to true.
-	profile := rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", false)
+	profile := rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", false)
 	client := newRBACProfileDynClient(profile)
 
 	calls := 0
@@ -114,17 +114,17 @@ func TestWaitForRBACProfileProvisioned_RetryUntilProvisioned(t *testing.T) {
 		calls++
 		if calls < 2 {
 			// First call: return false
-			return true, rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", false), nil
+			return true, rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", false), nil
 		}
 		// Subsequent calls: return true
-		return true, rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", true), nil
+		return true, rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", true), nil
 	})
 
 	err := capability.WaitForRBACProfileProvisioned(
 		context.Background(),
 		client,
 		"nginx-ingress",
-		"tenant-ccs-mgmt",
+		"seam-tenant-ccs-mgmt",
 		2*time.Second,
 		10*time.Millisecond,
 	)
@@ -148,14 +148,14 @@ func TestWaitForRBACProfileProvisioned_NotFoundRetried(t *testing.T) {
 			// First two calls: not found (proper API error so apierrors.IsNotFound passes)
 			return true, nil, apierrors.NewNotFound(rbacProfileTestGVR.GroupResource(), "nginx-ingress")
 		}
-		return true, rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", true), nil
+		return true, rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", true), nil
 	})
 
 	err := capability.WaitForRBACProfileProvisioned(
 		context.Background(),
 		client,
 		"nginx-ingress",
-		"tenant-ccs-mgmt",
+		"seam-tenant-ccs-mgmt",
 		2*time.Second,
 		10*time.Millisecond,
 	)
@@ -168,18 +168,18 @@ func TestWaitForRBACProfileProvisioned_NotFoundRetried(t *testing.T) {
 // returns a non-nil error when the profile never reaches provisioned=true.
 func TestWaitForRBACProfileProvisioned_TimeoutReturnsError(t *testing.T) {
 	// Profile always returns provisioned=false.
-	profile := rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", false)
+	profile := rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", false)
 	client := newRBACProfileDynClient(profile)
 
 	client.Fake.PrependReactor("get", "rbacprofiles", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, rbacProfileCR("nginx-ingress", "tenant-ccs-mgmt", false), nil
+		return true, rbacProfileCR("nginx-ingress", "seam-tenant-ccs-mgmt", false), nil
 	})
 
 	err := capability.WaitForRBACProfileProvisioned(
 		context.Background(),
 		client,
 		"nginx-ingress",
-		"tenant-ccs-mgmt",
+		"seam-tenant-ccs-mgmt",
 		50*time.Millisecond,
 		10*time.Millisecond,
 	)
@@ -201,7 +201,7 @@ func TestWaitForRBACProfileProvisioned_ErrorMessageNamesProfileAndDuration(t *te
 		context.Background(),
 		client,
 		"my-pack",
-		"tenant-ccs-dev",
+		"seam-tenant-ccs-dev",
 		timeout,
 		10*time.Millisecond,
 	)
@@ -232,7 +232,7 @@ func TestWaitForRBACProfileProvisioned_NonNotFoundErrorPropagates(t *testing.T) 
 		context.Background(),
 		client,
 		"my-pack",
-		"tenant-ccs-mgmt",
+		"seam-tenant-ccs-mgmt",
 		2*time.Second,
 		10*time.Millisecond,
 	)

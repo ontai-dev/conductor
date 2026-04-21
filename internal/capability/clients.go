@@ -76,7 +76,7 @@ type GuardianIntakeClient interface {
 	SubmitPackRBACLayer(ctx context.Context, componentName string, manifests []string, targetCluster string) (int, error)
 
 	// WaitForRBACProfileProvisioned polls until the RBACProfile for componentName
-	// in the tenant-{targetCluster} namespace reaches provisioned=true, or until
+	// in the seam-tenant-{targetCluster} namespace reaches provisioned=true, or until
 	// ctx is cancelled. Returns nil when provisioned. guardian-schema.md §7.
 	WaitForRBACProfileProvisioned(ctx context.Context, targetCluster, componentName string) error
 }

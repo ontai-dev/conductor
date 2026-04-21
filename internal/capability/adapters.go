@@ -112,14 +112,14 @@ func (a *GuardianIntakeClientAdapter) SubmitPackRBACLayer(ctx context.Context, c
 }
 
 // WaitForRBACProfileProvisioned polls the management cluster until the RBACProfile
-// for componentName in tenant-{targetCluster} namespace reaches provisioned=true,
+// for componentName in seam-tenant-{targetCluster} namespace reaches provisioned=true,
 // or until the default timeout elapses. guardian-schema.md §7, INV-004.
 func (a *GuardianIntakeClientAdapter) WaitForRBACProfileProvisioned(ctx context.Context, targetCluster, componentName string) error {
 	return WaitForRBACProfileProvisioned(
 		ctx,
 		a.managementClient,
 		componentName,
-		"tenant-"+targetCluster,
+		"seam-tenant-"+targetCluster,
 		rbacProfileProvisionedTimeout,
 		rbacProfilePollInterval,
 	)
