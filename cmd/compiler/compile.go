@@ -413,6 +413,18 @@ type PackBuildInput struct {
 	// wrapper-schema.md §4. WS3.
 	// +optional
 	TargetClusters []string `yaml:"targetClusters,omitempty"`
+
+	// RBACDigest is the OCI digest of the RBAC layer (SA, Role, CR, RB, CRB).
+	// Set by the human or pipeline after running the two-layer OCI push.
+	// Absent for pre-split artifacts. wrapper-schema.md §4.
+	// +optional
+	RBACDigest string `yaml:"rbacDigest,omitempty"`
+
+	// WorkloadDigest is the OCI digest of the workload layer (all non-RBAC manifests).
+	// Set by the human or pipeline after running the two-layer OCI push.
+	// Absent for pre-split artifacts. wrapper-schema.md §4.
+	// +optional
+	WorkloadDigest string `yaml:"workloadDigest,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -1007,6 +1019,8 @@ func compilePackBuild(input, output string) error {
 			Checksum:       in.Checksum,
 			SourceBuildRef: in.SourceBuildRef,
 			TargetClusters: in.TargetClusters,
+			RBACDigest:     in.RBACDigest,
+			WorkloadDigest: in.WorkloadDigest,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
