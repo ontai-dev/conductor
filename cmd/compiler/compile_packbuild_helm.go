@@ -144,17 +144,16 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 		allYAML.WriteString("\n")
 	}
 
-	// Parse and split manifests into RBAC and workload layers.
+	// Parse and split manifests into three buckets: RBAC, cluster-scoped, workload.
 	manifests, err := ParsePackManifests(allYAML.String())
 	if err != nil {
 		return fmt.Errorf("helmCompilePackBuild: parse rendered manifests: %w", err)
 	}
-	rbacManifests, workloadManifests := SplitRBACAndWorkload(manifests)
+	rbacManifests, clusterScopedManifests, workloadManifests := SplitManifests(manifests)
 
-	// Inject Namespace manifest into workload layer (same logic as manual path).
-	// The Namespace is derived from the first namespace found in workload manifests,
-	// or from in.Name when no namespace is found. This ensures the Namespace exists
-	// on the target cluster before workload resources are applied.
+	// Inject Namespace manifest into workload layer. The Namespace is derived from
+	// the first namespace found in workload manifests so it exists on the target
+	// cluster before workload resources are applied.
 	if ns := detectNamespace(workloadManifests); ns != "" {
 		nsMfst := PackManifest{
 			Kind: "Namespace",
@@ -166,6 +165,7 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 
 	// Serialize layers.
 	rbacLayer := serializeManifests(rbacManifests)
+	clusterScopedLayer := serializeManifests(clusterScopedManifests)
 	workloadLayer := serializeManifests(workloadManifests)
 
 	// Push RBAC layer to OCI registry, tagged as {version}-rbac.
@@ -175,6 +175,16 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 		return fmt.Errorf("helmCompilePackBuild: push RBAC layer: %w", err)
 	}
 
+	// Push cluster-scoped layer if non-empty, tagged as {version}-cluster-scoped.
+	var clusterScopedDigest string
+	if len(clusterScopedManifests) > 0 {
+		csTag := in.Version + "-cluster-scoped"
+		clusterScopedDigest, err = ociPushLayer(ctx, in.RegistryURL, csTag, []byte(clusterScopedLayer))
+		if err != nil {
+			return fmt.Errorf("helmCompilePackBuild: push cluster-scoped layer: %w", err)
+		}
+	}
+
 	// Push workload layer, tagged as {version}-workload.
 	workloadTag := in.Version + "-workload"
 	workloadDigest, err := ociPushLayer(ctx, in.RegistryURL, workloadTag, []byte(workloadLayer))
@@ -182,8 +192,8 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 		return fmt.Errorf("helmCompilePackBuild: push workload layer: %w", err)
 	}
 
-	// Compute checksum over combined RBAC+workload content.
-	checksum := computeChecksum(rbacLayer + workloadLayer)
+	// Compute checksum over all layer content.
+	checksum := computeChecksum(rbacLayer + clusterScopedLayer + workloadLayer)
 
 	// Emit ClusterPack CR.
 	ns := in.Namespace
@@ -202,12 +212,13 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 				URL:    in.RegistryURL,
 				Digest: workloadDigest,
 			},
-			Checksum:       checksum,
-			SourceBuildRef: in.SourceBuildRef,
-			TargetClusters: in.TargetClusters,
-			RBACDigest:     rbacDigest,
-			WorkloadDigest: workloadDigest,
-			BasePackName:   in.BasePackName,
+			Checksum:            checksum,
+			SourceBuildRef:      in.SourceBuildRef,
+			TargetClusters:      in.TargetClusters,
+			RBACDigest:          rbacDigest,
+			WorkloadDigest:      workloadDigest,
+			ClusterScopedDigest: clusterScopedDigest,
+			BasePackName:        in.BasePackName,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)

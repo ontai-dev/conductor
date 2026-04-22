@@ -16,8 +16,13 @@ import (
 	"errors"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/ontai-dev/conductor/internal/capability"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
@@ -469,5 +474,239 @@ metadata:
 	// separators, each document is submitted as an individual string to guardian.
 	if len(guardian.submitted) != 2 {
 		t.Errorf("expected 2 YAML strings submitted (one per document); got %d", len(guardian.submitted))
+	}
+}
+
+// newThreeBucketDynClient returns a fake dynamic client that handles three-bucket
+// pack apply. It registers GVRs for Deployment and MutatingWebhookConfiguration
+// and prepends a Reactor that accepts any Patch call without error (SSA upsert
+// semantics -- the fake client returns "not found" by default for objects that
+// don't exist, which would fail applyParsedManifest in unit tests).
+func newThreeBucketDynClient(objects ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
+	kinds := map[string]schema.GroupVersionResource{
+		"PackExecution":                {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packexecutions"},
+		"ClusterPack":                  {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks"},
+		"Deployment":                   {Group: "apps", Version: "v1", Resource: "deployments"},
+		"MutatingWebhookConfiguration": {Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"},
+		"Namespace":                    {Group: "", Version: "v1", Resource: "namespaces"},
+	}
+	s := runtime.NewScheme()
+	for kind, gvr := range kinds {
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: kind},
+			&unstructured.Unstructured{},
+		)
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: kind + "List"},
+			&unstructured.UnstructuredList{},
+		)
+	}
+	client := dynamicfake.NewSimpleDynamicClient(s)
+	// Accept any Patch call without error. The fake client rejects Patch on objects
+	// that don't exist; this reactor makes Patch behave like an SSA upsert.
+	client.PrependReactor("patch", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &unstructured.Unstructured{}, nil
+	})
+	wrapperGVRs := map[string]schema.GroupVersionResource{
+		"PackExecution": {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packexecutions"},
+		"ClusterPack":   {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks"},
+	}
+	for _, obj := range objects {
+		gvr, ok := wrapperGVRs[obj.GetKind()]
+		if !ok {
+			continue
+		}
+		ns := obj.GetNamespace()
+		if ns == "" {
+			_, _ = client.Resource(gvr).Create(context.Background(), obj, metav1.CreateOptions{})
+		} else {
+			_, _ = client.Resource(gvr).Namespace(ns).Create(context.Background(), obj, metav1.CreateOptions{})
+		}
+	}
+	return client
+}
+
+// clusterPackThreeBucketCR builds a ClusterPack with rbacDigest, clusterScopedDigest,
+// and workloadDigest all set (three-bucket pack, e.g., cert-manager).
+func clusterPackThreeBucketCR(clusterRef, name, version, registryURL, rbacDigest, clusterScopedDigest, workloadDigest string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "infra.ontai.dev/v1alpha1",
+		"kind":       "ClusterPack",
+		"metadata":   map[string]interface{}{"name": name, "namespace": "seam-tenant-" + clusterRef},
+		"spec": map[string]interface{}{
+			"version": version,
+			"registryRef": map[string]interface{}{
+				"url": registryURL,
+			},
+			"rbacDigest":          rbacDigest,
+			"clusterScopedDigest": clusterScopedDigest,
+			"workloadDigest":      workloadDigest,
+		},
+	}}
+}
+
+// simpleWorkloadLayerTarGz builds a tar.gz with a ConfigMap-only workload.
+// ConfigMap has no readiness check, so waitForStageReady skips it entirely.
+// Used in tests that need to verify a Succeeded result status without a live cluster.
+func simpleWorkloadLayerTarGz(t *testing.T) []byte {
+	t.Helper()
+	const cmYAML = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pack-config
+  namespace: cert-manager`
+	return makeTarGz(t, map[string][]byte{"workload.yaml": []byte(cmYAML)})
+}
+
+// clusterScopedLayerTarGz builds a tar.gz blob containing a MutatingWebhookConfiguration.
+func clusterScopedLayerTarGz(t *testing.T) []byte {
+	t.Helper()
+	const webhookYAML = `apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: cert-manager-webhook`
+	return makeTarGz(t, map[string][]byte{"cluster-scoped.yaml": []byte(webhookYAML)})
+}
+
+// threeWayOCIClient serves rbac, cluster-scoped, and workload blobs by digest suffix.
+type threeWayOCIClient struct {
+	rbacBlob          []byte
+	clusterScopedBlob []byte
+	workloadBlob      []byte
+	rbacDigest        string
+	clusterScopedDigest string
+	workloadDigest    string
+	pulledRefs        []string
+}
+
+func (c *threeWayOCIClient) PullManifests(_ context.Context, ref string) ([][]byte, error) {
+	c.pulledRefs = append(c.pulledRefs, ref)
+	if c.rbacDigest != "" && containsSuffix(ref, c.rbacDigest) {
+		return [][]byte{c.rbacBlob}, nil
+	}
+	if c.clusterScopedDigest != "" && containsSuffix(ref, c.clusterScopedDigest) {
+		return [][]byte{c.clusterScopedBlob}, nil
+	}
+	if c.workloadDigest != "" && containsSuffix(ref, c.workloadDigest) {
+		return [][]byte{c.workloadBlob}, nil
+	}
+	return nil, nil
+}
+
+var _ capability.OCIRegistryClient = (*threeWayOCIClient)(nil)
+
+// TestPackDeploy_SplitPath_Step6_AppliesClusterScopedBeforeWorkload verifies that
+// when clusterScopedDigest is present, the apply-cluster-scoped step appears in
+// the result and is recorded before apply-workload. Governor ruling 2026-04-22.
+func TestPackDeploy_SplitPath_Step6_AppliesClusterScopedBeforeWorkload(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityPackDeploy)
+
+	clusterRef := "ccs-mgmt"
+	oci := &threeWayOCIClient{
+		rbacBlob:            rbacLayerTarGz(t),
+		clusterScopedBlob:   clusterScopedLayerTarGz(t),
+		workloadBlob:        simpleWorkloadLayerTarGz(t),
+		rbacDigest:          "sha256:rbac001",
+		clusterScopedDigest: "sha256:cs001",
+		workloadDigest:      "sha256:wl001",
+	}
+	pe := packExecutionCR(clusterRef, "cert-manager", "v1.14.0-r1")
+	cp := clusterPackThreeBucketCR(clusterRef, "cert-manager", "v1.14.0-r1",
+		"registry.example.com/cert-manager", "sha256:rbac001", "sha256:cs001", "sha256:wl001")
+	dynClient := newThreeBucketDynClient(pe, cp)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityPackDeploy,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			OCIClient:      oci,
+			KubeClient:     fake.NewSimpleClientset(),
+			DynamicClient:  dynClient,
+			GuardianClient: &stubGuardianClient{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify step order: apply-cluster-scoped must appear before apply-workload.
+	stepNames := make([]string, 0, len(result.Steps))
+	for _, s := range result.Steps {
+		stepNames = append(stepNames, s.Name)
+	}
+	csIdx := -1
+	wlIdx := -1
+	for i, n := range stepNames {
+		if n == "apply-cluster-scoped" {
+			csIdx = i
+		}
+		if n == "apply-workload" {
+			wlIdx = i
+		}
+	}
+	if csIdx < 0 {
+		t.Errorf("apply-cluster-scoped step missing; got steps: %v", stepNames)
+	}
+	if wlIdx < 0 {
+		t.Errorf("apply-workload step missing; got steps: %v", stepNames)
+	}
+	if csIdx >= 0 && wlIdx >= 0 && csIdx > wlIdx {
+		t.Errorf("apply-cluster-scoped (index %d) must precede apply-workload (index %d)", csIdx, wlIdx)
+	}
+
+	// Verify the cluster-scoped layer was actually pulled.
+	foundCS := false
+	for _, ref := range oci.pulledRefs {
+		if containsSuffix(ref, "sha256:cs001") {
+			foundCS = true
+		}
+	}
+	if !foundCS {
+		t.Errorf("cluster-scoped layer digest sha256:cs001 was never pulled; pulled refs: %v", oci.pulledRefs)
+	}
+}
+
+// TestPackDeploy_SplitPath_Step6_SkippedWhenNoClusterScopedDigest verifies that when
+// clusterScopedDigest is absent (nginx-like pack), the apply-cluster-scoped step
+// is not recorded and the pack still succeeds. wrapper-schema.md §4.
+func TestPackDeploy_SplitPath_Step6_SkippedWhenNoClusterScopedDigest(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityPackDeploy)
+
+	clusterRef := "ccs-mgmt"
+	oci := &splitStubOCIClient{
+		rbacBlob:       rbacLayerTarGz(t),
+		workloadBlob:   simpleWorkloadLayerTarGz(t),
+		rbacDigest:     "sha256:rbac002",
+		workloadDigest: "sha256:wl002",
+	}
+	pe := packExecutionCR(clusterRef, "nginx-ingress", "v1.0.0")
+	cp := clusterPackSplitCR(clusterRef, "nginx-ingress", "v1.0.0",
+		"registry.example.com/nginx-ingress", "sha256:rbac002", "sha256:wl002")
+	dynClient := newThreeBucketDynClient(pe, cp)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityPackDeploy,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			OCIClient:      oci,
+			KubeClient:     fake.NewSimpleClientset(),
+			DynamicClient:  dynClient,
+			GuardianClient: &stubGuardianClient{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected Succeeded; got %q", result.Status)
+	}
+	for _, s := range result.Steps {
+		if s.Name == "apply-cluster-scoped" {
+			t.Error("apply-cluster-scoped step must not appear when clusterScopedDigest is absent")
+		}
 	}
 }

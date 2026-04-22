@@ -279,6 +279,243 @@ metadata:
 	}
 }
 
+// certManagerLikeManifests is a minimal set of manifests resembling cert-manager
+// chart output: CRD, MutatingWebhookConfiguration, Deployment, ClusterRole, SA.
+const certManagerLikeManifests = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: certificates.cert-manager.io
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: cert-manager-webhook
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager
+  namespace: cert-manager`
+
+// TestSplitManifests_MutatingWebhookLandsInClusterScopedSlice verifies that a
+// MutatingWebhookConfiguration manifest is routed to the clusterScoped bucket,
+// not the workload bucket. Governor ruling 2026-04-22 three-bucket split.
+func TestSplitManifests_MutatingWebhookLandsInClusterScopedSlice(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	_, clusterScoped, workload := packbuild.SplitManifests(manifests)
+
+	csKinds := map[string]bool{}
+	for _, m := range clusterScoped {
+		csKinds[m.Kind] = true
+	}
+	if !csKinds["MutatingWebhookConfiguration"] {
+		t.Errorf("clusterScoped slice missing MutatingWebhookConfiguration; got: %v", collectKinds(clusterScoped))
+	}
+	for _, m := range workload {
+		if m.Kind == "MutatingWebhookConfiguration" {
+			t.Errorf("workload slice must not contain MutatingWebhookConfiguration")
+		}
+	}
+}
+
+// TestSplitManifests_CRDLandsInClusterScopedSlice verifies that a
+// CustomResourceDefinition manifest is routed to the clusterScoped bucket.
+func TestSplitManifests_CRDLandsInClusterScopedSlice(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	_, clusterScoped, _ := packbuild.SplitManifests(manifests)
+
+	csKinds := map[string]bool{}
+	for _, m := range clusterScoped {
+		csKinds[m.Kind] = true
+	}
+	if !csKinds["CustomResourceDefinition"] {
+		t.Errorf("clusterScoped slice missing CustomResourceDefinition; got: %v", collectKinds(clusterScoped))
+	}
+}
+
+// TestSplitManifests_DeploymentLandsInWorkloadSlice verifies that a Deployment
+// manifest is routed to the workload bucket, not clusterScoped or rbac.
+func TestSplitManifests_DeploymentLandsInWorkloadSlice(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	rbac, clusterScoped, workload := packbuild.SplitManifests(manifests)
+
+	for _, m := range rbac {
+		if m.Kind == "Deployment" {
+			t.Error("Deployment must not land in rbac slice")
+		}
+	}
+	for _, m := range clusterScoped {
+		if m.Kind == "Deployment" {
+			t.Error("Deployment must not land in clusterScoped slice")
+		}
+	}
+	found := false
+	for _, m := range workload {
+		if m.Kind == "Deployment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Deployment not found in workload slice; got: %v", collectKinds(workload))
+	}
+}
+
+// TestSplitManifests_ClusterRoleLandsInRBACSlice verifies that ClusterRole is
+// routed to the rbac bucket, not the clusterScoped bucket.
+func TestSplitManifests_ClusterRoleLandsInRBACSlice(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	rbac, clusterScoped, _ := packbuild.SplitManifests(manifests)
+
+	rbacKinds := map[string]bool{}
+	for _, m := range rbac {
+		rbacKinds[m.Kind] = true
+	}
+	if !rbacKinds["ClusterRole"] {
+		t.Errorf("rbac slice missing ClusterRole; got: %v", collectKinds(rbac))
+	}
+	for _, m := range clusterScoped {
+		if m.Kind == "ClusterRole" {
+			t.Error("ClusterRole must not land in clusterScoped slice")
+		}
+	}
+}
+
+// TestSplitManifests_AllClusterScopedKindsRecognized verifies that all eight
+// cluster-scoped non-RBAC kinds route to the clusterScoped bucket.
+func TestSplitManifests_AllClusterScopedKindsRecognized(t *testing.T) {
+	const allCS = `apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mwc
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: vwc
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: crd
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: apix
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: pc
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sc
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: ic
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ci`
+
+	manifests, err := packbuild.ParseManifests(allCS)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	rbac, clusterScoped, workload := packbuild.SplitManifests(manifests)
+
+	if len(rbac) != 0 {
+		t.Errorf("expected empty rbac slice; got %d: %v", len(rbac), collectKinds(rbac))
+	}
+	if len(workload) != 0 {
+		t.Errorf("expected empty workload slice; got %d: %v", len(workload), collectKinds(workload))
+	}
+	if len(clusterScoped) != 8 {
+		t.Errorf("expected 8 cluster-scoped manifests; got %d: %v", len(clusterScoped), collectKinds(clusterScoped))
+	}
+}
+
+// TestSplitManifests_NginxHasNoClusterScopedManifests verifies that a manifest
+// set resembling nginx-ingress (no webhooks or CRDs) produces an empty
+// clusterScoped slice. Ensures the three-bucket split is backward compatible.
+func TestSplitManifests_NginxHasNoClusterScopedManifests(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(nginxLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	_, clusterScoped, _ := packbuild.SplitManifests(manifests)
+
+	if len(clusterScoped) != 0 {
+		t.Errorf("nginx manifests should have no cluster-scoped resources; got %d: %v", len(clusterScoped), collectKinds(clusterScoped))
+	}
+}
+
+// TestSplitManifests_LegacyTwoBucketPreserved verifies that SplitRBACAndWorkload
+// still works after the three-bucket refactor: cluster-scoped resources merge
+// into the workload slice for backward-compatible callers.
+func TestSplitManifests_LegacyTwoBucketPreserved(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerLikeManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+
+	rbac, workload := packbuild.SplitRBACAndWorkload(manifests)
+
+	// CRD and MutatingWebhookConfiguration must appear in workload (merged from cs).
+	workloadKinds := map[string]bool{}
+	for _, m := range workload {
+		workloadKinds[m.Kind] = true
+	}
+	if !workloadKinds["CustomResourceDefinition"] {
+		t.Error("legacy SplitRBACAndWorkload: CRD missing from workload slice")
+	}
+	if !workloadKinds["MutatingWebhookConfiguration"] {
+		t.Error("legacy SplitRBACAndWorkload: MutatingWebhookConfiguration missing from workload slice")
+	}
+	// ClusterRole must remain in rbac slice.
+	rbacKinds := map[string]bool{}
+	for _, m := range rbac {
+		rbacKinds[m.Kind] = true
+	}
+	if !rbacKinds["ClusterRole"] {
+		t.Error("legacy SplitRBACAndWorkload: ClusterRole missing from rbac slice")
+	}
+}
+
 // collectKinds returns a comma-separated string of manifest kinds for test diagnostics.
 func collectKinds(manifests []packbuild.Manifest) string {
 	kinds := make([]string, len(manifests))
