@@ -112,7 +112,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("list ClusterPack in %s: %v", peTenantNS, err)), nil
 	}
 
-	var ociRef, expectedChecksum, rbacDigest, workloadDigest string
+	var ociRef, registryBaseURL, expectedChecksum, rbacDigest, workloadDigest string
 	var executionStages []string // stage names in declared order; empty → single-pass fallback
 	for _, item := range cpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
@@ -126,6 +126,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("ClusterPack %s/%s has no registryRef.url", clusterPackName, clusterPackVersion)), nil
 		}
+		registryBaseURL = url
 		if digest != "" {
 			ociRef = url + "@" + digest
 		} else {
@@ -163,7 +164,10 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	// workload layer is applied separately after guardian acknowledges. INV-004,
 	// wrapper-schema.md §4. Legacy packs (no rbacDigest) fall through to single-layer path.
 	if rbacDigest != "" {
-		return h.executeSplitPath(ctx, params, now, clusterPackName, ociRef, workloadDigest, rbacDigest, expectedChecksum, executionStages)
+		// Pass the base registry URL (without digest suffix) so executeSplitPath
+		// can construct correct layer refs: baseURL@rbacDigest and baseURL@workloadDigest.
+		// ociRef (which appends the workload digest) is for the single-layer path only.
+		return h.executeSplitPath(ctx, params, now, clusterPackName, registryBaseURL, workloadDigest, rbacDigest, expectedChecksum, executionStages)
 	}
 
 	// Step 1 — Fetch manifests from OCI registry.

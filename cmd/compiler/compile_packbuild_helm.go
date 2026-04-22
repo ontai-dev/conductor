@@ -123,6 +123,7 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 	}
 
 	// Join rendered templates into a single multi-document YAML string.
+	// Skip NOTES.txt files -- they are plain text, not Kubernetes manifests.
 	var allYAML strings.Builder
 	// Sort by filename for deterministic output.
 	keys := make([]string, 0, len(rendered))
@@ -131,6 +132,9 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		if strings.HasSuffix(strings.ToLower(k), "notes.txt") {
+			continue
+		}
 		v := strings.TrimSpace(rendered[k])
 		if v == "" {
 			continue

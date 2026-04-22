@@ -243,6 +243,99 @@ func TestPackDeploy_SplitPath_SkipsWorkloadWhenIntakeFails(t *testing.T) {
 	}
 }
 
+// TestPackDeploy_SplitPath_LayerRefsUsesBaseURLWhenRegistryRefDigestSet verifies
+// that when a ClusterPack carries spec.registryRef.digest (helm-compiled packs),
+// the RBAC and workload layer OCI refs are constructed as baseURL@layerDigest and
+// NOT as baseURL@registryRefDigest@layerDigest. The double-digest form is invalid
+// and causes HTTP 404 when the conductor pull step fetches the manifest.
+// conductor PR #17, COMPILER-HELM-E2E.
+func TestPackDeploy_SplitPath_LayerRefsUsesBaseURLWhenRegistryRefDigestSet(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityPackDeploy)
+
+	clusterRef := "ccs-mgmt"
+	const (
+		baseURL        = "registry.example.com/nginx-ingress"
+		registryDigest = "sha256:workload111" // registryRef.digest (workload)
+		rbacDigest     = "sha256:rbacaaa"
+		workloadDigest = "sha256:workload111"
+	)
+
+	// Track every ref PullManifests is called with.
+	var pulledRefs []string
+	oci := &recordingOCIClient{
+		rbacBlob:     rbacLayerTarGz(t),
+		workloadBlob: workloadLayerTarGz(t),
+		rbacDigest:   rbacDigest,
+		onPull:       func(ref string) { pulledRefs = append(pulledRefs, ref) },
+	}
+
+	// ClusterPack with registryRef.digest set (helm-compiled pack).
+	cp := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "infra.ontai.dev/v1alpha1",
+		"kind":       "ClusterPack",
+		"metadata":   map[string]interface{}{"name": "nginx-ingress", "namespace": "seam-tenant-" + clusterRef},
+		"spec": map[string]interface{}{
+			"version": "v1.0.0",
+			"registryRef": map[string]interface{}{
+				"url":    baseURL,
+				"digest": registryDigest,
+			},
+			"rbacDigest":     rbacDigest,
+			"workloadDigest": workloadDigest,
+		},
+	}}
+	pe := packExecutionCR(clusterRef, "nginx-ingress", "v1.0.0")
+	dynClient := newWrapperDynClient(pe, cp)
+
+	_, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityPackDeploy,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			OCIClient:      oci,
+			KubeClient:     fake.NewSimpleClientset(),
+			DynamicClient:  dynClient,
+			GuardianClient: &stubGuardianClient{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Every pulled ref must be baseURL@digest — never baseURL@digest1@digest2.
+	wantRBAC := baseURL + "@" + rbacDigest
+	wantWorkload := baseURL + "@" + workloadDigest
+	for _, ref := range pulledRefs {
+		if ref != wantRBAC && ref != wantWorkload {
+			t.Errorf("pulled unexpected OCI ref %q; want %q or %q (double-digest would be a bug)", ref, wantRBAC, wantWorkload)
+		}
+		if len(ref) > len(baseURL)+1+len(registryDigest)+1+len(rbacDigest) {
+			t.Errorf("OCI ref %q looks like a double-digest ref (too long)", ref)
+		}
+	}
+}
+
+// recordingOCIClient records all PullManifests refs and delegates to a split stub.
+type recordingOCIClient struct {
+	rbacBlob     []byte
+	workloadBlob []byte
+	rbacDigest   string
+	onPull       func(string)
+}
+
+func (r *recordingOCIClient) PullManifests(_ context.Context, ref string) ([][]byte, error) {
+	if r.onPull != nil {
+		r.onPull(ref)
+	}
+	if r.rbacDigest != "" && containsSuffix(ref, r.rbacDigest) {
+		return [][]byte{r.rbacBlob}, nil
+	}
+	return [][]byte{r.workloadBlob}, nil
+}
+
+var _ capability.OCIRegistryClient = (*recordingOCIClient)(nil)
+
 // TestPackDeploy_LegacyPath_SkipsGuardianIntakeWhenNoRBACDigest verifies that the
 // existing single-layer path is used when rbacDigest is absent. GuardianClient
 // must NOT be called in this case. Backward compatibility, wrapper-schema.md §4.
