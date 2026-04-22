@@ -1160,6 +1160,7 @@ func TestEnable_WrapperRunnerRole_ContainsClusterScopedClusterRole(t *testing.T)
 	assertContainsStr(t, content, "clusterissuers")
 }
 
+
 // TestEnable_Phase00_KueueWebhookScopingDocumented verifies that the phase 00
 // prerequisites ConfigMap documents Kueue webhook scoping and references
 // C-KUEUE-WEBHOOK. The scoping is applied immediately after Kueue is deployed
