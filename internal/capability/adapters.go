@@ -18,6 +18,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/dynamic"
@@ -159,6 +160,12 @@ func WaitForRBACProfileProvisioned(
 			return fmt.Errorf("get RBACProfile %s/%s: %w", namespace, rbacProfileName, err)
 		}
 
+		// Accept provisioned=true either via the Provisioned condition or the
+		// status.provisioned boolean (guardian may set the boolean without updating
+		// the condition when the RBACPolicy arrives asynchronously).
+		if provisioned, _, _ := unstructured.NestedBool(profile.Object, "status", "provisioned"); provisioned {
+			return nil
+		}
 		conditions, _, _ := unstructuredList(profile.Object, "status", "conditions")
 		for _, c := range conditions {
 			cond, ok := c.(map[string]interface{})
