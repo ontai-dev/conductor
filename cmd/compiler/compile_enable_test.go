@@ -988,6 +988,29 @@ func TestEnable_Phase05_MetaReferencesCI(t *testing.T) {
 	}
 }
 
+// TestEnable_WrapperRunnerRole_ContainsPackOperationResultRule verifies that
+// wrapper-runner.yaml in 05-post-bootstrap carries the infrastructure.ontai.dev
+// packoperationresults rule so Conductor execute mode Jobs can write
+// PackOperationResult CRs. WRAPPER-RUNNER-ROLE-PACKOPRESULT.
+// conductor-schema.md §5, wrapper-schema.md §4.
+func TestEnable_WrapperRunnerRole_ContainsPackOperationResultRule(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "test-cluster", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "05-post-bootstrap", "wrapper-runner.yaml")
+
+	assertContainsStr(t, content, "infrastructure.ontai.dev")
+	assertContainsStr(t, content, "packoperationresults")
+
+	// Verify the namespace is seam-tenant-{clusterName} not seam-system.
+	assertContainsStr(t, content, "seam-tenant-test-cluster")
+	if strings.Contains(content, "namespace: seam-system") {
+		t.Error("wrapper-runner.yaml must use seam-tenant-{clusterName}, not seam-system")
+	}
+}
+
 // TestEnable_Phase00_KueueWebhookScopingDocumented verifies that the phase 00
 // prerequisites ConfigMap documents Kueue webhook scoping and references
 // C-KUEUE-WEBHOOK. The scoping is applied immediately after Kueue is deployed

@@ -2529,6 +2529,15 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 				Resources: []string{"rbacprofiles"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
+			{
+				// Conductor execute mode writes PackOperationResult CRs into
+				// seam-tenant-{clusterName} as the deployment outcome channel.
+				// infrastructure.ontai.dev/v1alpha1, seam-core PR #11.
+				// wrapper-schema.md §4, conductor-schema.md §5.
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"packoperationresults"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
+			},
 		},
 	}
 
