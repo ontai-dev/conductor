@@ -1,6 +1,10 @@
 package runnerlib
 
-import "errors"
+import (
+	"errors"
+
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+)
 
 // ServiceAccountName is the default Kubernetes ServiceAccount used by runner Jobs.
 // All runner Jobs run under this service account unless overridden.
@@ -214,7 +218,7 @@ func (b *jobSpecBuilder) WithNodeExclusions(nodes []string) JobSpecBuilder {
 // OperatorLeaderNode when SelfOperation is true. Returns nil when SelfOperation
 // is false — tenant-targeted operations are exempt from exclusion logic.
 // conductor-schema.md §13.
-func ResolveNodeExclusionsFromRunnerConfig(spec RunnerConfigSpec) []string {
+func ResolveNodeExclusionsFromRunnerConfig(spec seamcorev1alpha1.InfrastructureRunnerConfigSpec) []string {
 	if !spec.SelfOperation {
 		return nil
 	}

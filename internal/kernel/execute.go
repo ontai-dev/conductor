@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ontai-dev/conductor/internal/config"
-	"github.com/ontai-dev/conductor/pkg/runnerlib"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // StepExecutor runs a single RunnerConfig step and returns the StepResult.
@@ -16,7 +16,7 @@ import (
 //
 // conductor-schema.md §17.
 type StepExecutor interface {
-	Execute(ctx context.Context, step runnerlib.RunnerConfigStep, clusterRef, namespace string) (runnerlib.RunnerConfigStepResult, error)
+	Execute(ctx context.Context, step seamcorev1alpha1.RunnerConfigStep, clusterRef, namespace string) (seamcorev1alpha1.RunnerConfigStepResult, error)
 }
 
 // StepStatusWriter persists StepResults and terminal conditions to RunnerConfig status.
@@ -27,7 +27,7 @@ type StepExecutor interface {
 //
 // conductor-schema.md §17.
 type StepStatusWriter interface {
-	WriteStepResult(ctx context.Context, result runnerlib.RunnerConfigStepResult) error
+	WriteStepResult(ctx context.Context, result seamcorev1alpha1.RunnerConfigStepResult) error
 	WriteCompleted(ctx context.Context) error
 	WriteFailed(ctx context.Context, failedStep string) error
 }
@@ -37,7 +37,7 @@ type StepStatusWriter interface {
 // lands. Satisfies the interface without requiring a Kubernetes client.
 type NoopStepStatusWriter struct{}
 
-func (NoopStepStatusWriter) WriteStepResult(_ context.Context, _ runnerlib.RunnerConfigStepResult) error {
+func (NoopStepStatusWriter) WriteStepResult(_ context.Context, _ seamcorev1alpha1.RunnerConfigStepResult) error {
 	return nil
 }
 
@@ -81,7 +81,7 @@ func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter
 	goCtx := context.Background()
 
 	// completed tracks the terminal phase reached by each step, keyed by step name.
-	completed := make(map[string]runnerlib.StepPhase, len(steps))
+	completed := make(map[string]seamcorev1alpha1.RunnerStepResultPhase, len(steps))
 
 	for _, step := range steps {
 		// Check DependsOn constraint.
@@ -93,16 +93,16 @@ func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter
 					"execute mode: step %q dependsOn %q which has not been processed yet — steps must be declared in dependency order",
 					step.Name, step.DependsOn)
 			}
-			if depPhase != runnerlib.StepPhaseSucceeded {
+			if depPhase != seamcorev1alpha1.RunnerStepSucceeded {
 				// Dependency did not succeed — skip this step as Failed.
-				skipped := runnerlib.RunnerConfigStepResult{
-					StepName: step.Name,
-					Phase:    runnerlib.StepPhaseFailed,
+				skipped := seamcorev1alpha1.RunnerConfigStepResult{
+					Name:   step.Name,
+					Status: seamcorev1alpha1.RunnerStepFailed,
 				}
 				if writeErr := statusWriter.WriteStepResult(goCtx, skipped); writeErr != nil {
 					return fmt.Errorf("execute mode: write skipped StepResult for %q: %w", step.Name, writeErr)
 				}
-				completed[step.Name] = runnerlib.StepPhaseFailed
+				completed[step.Name] = seamcorev1alpha1.RunnerStepFailed
 				if step.HaltOnFailure {
 					if termErr := statusWriter.WriteFailed(goCtx, step.Name); termErr != nil {
 						return fmt.Errorf("execute mode: write terminal Failed condition: %w", termErr)
@@ -124,10 +124,10 @@ func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter
 			return fmt.Errorf("execute mode: write StepResult for step %q: %w", step.Name, writeErr)
 		}
 
-		completed[step.Name] = result.Phase
+		completed[step.Name] = result.Status
 
 		// Handle halt-on-failure.
-		if result.Phase == runnerlib.StepPhaseFailed && step.HaltOnFailure {
+		if result.Status == seamcorev1alpha1.RunnerStepFailed && step.HaltOnFailure {
 			if termErr := statusWriter.WriteFailed(goCtx, step.Name); termErr != nil {
 				return fmt.Errorf("execute mode: write terminal Failed condition: %w", termErr)
 			}
@@ -139,7 +139,7 @@ func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter
 	allSucceeded := true
 	lastFailed := ""
 	for _, s := range steps {
-		if completed[s.Name] != runnerlib.StepPhaseSucceeded {
+		if completed[s.Name] != seamcorev1alpha1.RunnerStepSucceeded {
 			allSucceeded = false
 			lastFailed = s.Name
 		}

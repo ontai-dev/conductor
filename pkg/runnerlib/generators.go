@@ -1,5 +1,7 @@
 package runnerlib
 
+import seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+
 // TalosClusterSpec is the minimal representation of a TalosCluster CR spec used
 // by GenerateFromTalosCluster to produce a RunnerConfigSpec. Fields derived from
 // platform-schema.md Section 2 (TalosCluster key spec fields).
@@ -98,20 +100,20 @@ type RawManifestSource struct {
 //
 // INV-009: RunnerConfig is operator-generated at runtime. This function is the
 // generation path. INV-010: this shared library is the single source.
-func GenerateFromTalosCluster(spec TalosClusterSpec) (RunnerConfigSpec, error) {
-	return RunnerConfigSpec{
+func GenerateFromTalosCluster(spec TalosClusterSpec) (seamcorev1alpha1.InfrastructureRunnerConfigSpec, error) {
+	return seamcorev1alpha1.InfrastructureRunnerConfigSpec{
 		// TODO: replace ClusterEndpoint-as-identity with a formal cluster name field
 		// once TalosCluster CRD API types are defined by the Schema Engineer.
 		// See platform-schema.md §2 TalosCluster.
 		ClusterRef:  spec.ClusterEndpoint,
 		RunnerImage: "", // Caller must set this from the cluster's desired runner version.
-		Phases: []PhaseConfig{
+		Phases: []seamcorev1alpha1.RunnerPhaseConfig{
 			{
 				Name:       "launch",
 				Parameters: map[string]string{},
 			},
 		},
-		OperationalHistory: []OperationalHistoryEntry{},
+		OperationalHistory: []seamcorev1alpha1.RunnerOperationalHistoryEntry{},
 	}, nil
 }
 
@@ -122,16 +124,16 @@ func GenerateFromTalosCluster(spec TalosClusterSpec) (RunnerConfigSpec, error) {
 //
 // INV-009: RunnerConfig is operator-generated at runtime. INV-010: this shared
 // library is the single source.
-func GenerateFromPackBuild(spec PackBuildSpec) (RunnerConfigSpec, error) {
-	return RunnerConfigSpec{
+func GenerateFromPackBuild(spec PackBuildSpec) (seamcorev1alpha1.InfrastructureRunnerConfigSpec, error) {
+	return seamcorev1alpha1.InfrastructureRunnerConfigSpec{
 		ClusterRef:  "", // Pack compilation is not cluster-specific.
 		RunnerImage: "", // Caller must set this.
-		Phases: []PhaseConfig{
+		Phases: []seamcorev1alpha1.RunnerPhaseConfig{
 			{
 				Name:       "compile",
 				Parameters: map[string]string{},
 			},
 		},
-		OperationalHistory: []OperationalHistoryEntry{},
+		OperationalHistory: []seamcorev1alpha1.RunnerOperationalHistoryEntry{},
 	}, nil
 }

@@ -6,60 +6,62 @@ package integration_test
 // terminal conditions to RunnerConfig status in the real Kubernetes API server.
 // They use the k8sStepStatusWriter from suite_test.go to write to envtest.
 //
-// Scenario 1 — All steps succeed → Completed condition persists in etcd.
-// Scenario 2 — Tenant-labelled RunnerConfig → same step sequencer path; no
-//              signing fields appear in status (signing is agent-mode only).
-// Scenario 3 — Two concurrent RunnerConfigs → no StepResult cross-contamination.
-// Scenario 4 — HaltOnFailure step failure → terminal Failed condition in API
-//              server; steps after the halting step have no StepResult entry.
+// Scenario 1 -- All steps succeed -> Completed condition persists in etcd.
+// Scenario 2 -- Tenant-labelled RunnerConfig -> same step sequencer path; no
+//
+//	signing fields appear in status (signing is agent-mode only).
+//
+// Scenario 3 -- Two concurrent RunnerConfigs -> no StepResult cross-contamination.
+// Scenario 4 -- HaltOnFailure step failure -> terminal Failed condition in API
+//
+//	server; steps after the halting step have no StepResult entry.
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ontai-dev/conductor/internal/config"
 	"github.com/ontai-dev/conductor/internal/kernel"
-	"github.com/ontai-dev/conductor/pkg/runnerlib"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // fakeStepExecutor is a StepExecutor that returns pre-configured results by
 // step name. Steps not found in the map return Succeeded by default.
-// This replaces the real capability dispatcher in integration tests — the goal
+// This replaces the real capability dispatcher in integration tests -- the goal
 // is to verify that RunExecute writes the correct status to the API server, not
 // to test capability execution (which belongs to capability unit tests).
 type fakeStepExecutor struct {
-	// results maps step name → phase to return. If absent, returns Succeeded.
-	results map[string]runnerlib.StepPhase
+	// results maps step name -> status to return. If absent, returns Succeeded.
+	results map[string]seamcorev1alpha1.RunnerStepResultPhase
 }
 
 func (f *fakeStepExecutor) Execute(
 	_ context.Context,
-	step runnerlib.RunnerConfigStep,
+	step seamcorev1alpha1.RunnerConfigStep,
 	_, _ string,
-) (runnerlib.RunnerConfigStepResult, error) {
-	phase := runnerlib.StepPhaseSucceeded
+) (seamcorev1alpha1.RunnerConfigStepResult, error) {
+	status := seamcorev1alpha1.RunnerStepSucceeded
 	if f.results != nil {
-		if p, ok := f.results[step.Name]; ok {
-			phase = p
+		if s, ok := f.results[step.Name]; ok {
+			status = s
 		}
 	}
-	return runnerlib.RunnerConfigStepResult{
-		StepName: step.Name,
-		Phase:    phase,
+	return seamcorev1alpha1.RunnerConfigStepResult{
+		Name:   step.Name,
+		Status: status,
 	}, nil
 }
 
 // makeExecuteCtx builds a minimal execute-mode ExecutionContext.
-// The RunnerConfig spec is injected directly — no env vars required.
+// The RunnerConfig spec is injected directly -- no env vars required.
 // This mirrors how the real binary populates ExecutionContext at startup.
-func makeExecuteCtx(clusterRef, ns string, spec runnerlib.RunnerConfigSpec) config.ExecutionContext {
+func makeExecuteCtx(clusterRef, ns string, spec seamcorev1alpha1.InfrastructureRunnerConfigSpec) config.ExecutionContext {
 	return config.ExecutionContext{
-		Mode:       config.ModeExecute,
-		ClusterRef: clusterRef,
-		Namespace:  ns,
+		Mode:         config.ModeExecute,
+		ClusterRef:   clusterRef,
+		Namespace:    ns,
 		RunnerConfig: spec,
 	}
 }
@@ -74,15 +76,15 @@ func makeExecuteCtx(clusterRef, ns string, spec runnerlib.RunnerConfigSpec) conf
 // three steps that all succeed. Signing fields are absent from status because
 // signing is an agent-mode concern, not an execute-mode concern. INV-026.
 //
-// Scenario 1 — WS3.
+// Scenario 1 -- WS3.
 func TestRunExecute_ManagementRoleSteps_StepResultsPersistedInAPIServer(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 	name := "ws3-mgmt-runnerconfig"
 	clusterRef := "ccs-mgmt"
 
-	spec := runnerlib.RunnerConfigSpec{
-		Steps: []runnerlib.RunnerConfigStep{
+	spec := seamcorev1alpha1.InfrastructureRunnerConfigSpec{
+		Steps: []seamcorev1alpha1.RunnerConfigStep{
 			{Name: "validate-bootstrap", Capability: "cluster-validate"},
 			{Name: "apply-rbac", Capability: "rbac-provision", DependsOn: "validate-bootstrap"},
 			{Name: "sign-packinstance", Capability: "pack-sign", DependsOn: "apply-rbac"},
@@ -103,7 +105,7 @@ func TestRunExecute_ManagementRoleSteps_StepResultsPersistedInAPIServer(t *testi
 		t.Fatalf("RunExecute: %v", err)
 	}
 
-	// Poll until Completed condition appears in etcd — confirms the status write
+	// Poll until Completed condition appears in etcd -- confirms the status write
 	// path persisted the terminal condition through the real API server.
 	ok := poll(t, 10*time.Second, func() bool {
 		obj := getRunnerConfig(ctx, t, ns, name)
@@ -114,7 +116,7 @@ func TestRunExecute_ManagementRoleSteps_StepResultsPersistedInAPIServer(t *testi
 		t.Errorf("timed out waiting for Completed=True; status: %v", obj.Object["status"])
 	}
 
-	// Verify all three StepResults are present in etcd with Succeeded phase.
+	// Verify all three StepResults are present in etcd with Succeeded status.
 	obj := getRunnerConfig(ctx, t, ns, name)
 	results := getStepResults(obj)
 	if len(results) != 3 {
@@ -125,11 +127,11 @@ func TestRunExecute_ManagementRoleSteps_StepResultsPersistedInAPIServer(t *testi
 		if i >= len(results) {
 			break
 		}
-		if results[i]["stepName"] != want {
-			t.Errorf("StepResult[%d]: got stepName=%q; want %q", i, results[i]["stepName"], want)
+		if results[i]["name"] != want {
+			t.Errorf("StepResult[%d]: got name=%q; want %q", i, results[i]["name"], want)
 		}
-		if results[i]["phase"] != string(runnerlib.StepPhaseSucceeded) {
-			t.Errorf("StepResult[%d] %q: got phase=%q; want Succeeded", i, want, results[i]["phase"])
+		if results[i]["status"] != string(seamcorev1alpha1.RunnerStepSucceeded) {
+			t.Errorf("StepResult[%d] %q: got status=%q; want Succeeded", i, want, results[i]["status"])
 		}
 	}
 }
@@ -139,17 +141,17 @@ func TestRunExecute_ManagementRoleSteps_StepResultsPersistedInAPIServer(t *testi
 // sequencer produces StepResults in the API server with no signing-authority
 // fields in status. Signing is performed exclusively by the management cluster
 // Conductor in agent mode. The execute-mode sequencer is role-agnostic and never
-// writes signing fields — they are populated by the agent control loop. INV-026.
+// writes signing fields -- they are populated by the agent control loop. INV-026.
 //
-// Scenario 2 — WS3.
+// Scenario 2 -- WS3.
 func TestRunExecute_TenantRoleSteps_NoSigningFieldsInStatus(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 	name := "ws3-tenant-runnerconfig"
 	clusterRef := "ccs-test"
 
-	spec := runnerlib.RunnerConfigSpec{
-		Steps: []runnerlib.RunnerConfigStep{
+	spec := seamcorev1alpha1.InfrastructureRunnerConfigSpec{
+		Steps: []seamcorev1alpha1.RunnerConfigStep{
 			{Name: "verify-packreceipt", Capability: "pack-verify"},
 			{Name: "apply-local-rbac", Capability: "rbac-provision", DependsOn: "verify-packreceipt"},
 		},
@@ -179,7 +181,7 @@ func TestRunExecute_TenantRoleSteps_NoSigningFieldsInStatus(t *testing.T) {
 		t.Errorf("timed out waiting for Completed=True on tenant RunnerConfig; status: %v", obj.Object["status"])
 	}
 
-	// Verify no signing-authority fields in status — signing is agent-mode only.
+	// Verify no signing-authority fields in status -- signing is agent-mode only.
 	obj := getRunnerConfig(ctx, t, ns, name)
 	status := getRunnerConfigStatus(obj)
 	if _, ok := status["packInstanceSignature"]; ok {
@@ -200,24 +202,24 @@ func TestRunExecute_TenantRoleSteps_NoSigningFieldsInStatus(t *testing.T) {
 // verifies that two RunExecute calls running concurrently against separate
 // RunnerConfig objects do not contaminate each other's status in the API server.
 //
-// This cannot be validated with fake clients — fake clients use in-memory maps
+// This cannot be validated with fake clients -- fake clients use in-memory maps
 // that share mutable state across calls within the same test run, making
 // cross-contamination invisible. The real API server enforces per-object isolation
 // because each status patch targets a specific resource by namespace/name.
 //
-// Scenario 3 — WS3.
+// Scenario 3 -- WS3.
 func TestRunExecute_TwoConcurrentRunnerConfigs_NoStepResultCrossContamination(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 
-	specA := runnerlib.RunnerConfigSpec{
-		Steps: []runnerlib.RunnerConfigStep{
+	specA := seamcorev1alpha1.InfrastructureRunnerConfigSpec{
+		Steps: []seamcorev1alpha1.RunnerConfigStep{
 			{Name: "step-alpha-1", Capability: "cluster-validate"},
 			{Name: "step-alpha-2", Capability: "rbac-provision", DependsOn: "step-alpha-1"},
 		},
 	}
-	specB := runnerlib.RunnerConfigSpec{
-		Steps: []runnerlib.RunnerConfigStep{
+	specB := seamcorev1alpha1.InfrastructureRunnerConfigSpec{
+		Steps: []seamcorev1alpha1.RunnerConfigStep{
 			{Name: "step-beta-1", Capability: "pack-verify"},
 			{Name: "step-beta-2", Capability: "pack-sign", DependsOn: "step-beta-1"},
 			{Name: "step-beta-3", Capability: "cluster-validate", DependsOn: "step-beta-2"},
@@ -254,75 +256,70 @@ func TestRunExecute_TwoConcurrentRunnerConfigs_NoStepResultCrossContamination(t 
 
 	for i, err := range errs {
 		if err != nil {
-			t.Errorf("RunExecute[%d]: %v", i, err)
+			t.Errorf("RunExecute[%d]: unexpected error: %v", i, err)
 		}
 	}
 
-	// Poll for both Completed conditions.
-	ok := poll(t, 15*time.Second, func() bool {
-		objA := getRunnerConfig(ctx, t, ns, nameA)
-		objB := getRunnerConfig(ctx, t, ns, nameB)
-		return hasCondition(objA, "Completed", "True") && hasCondition(objB, "Completed", "True")
-	})
-	if !ok {
-		objA := getRunnerConfig(ctx, t, ns, nameA)
-		objB := getRunnerConfig(ctx, t, ns, nameB)
-		t.Errorf("timed out: alpha Completed=%v, beta Completed=%v",
-			hasCondition(objA, "Completed", "True"),
-			hasCondition(objB, "Completed", "True"))
+	// Poll until both RunnerConfigs have Completed in etcd.
+	for _, name := range []string{nameA, nameB} {
+		n := name
+		ok := poll(t, 10*time.Second, func() bool {
+			obj := getRunnerConfig(ctx, t, ns, n)
+			return hasCondition(obj, "Completed", "True")
+		})
+		if !ok {
+			obj := getRunnerConfig(ctx, t, ns, n)
+			t.Errorf("timed out waiting for Completed=True on %q; status: %v", n, obj.Object["status"])
+		}
 	}
 
-	// Verify step results are isolated: alpha has exactly its 2 steps, beta has exactly its 3.
+	// Verify StepResult isolation: alpha must have exactly 2 results with alpha names.
 	objA := getRunnerConfig(ctx, t, ns, nameA)
-	objB := getRunnerConfig(ctx, t, ns, nameB)
 	resultsA := getStepResults(objA)
-	resultsB := getStepResults(objB)
-
 	if len(resultsA) != 2 {
-		t.Errorf("alpha RunnerConfig: expected 2 StepResults; got %d: %v", len(resultsA), resultsA)
+		t.Errorf("RunnerConfig A: expected 2 StepResults; got %d: %v", len(resultsA), resultsA)
 	}
-	if len(resultsB) != 3 {
-		t.Errorf("beta RunnerConfig: expected 3 StepResults; got %d: %v", len(resultsB), resultsB)
-	}
-
-	// Confirm no beta step names appear in alpha's results and vice versa.
-	alphaStepSet := map[string]bool{"step-alpha-1": true, "step-alpha-2": true}
-	betaStepSet := map[string]bool{"step-beta-1": true, "step-beta-2": true, "step-beta-3": true}
-
 	for _, r := range resultsA {
-		name := fmt.Sprintf("%v", r["stepName"])
-		if betaStepSet[name] {
-			t.Errorf("alpha RunnerConfig status contains beta step %q — cross-contamination detected", name)
+		name, _ := r["name"].(string)
+		if name != "step-alpha-1" && name != "step-alpha-2" {
+			t.Errorf("RunnerConfig A: unexpected StepResult name %q", name)
 		}
+	}
+
+	// beta must have exactly 3 results with beta names.
+	objB := getRunnerConfig(ctx, t, ns, nameB)
+	resultsB := getStepResults(objB)
+	if len(resultsB) != 3 {
+		t.Errorf("RunnerConfig B: expected 3 StepResults; got %d: %v", len(resultsB), resultsB)
 	}
 	for _, r := range resultsB {
-		name := fmt.Sprintf("%v", r["stepName"])
-		if alphaStepSet[name] {
-			t.Errorf("beta RunnerConfig status contains alpha step %q — cross-contamination detected", name)
+		name, _ := r["name"].(string)
+		if name != "step-beta-1" && name != "step-beta-2" && name != "step-beta-3" {
+			t.Errorf("RunnerConfig B: unexpected StepResult name %q", name)
 		}
 	}
 }
 
 // TestRunExecute_HaltOnFailure_TerminalFailedConditionInAPIServer verifies that
 // when a step with HaltOnFailure=true fails, RunExecute:
-//  1. Writes a StepResult for the failed step with phase=Failed.
+//  1. Writes a StepResult for the failed step with status=Failed.
 //  2. Writes the terminal Failed condition to the API server.
 //  3. Does NOT write StepResult entries for steps that follow the halting step.
 //
 // This is the critical terminal-condition test that recording StepStatusWriters
-// cannot validate — the recording writer captures calls but cannot confirm the
+// cannot validate -- the recording writer captures calls but cannot confirm the
 // terminal condition persists in etcd and that subsequent steps truly have no
 // entries (no API race).
 //
-// Scenario 4 — WS3.
+// Scenario 4 -- WS3.
 func TestRunExecute_HaltOnFailure_TerminalFailedConditionInAPIServer(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 	name := "ws3-halt-runnerconfig"
 	clusterRef := "ccs-mgmt"
 
-	spec := runnerlib.RunnerConfigSpec{
-		Steps: []runnerlib.RunnerConfigStep{
+	spec := seamcorev1alpha1.InfrastructureRunnerConfigSpec{
+		Steps: []seamcorev1alpha1.RunnerConfigStep{
 			{Name: "pre-flight", Capability: "cluster-validate"},
 			{Name: "critical-step", Capability: "rbac-provision", DependsOn: "pre-flight", HaltOnFailure: true},
 			{Name: "post-step", Capability: "pack-sign", DependsOn: "critical-step"},
@@ -339,8 +336,8 @@ func TestRunExecute_HaltOnFailure_TerminalFailedConditionInAPIServer(t *testing.
 
 	// Executor returns Failed for "critical-step", Succeeded for all others.
 	executor := &fakeStepExecutor{
-		results: map[string]runnerlib.StepPhase{
-			"critical-step": runnerlib.StepPhaseFailed,
+		results: map[string]seamcorev1alpha1.RunnerStepResultPhase{
+			"critical-step": seamcorev1alpha1.RunnerStepFailed,
 		},
 	}
 
@@ -361,20 +358,20 @@ func TestRunExecute_HaltOnFailure_TerminalFailedConditionInAPIServer(t *testing.
 
 	obj := getRunnerConfig(ctx, t, ns, name)
 
-	// Completed must be absent — the run did not succeed.
+	// Completed must be absent -- the run did not succeed.
 	if hasCondition(obj, "Completed", "True") {
 		t.Error("Completed=True present in status after HaltOnFailure; expected absent")
 	}
 
 	// Verify StepResults: pre-flight (Succeeded) + critical-step (Failed) only.
-	// post-step must NOT have a StepResult entry — RunExecute halted before it ran.
+	// post-step must NOT have a StepResult entry -- RunExecute halted before it ran.
 	results := getStepResults(obj)
 	if len(results) != 2 {
 		t.Errorf("expected 2 StepResults (pre-flight + critical-step); got %d: %v", len(results), results)
 	}
 
 	for _, r := range results {
-		if r["stepName"] == "post-step" {
+		if r["name"] == "post-step" {
 			t.Error("post-step has a StepResult entry in status; expected absent after HaltOnFailure")
 		}
 	}
@@ -382,14 +379,15 @@ func TestRunExecute_HaltOnFailure_TerminalFailedConditionInAPIServer(t *testing.
 	// Confirm critical-step result is Failed.
 	var criticalResult map[string]interface{}
 	for _, r := range results {
-		if r["stepName"] == "critical-step" {
+		if r["name"] == "critical-step" {
 			criticalResult = r
 			break
 		}
 	}
 	if criticalResult == nil {
 		t.Error("critical-step StepResult not found in status")
-	} else if criticalResult["phase"] != string(runnerlib.StepPhaseFailed) {
-		t.Errorf("critical-step phase: got %q; want Failed", criticalResult["phase"])
+	} else if criticalResult["status"] != string(seamcorev1alpha1.RunnerStepFailed) {
+		t.Errorf("critical-step status: got %q; want Failed", criticalResult["status"])
 	}
 }
+

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"os"
 
-	"github.com/ontai-dev/conductor/pkg/runnerlib"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // Mode is a typed string declaring which execution mode this binary invocation runs in.
@@ -75,7 +75,7 @@ type ExecutionContext struct {
 
 	// RunnerConfig is the RunnerConfigSpec loaded from the mounted ConfigMap or
 	// environment at startup. Zero value in compile mode.
-	RunnerConfig runnerlib.RunnerConfigSpec
+	RunnerConfig seamcorev1alpha1.InfrastructureRunnerConfigSpec
 }
 
 // BuildExecuteContext constructs an ExecutionContext for execute mode.
