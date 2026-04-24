@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -49,6 +50,25 @@ type HelmSource struct {
 	// Not yet implemented — future work for private registries.
 	// +optional
 	RegistryCredentialsSecret string `yaml:"registryCredentialsSecret,omitempty"`
+}
+
+// helmSDKVersion returns the version of the helm.sh/helm/v3 module linked into
+// this binary, derived from the build info at runtime. Returns an empty string
+// if the build info is unavailable (e.g., in test binaries without module info).
+func helmSDKVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "helm.sh/helm/v3" {
+			if dep.Replace != nil {
+				return dep.Replace.Version
+			}
+			return dep.Version
+		}
+	}
+	return ""
 }
 
 // helmCompilePackBuild implements the helm automation path for packbuild.
@@ -219,6 +239,10 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 			WorkloadDigest:      workloadDigest,
 			ClusterScopedDigest: clusterScopedDigest,
 			BasePackName:        in.BasePackName,
+			ChartURL:            hs.URL,
+			ChartVersion:        hs.Version,
+			ChartName:           chartName,
+			HelmVersion:         helmSDKVersion(),
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
