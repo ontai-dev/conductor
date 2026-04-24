@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,68 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 )
+
+// packDeliveryMetadata carries the OCI digest anchors and Helm chart provenance
+// fields that are written into PackReceipt.spec when a PackInstance is acknowledged.
+// All fields are optional: absent for kustomize and raw category packs (chart
+// fields) or for pre-split ClusterPack artifacts (digest fields). T-10.
+type packDeliveryMetadata struct {
+	RBACDigest     string
+	WorkloadDigest string
+	ChartVersion   string
+	ChartURL       string
+	ChartName      string
+	HelmVersion    string
+}
+
+// extractPackMetadataFromArtifact extracts chart provenance fields from a
+// PackInstance artifact JSON blob. The artifact is the full PackInstance CR
+// as produced by the management cluster. Chart fields are populated after T-07
+// adds them to PackInstanceSpec. Returns zero-value metadata on parse failure
+// (non-fatal: PackReceipt is still created without chart fields). T-10.
+func extractPackMetadataFromArtifact(artifactJSON []byte) (clusterPackRef string, meta packDeliveryMetadata) {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(artifactJSON, &obj); err != nil {
+		return "", packDeliveryMetadata{}
+	}
+	spec, _ := obj["spec"].(map[string]interface{})
+	if spec == nil {
+		return "", packDeliveryMetadata{}
+	}
+	clusterPackRef, _ = spec["clusterPackRef"].(string)
+	return clusterPackRef, packDeliveryMetadata{
+		ChartVersion: stringField(spec, "chartVersion"),
+		ChartURL:     stringField(spec, "chartURL"),
+		ChartName:    stringField(spec, "chartName"),
+		HelmVersion:  stringField(spec, "helmVersion"),
+	}
+}
+
+// stringField safely extracts a string value from an unstructured map.
+func stringField(m map[string]interface{}, key string) string {
+	v, _ := m[key].(string)
+	return v
+}
+
+// readClusterPackDigests reads a ClusterPack from the management cluster and
+// returns its rbacDigest and workloadDigest. Used by the pull loop to populate
+// PackReceipt with durable OCI recovery anchors. Returns empty strings on error
+// (non-fatal: PackReceipt is still created without digest fields). T-10.
+func (l *PackInstancePullLoop) readClusterPackDigests(ctx context.Context, namespace, clusterPackRef string) (rbacDigest, workloadDigest string) {
+	if clusterPackRef == "" {
+		return "", ""
+	}
+	obj, err := l.mgmtClient.Resource(clusterPackGVR).Namespace(namespace).Get(
+		ctx, clusterPackRef, metav1.GetOptions{},
+	)
+	if err != nil {
+		return "", ""
+	}
+	spec, _, _ := unstructuredNestedMap(obj.Object, "spec")
+	rbacDigest, _ = spec["rbacDigest"].(string)
+	workloadDigest, _ = spec["workloadDigest"].(string)
+	return rbacDigest, workloadDigest
+}
 
 // PackInstancePullLoop pulls signed PackInstance artifacts from the management
 // cluster (stored as Secrets by the SigningLoop), verifies their Ed25519
@@ -145,8 +208,13 @@ func (l *PackInstancePullLoop) pullOnce(ctx context.Context) {
 		// Verify Ed25519 signature. INV-026. Bootstrap window accepts all. INV-020.
 		verified, failureReason := l.verifyArtifact(artifactJSON, sigB64)
 
+		// Extract chart metadata from the PackInstance artifact and look up
+		// OCI digest anchors from the referenced ClusterPack. T-10.
+		clusterPackRef, meta := extractPackMetadataFromArtifact(artifactJSON)
+		meta.RBACDigest, meta.WorkloadDigest = l.readClusterPackDigests(ctx, secretNS, clusterPackRef)
+
 		// Create or update the local PackReceipt.
-		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, verified, failureReason)
+		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, verified, failureReason, meta)
 	}
 }
 
@@ -177,25 +245,54 @@ func (l *PackInstancePullLoop) verifyArtifact(artifactJSON []byte, sigB64 string
 	return true, ""
 }
 
+// buildReceiptSpecPayload constructs the spec payload map for a PackReceipt CR.
+// Empty metadata fields are omitted so that kustomize and raw category packs do
+// not emit spurious zero-value fields in the CR. T-10.
+func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDeliveryMetadata) map[string]interface{} {
+	payload := map[string]interface{}{
+		"packInstanceRef": packInstanceName,
+		"signatureRef":    signatureRef,
+	}
+	if meta.RBACDigest != "" {
+		payload["rbacDigest"] = meta.RBACDigest
+	}
+	if meta.WorkloadDigest != "" {
+		payload["workloadDigest"] = meta.WorkloadDigest
+	}
+	if meta.ChartVersion != "" {
+		payload["chartVersion"] = meta.ChartVersion
+	}
+	if meta.ChartURL != "" {
+		payload["chartURL"] = meta.ChartURL
+	}
+	if meta.ChartName != "" {
+		payload["chartName"] = meta.ChartName
+	}
+	if meta.HelmVersion != "" {
+		payload["helmVersion"] = meta.HelmVersion
+	}
+	return payload
+}
+
 // upsertPackReceipt creates or updates a PackReceipt CR on the local cluster
 // recording the verification result for the given PackInstance artifact.
+// meta carries OCI digest anchors and Helm chart provenance populated by T-10.
+// Absent fields (empty strings) are omitted from the spec payload.
 //
 // Idempotency: if the existing PackReceipt already carries the same verified
 // status and signature reference, the call is a no-op.
 //
-// Gap 28, conductor-schema.md §10.
+// Gap 28, conductor-schema.md §10, T-10.
 func (l *PackInstancePullLoop) upsertPackReceipt(
 	ctx context.Context,
 	packInstanceName, sigB64, signatureRef string,
 	verified bool,
 	failureReason string,
+	meta packDeliveryMetadata,
 ) {
 	receiptName := packInstanceName
 
-	specPayload := map[string]interface{}{
-		"packInstanceRef": packInstanceName,
-		"signatureRef":    signatureRef,
-	}
+	specPayload := buildReceiptSpecPayload(packInstanceName, signatureRef, meta)
 	statusPayload := map[string]interface{}{
 		"verified":  verified,
 		"signature": sigB64,

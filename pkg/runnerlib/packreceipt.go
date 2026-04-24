@@ -37,7 +37,7 @@ type ClusterPackRef struct {
 
 // PackReceiptSpec is the immutable declaration written by the target cluster
 // Conductor when it acknowledges delivery of a ClusterPack. The spec is sealed
-// after creation — no controller mutates it after the first write. INV-026.
+// after creation -- no controller mutates it after the first write. INV-026.
 type PackReceiptSpec struct {
 	// ClusterPackRef identifies the specific ClusterPack version this receipt
 	// records delivery for.
@@ -56,10 +56,43 @@ type PackReceiptSpec struct {
 	// SignatureVerified is true when the target cluster Conductor has
 	// successfully verified PackSignature against the management cluster's
 	// public signing key. A PackReceipt where SignatureVerified=false is a
-	// security incident — the PackInstance on the management cluster raises a
+	// security incident -- the PackInstance on the management cluster raises a
 	// SecurityViolation condition and blocks further pack operations on this
 	// cluster. wrapper-schema.md §5, conductor-schema.md §10.
 	SignatureVerified bool
+
+	// RBACDigest is the OCI digest of the RBAC layer of the ClusterPack artifact.
+	// Durable recovery anchor: allows re-fetching and re-applying the RBAC layer
+	// without access to the full artifact. Carried through from ClusterPack.spec.
+	// Absent on pre-split ClusterPack receipts. T-04 schema, T-08.
+	RBACDigest string
+
+	// WorkloadDigest is the OCI digest of the workload layer of the ClusterPack artifact.
+	// Durable recovery anchor: allows re-fetching and re-applying the workload layer
+	// without access to the full artifact. Carried through from ClusterPack.spec.
+	// Absent on pre-split ClusterPack receipts. T-04 schema, T-08.
+	WorkloadDigest string
+
+	// ChartVersion is the version of the Helm chart that was rendered to produce
+	// this ClusterPack. Carried through from ClusterPack.spec.chartVersion.
+	// Absent for kustomize and raw category packs. Decision B, T-04 schema.
+	ChartVersion string
+
+	// ChartURL is the URL of the Helm chart repository. Carried through from
+	// ClusterPack.spec.chartURL. Absent for kustomize and raw category packs.
+	// Decision B, T-04 schema.
+	ChartURL string
+
+	// ChartName is the name of the Helm chart that was rendered. Carried through
+	// from ClusterPack.spec.chartName. Absent for kustomize and raw category packs.
+	// Decision B, T-04 schema.
+	ChartName string
+
+	// HelmVersion is the version of the Helm SDK used to render the ClusterPack.
+	// Carried through from ClusterPack.spec.helmVersion. Ensures rendering
+	// reproducibility across SDK versions. Absent for kustomize and raw category
+	// packs. Decision B, T-04 schema.
+	HelmVersion string
 }
 
 // PackReceiptStatus is the mutable state maintained by the target cluster
