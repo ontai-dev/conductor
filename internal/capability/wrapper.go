@@ -112,7 +112,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("list ClusterPack in %s: %v", peTenantNS, err)), nil
 	}
 
-	var ociRef, expectedChecksum, rbacDigest, workloadDigest string
+	var ociRef, registryBaseURL, expectedChecksum, rbacDigest, workloadDigest, clusterScopedDigest string
 	var executionStages []string // stage names in declared order; empty → single-pass fallback
 	for _, item := range cpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
@@ -126,6 +126,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("ClusterPack %s/%s has no registryRef.url", clusterPackName, clusterPackVersion)), nil
 		}
+		registryBaseURL = url
 		if digest != "" {
 			ociRef = url + "@" + digest
 		} else {
@@ -134,6 +135,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		expectedChecksum, _, _ = unstructuredString(item.Object, "spec", "checksum")
 		rbacDigest, _, _ = unstructuredString(item.Object, "spec", "rbacDigest")
 		workloadDigest, _, _ = unstructuredString(item.Object, "spec", "workloadDigest")
+		clusterScopedDigest, _, _ = unstructuredString(item.Object, "spec", "clusterScopedDigest")
 
 		// Read spec.executionOrder — ordered list of stage objects with a "name" field.
 		// When present and non-empty, staged execution is used. wrapper-schema.md §2.2.
@@ -158,12 +160,15 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("ClusterPack %s/%s has no registryRef", clusterPackName, clusterPackVersion)), nil
 	}
 
-	// When rbacDigest is present, the ClusterPack uses the two-layer OCI artifact
-	// contract. RBAC manifests are submitted to guardian /rbac-intake/pack and the
-	// workload layer is applied separately after guardian acknowledges. INV-004,
-	// wrapper-schema.md §4. Legacy packs (no rbacDigest) fall through to single-layer path.
+	// When rbacDigest is present, the ClusterPack uses the three-bucket OCI artifact
+	// contract. RBAC manifests go through guardian /rbac-intake, cluster-scoped
+	// manifests (webhooks, CRDs, etc.) are applied directly after intake, and workload
+	// manifests are applied last. INV-004, wrapper-schema.md §4.
+	// Legacy packs (no rbacDigest) fall through to single-layer path.
 	if rbacDigest != "" {
-		return h.executeSplitPath(ctx, params, now, clusterPackName, ociRef, workloadDigest, rbacDigest, expectedChecksum, executionStages)
+		// Pass the base registry URL (without digest suffix) so executeSplitPath
+		// can construct correct layer refs: baseURL@{rbac,clusterScoped,workload}Digest.
+		return h.executeSplitPath(ctx, params, now, clusterPackName, registryBaseURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, executionStages)
 	}
 
 	// Step 1 — Fetch manifests from OCI registry.
@@ -404,28 +409,27 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 // ---------------------------------------------------------------------------
 
 // executeSplitPath implements the pack-deploy execution path for ClusterPack
-// artifacts that carry separate RBAC and workload OCI layers (rbacDigest set).
+// artifacts that carry separate OCI layers for RBAC, cluster-scoped, and workload
+// resources (three-bucket split; Governor ruling 2026-04-22).
 //
 // Steps:
 //  1. Pull RBAC layer.
 //  2. Pull workload layer early (needed for Namespace pre-apply before rbac-intake).
 //  3. Apply Namespace manifests from the workload layer to the target cluster.
-//     This ensures the namespace exists before guardian rbac-intake tries to
-//     apply ServiceAccounts into it. Namespace is in the workload layer (not
-//     RBAC) because guardian targets the management cluster and may not be
-//     present on all tenant clusters. Manifests are baked into the pack by
-//     compiler packbuild (not synthesised at runtime). Governor-approved session/13.
 //  4. Submit RBAC manifests to guardian intake.
 //  5. Wait for RBACProfile provisioned.
-//  6. Apply all workload manifests (SSA idempotent -- Namespace already exists).
-//  7. Wait for workload readiness.
+//  6. Pull and apply cluster-scoped layer (if clusterScopedDigest present).
+//     Webhooks, CRDs, and other cluster-scoped non-RBAC resources. Applied
+//     directly by the Job using the wrapper-runner-cluster-scoped ClusterRole.
+//  7. Apply all workload manifests (SSA idempotent -- Namespace already exists).
+//  8. Wait for workload readiness.
 //
 // INV-004, wrapper-schema.md §4.
 func (h *packDeployHandler) executeSplitPath(
 	ctx context.Context,
 	params ExecuteParams,
 	now time.Time,
-	componentName, registryURL, workloadDigest, rbacDigest, expectedChecksum string,
+	componentName, registryURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum string,
 	executionStages []string,
 ) (runnerlib.OperationResultSpec, error) {
 	if params.GuardianClient == nil {
@@ -436,6 +440,13 @@ func (h *packDeployHandler) executeSplitPath(
 	rbacRef := registryURL + "@" + rbacDigest
 	artifacts := []runnerlib.ArtifactRef{
 		{Name: "rbac-layer", Kind: "OCIImage", Reference: rbacRef},
+	}
+	if clusterScopedDigest != "" {
+		artifacts = append(artifacts, runnerlib.ArtifactRef{
+			Name:      "cluster-scoped-layer",
+			Kind:      "OCIImage",
+			Reference: registryURL + "@" + clusterScopedDigest,
+		})
 	}
 	if workloadDigest != "" {
 		artifacts = append(artifacts, runnerlib.ArtifactRef{
@@ -625,19 +636,90 @@ func (h *packDeployHandler) executeSplitPath(
 		Message:     "RBACProfile provisioned=true",
 	}
 
-	// Step 6 — Apply all workload manifests. SSA is idempotent -- Namespace
+	// Step 6 — Pull and apply cluster-scoped layer (if present). Webhooks, CRDs,
+	// and other cluster-scoped non-RBAC resources. Applied directly by the Job
+	// using the wrapper-runner-cluster-scoped ClusterRole. wrapper-schema.md §4.
+	var clusterScopedManifests []parsedManifest
+	var applyCSStep runnerlib.StepResult
+	if clusterScopedDigest != "" {
+		csRef := registryURL + "@" + clusterScopedDigest
+		csStart := time.Now().UTC()
+		csBlobs, err := params.OCIClient.PullManifests(ctx, csRef)
+		if err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExternalDependencyFailure,
+				fmt.Sprintf("pull cluster-scoped layer %s: %v", csRef, err)), nil
+		}
+		for blobIdx, blob := range csBlobs {
+			yamlFiles, err := extractYAMLsFromTarGz(blob)
+			if err != nil {
+				return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("extract cluster-scoped tar.gz blob[%d]: %v", blobIdx, err)), nil
+			}
+			for fileIdx, data := range yamlFiles {
+				for docIdx, doc := range splitYAMLDocuments(data) {
+					pm, err := parseManifestYAML(doc)
+					if err != nil {
+						return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+							fmt.Sprintf("parse cluster-scoped manifest blob[%d][%d][%d]: %v", blobIdx, fileIdx, docIdx, err)), nil
+					}
+					if pm != nil {
+						clusterScopedManifests = append(clusterScopedManifests, *pm)
+					}
+				}
+			}
+		}
+		csApplied := 0
+		for _, m := range clusterScopedManifests {
+			if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+				applyCSStep = runnerlib.StepResult{
+					Name:        "apply-cluster-scoped",
+					Status:      runnerlib.ResultFailed,
+					StartedAt:   csStart,
+					CompletedAt: time.Now().UTC(),
+					Message:     fmt.Sprintf("apply %s %s: %v", m.kind, m.name, err),
+				}
+				return runnerlib.OperationResultSpec{
+					Capability:  runnerlib.CapabilityPackDeploy,
+					Status:      runnerlib.ResultFailed,
+					StartedAt:   now,
+					CompletedAt: time.Now().UTC(),
+					Artifacts:   artifacts,
+					Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyCSStep},
+					FailureReason: &runnerlib.FailureReason{
+						Category:   runnerlib.ExecutionFailure,
+						Reason:     fmt.Sprintf("apply cluster-scoped %s %s: %v", m.kind, m.name, err),
+						FailedStep: "apply-cluster-scoped",
+					},
+				}, nil
+			}
+			csApplied++
+		}
+		applyCSStep = runnerlib.StepResult{
+			Name:        "apply-cluster-scoped",
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   csStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     fmt.Sprintf("%d cluster-scoped manifests applied", csApplied),
+		}
+	}
+
+	// Step 7 — Apply all workload manifests. SSA is idempotent -- Namespace
 	// manifests applied in step 3 are safely re-applied without effect.
 	applyStart := time.Now().UTC()
 	applied := 0
 	for _, m := range workloadManifests {
 		if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+			steps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep}
+			if clusterScopedDigest != "" {
+				steps = append(steps, applyCSStep)
+			}
 			return runnerlib.OperationResultSpec{
 				Capability:  runnerlib.CapabilityPackDeploy,
 				Status:      runnerlib.ResultFailed,
 				StartedAt:   now,
 				CompletedAt: time.Now().UTC(),
 				Artifacts:   artifacts,
-				Steps:       []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep},
+				Steps:       steps,
 				FailureReason: &runnerlib.FailureReason{
 					Category:   runnerlib.ExecutionFailure,
 					Reason:     fmt.Sprintf("apply workload %s %s/%s: %v", m.kind, m.namespace, m.name, err),
@@ -655,25 +737,27 @@ func (h *packDeployHandler) executeSplitPath(
 		Message:     fmt.Sprintf("%d workload manifests applied", applied),
 	}
 
-	// Step 7 — Wait for workload Deployments, StatefulSets, and DaemonSets to become ready.
+	// Step 8 — Wait for workload Deployments, StatefulSets, and DaemonSets to become ready.
 	readyStart := time.Now().UTC()
 	if waitErr := waitForStageReady(ctx, params.DynamicClient, workloadManifests); waitErr != nil {
+		preSteps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep}
+		if clusterScopedDigest != "" {
+			preSteps = append(preSteps, applyCSStep)
+		}
+		preSteps = append(preSteps, applyStep)
 		return runnerlib.OperationResultSpec{
 			Capability:  runnerlib.CapabilityPackDeploy,
 			Status:      runnerlib.ResultFailed,
 			StartedAt:   now,
 			CompletedAt: time.Now().UTC(),
 			Artifacts:   artifacts,
-			Steps: []runnerlib.StepResult{
-				pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep,
-				{
-					Name:        "wait-ready",
-					Status:      runnerlib.ResultFailed,
-					StartedAt:   readyStart,
-					CompletedAt: time.Now().UTC(),
-					Message:     waitErr.Error(),
-				},
-			},
+			Steps: append(preSteps, runnerlib.StepResult{
+				Name:        "wait-ready",
+				Status:      runnerlib.ResultFailed,
+				StartedAt:   readyStart,
+				CompletedAt: time.Now().UTC(),
+				Message:     waitErr.Error(),
+			}),
 			FailureReason: &runnerlib.FailureReason{
 				Category:   runnerlib.ExecutionFailure,
 				Reason:     fmt.Sprintf("workload readiness wait failed: %v", waitErr),
@@ -690,8 +774,8 @@ func (h *packDeployHandler) executeSplitPath(
 	}
 
 	// Collect deployed resources for PackInstance.Status.DeployedResources.
-	// RBAC resources were applied by guardian rbac-intake; workload resources
-	// were applied by applyParsedManifest. wrapper-schema.md §3, Decision 11.
+	// RBAC via guardian intake, cluster-scoped and workload via direct apply.
+	// wrapper-schema.md §3, Decision 11.
 	var deployedResources []runnerlib.DeployedResource
 	for _, yaml := range rbacYAMLs {
 		if pm, err := parseManifestYAML([]byte(yaml)); err == nil && pm != nil {
@@ -703,6 +787,14 @@ func (h *packDeployHandler) executeSplitPath(
 			})
 		}
 	}
+	for _, m := range clusterScopedManifests {
+		deployedResources = append(deployedResources, runnerlib.DeployedResource{
+			APIVersion: m.apiVersion,
+			Kind:       m.kind,
+			Namespace:  m.namespace,
+			Name:       m.name,
+		})
+	}
 	for _, m := range workloadManifests {
 		deployedResources = append(deployedResources, runnerlib.DeployedResource{
 			APIVersion: m.apiVersion,
@@ -712,13 +804,19 @@ func (h *packDeployHandler) executeSplitPath(
 		})
 	}
 
+	finalSteps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep}
+	if clusterScopedDigest != "" {
+		finalSteps = append(finalSteps, applyCSStep)
+	}
+	finalSteps = append(finalSteps, applyStep, readyStep)
+
 	return runnerlib.OperationResultSpec{
 		Capability:        runnerlib.CapabilityPackDeploy,
 		Status:            runnerlib.ResultSucceeded,
 		StartedAt:         now,
 		CompletedAt:       time.Now().UTC(),
 		Artifacts:         artifacts,
-		Steps:             []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep, applyStep, readyStep},
+		Steps:             finalSteps,
 		DeployedResources: deployedResources,
 	}, nil
 }

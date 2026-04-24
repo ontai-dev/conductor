@@ -1,5 +1,5 @@
-// compile_packbuild_split.go re-exports the RBAC/workload manifest splitting
-// helpers from internal/packbuild for use within the compiler main package.
+// compile_packbuild_split.go re-exports the manifest splitting helpers from
+// internal/packbuild for use within the compiler main package.
 // wrapper-schema.md §4.
 package main
 
@@ -14,8 +14,15 @@ func ParsePackManifests(multiYAML string) ([]PackManifest, error) {
 	return packbuild.ParseManifests(multiYAML)
 }
 
-// SplitRBACAndWorkload partitions a PackManifest slice into RBAC and workload slices.
-// Delegates to packbuild.SplitRBACAndWorkload. Pure function with no side effects.
+// SplitManifests partitions a PackManifest slice into RBAC, cluster-scoped, and
+// workload slices. Delegates to packbuild.SplitManifests.
+func SplitManifests(manifests []PackManifest) (rbac, clusterScoped, workload []PackManifest) {
+	return packbuild.SplitManifests(manifests)
+}
+
+// SplitRBACAndWorkload is the legacy two-bucket split. Preserved for any
+// callers that do not need the cluster-scoped bucket. Delegates to
+// packbuild.SplitRBACAndWorkload.
 func SplitRBACAndWorkload(manifests []PackManifest) (rbac, workload []PackManifest) {
 	return packbuild.SplitRBACAndWorkload(manifests)
 }

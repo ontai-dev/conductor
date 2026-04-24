@@ -4,7 +4,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -51,13 +53,45 @@ type ociPushDescriptor struct {
 	Digest    string `json:"digest"`
 }
 
-// ociPushLayer pushes raw YAML bytes as a single blob to the registry and
-// returns a populated ociPushManifest (config is a zero-byte empty JSON blob).
-// The manifest is also pushed to the registry under the given tag.
+// packYAMLAsTarGz wraps raw YAML bytes in a gzip-compressed tar archive with a
+// single entry named "manifests.yaml". Conductor's extractYAMLsFromTarGz expects
+// this format when unpacking OCI layer blobs.
+func packYAMLAsTarGz(yamlData []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: "manifests.yaml",
+		Mode: 0644,
+		Size: int64(len(yamlData)),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return nil, fmt.Errorf("packYAMLAsTarGz: write header: %w", err)
+	}
+	if _, err := tw.Write(yamlData); err != nil {
+		return nil, fmt.Errorf("packYAMLAsTarGz: write data: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return nil, fmt.Errorf("packYAMLAsTarGz: close tar: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		return nil, fmt.Errorf("packYAMLAsTarGz: close gzip: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// ociPushLayer wraps YAML bytes in a tar.gz archive and pushes it as a single
+// OCI blob to the registry. The manifest is also pushed under the given tag.
 // Returns the manifest digest (sha256:...) for use in ClusterPack spec fields.
+// Conductor's extractYAMLsFromTarGz expects the tar.gz format when pulling layers.
 //
 // Registry scheme is inferred: http for 10.x and localhost, https otherwise.
 func ociPushLayer(ctx context.Context, registryURL, tag string, layerData []byte) (digest string, err error) {
+	tgzData, err := packYAMLAsTarGz(layerData)
+	if err != nil {
+		return "", fmt.Errorf("ociPushLayer: pack tar.gz: %w", err)
+	}
+	layerData = tgzData
 	parsed, err := parseCompilerOCIRef(registryURL + ":" + tag)
 	if err != nil {
 		return "", fmt.Errorf("ociPushLayer: parse registry ref: %w", err)
