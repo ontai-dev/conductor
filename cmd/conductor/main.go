@@ -87,10 +87,10 @@ func runExecute() {
 	// BuildExecuteContext populates Capability/ClusterRef/OperationResultCM but
 	// leaves RunnerConfig.Steps empty. kernel.RunExecute requires ≥1 step.
 	// conductor-schema.md §17.
-	execCtx.RunnerConfig = runnerlib.RunnerConfigSpec{
+	execCtx.RunnerConfig = seamv1alpha1.InfrastructureRunnerConfigSpec{
 		ClusterRef:  execCtx.ClusterRef,
 		RunnerImage: os.Getenv("CONDUCTOR_IMAGE"),
-		Steps: []runnerlib.RunnerConfigStep{
+		Steps: []seamv1alpha1.RunnerConfigStep{
 			{
 				Name:          execCtx.Capability,
 				Capability:    execCtx.Capability,
@@ -317,16 +317,16 @@ type capabilityStepExecutor struct {
 
 func (e *capabilityStepExecutor) Execute(
 	ctx context.Context,
-	step runnerlib.RunnerConfigStep,
+	step seamv1alpha1.RunnerConfigStep,
 	clusterRef, namespace string,
-) (runnerlib.RunnerConfigStepResult, error) {
+) (seamv1alpha1.RunnerConfigStepResult, error) {
 	handler, err := e.reg.Resolve(step.Capability)
 	if err != nil {
 		// Capability not registered — return a Failed result, not a Go error.
 		// The sequencer decides whether to halt based on HaltOnFailure.
-		return runnerlib.RunnerConfigStepResult{
-			StepName: step.Name,
-			Phase:    runnerlib.StepPhaseFailed,
+		return seamv1alpha1.RunnerConfigStepResult{
+			Name:   step.Name,
+			Status: seamv1alpha1.RunnerStepFailed,
 		}, nil
 	}
 
@@ -348,23 +348,22 @@ func (e *capabilityStepExecutor) Execute(
 	}
 	result, err := handler.Execute(ctx, params)
 	if err != nil {
-		return runnerlib.RunnerConfigStepResult{}, fmt.Errorf(
+		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
 			"capabilityStepExecutor: step %q capability %q: %w", step.Name, step.Capability, err)
 	}
 
 	if writeErr := e.writer.WriteResult(ctx, namespace, packExecutionRef, result); writeErr != nil {
-		return runnerlib.RunnerConfigStepResult{}, fmt.Errorf(
+		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
 			"capabilityStepExecutor: write result for step %q: %w", step.Name, writeErr)
 	}
 
-	phase := runnerlib.StepPhaseSucceeded
+	status := seamv1alpha1.RunnerStepSucceeded
 	if result.Status == runnerlib.ResultFailed {
-		phase = runnerlib.StepPhaseFailed
+		status = seamv1alpha1.RunnerStepFailed
 	}
 
-	return runnerlib.RunnerConfigStepResult{
-		StepName:  step.Name,
-		Phase:     phase,
-		OutputRef: runnerlib.ConfigMapRef{Namespace: namespace, Name: packExecutionRef},
+	return seamv1alpha1.RunnerConfigStepResult{
+		Name:   step.Name,
+		Status: status,
 	}, nil
 }

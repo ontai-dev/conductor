@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ontai-dev/conductor/pkg/runnerlib"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // runnerConfigGVR is the GroupVersionResource for RunnerConfig CRs.
@@ -97,7 +97,7 @@ func poll(t *testing.T, timeout time.Duration, condition func() bool) bool {
 
 // createRunnerConfig creates a RunnerConfig CR in the real API server with the
 // given namespace, name, and spec. Returns the UID of the created object.
-func createRunnerConfig(ctx context.Context, t *testing.T, ns, name string, spec runnerlib.RunnerConfigSpec) string {
+func createRunnerConfig(ctx context.Context, t *testing.T, ns, name string, spec seamcorev1alpha1.InfrastructureRunnerConfigSpec) string {
 	t.Helper()
 
 	specBytes, err := json.Marshal(spec)
@@ -159,12 +159,12 @@ type k8sStepStatusWriter struct {
 	name      string
 }
 
-func (w *k8sStepStatusWriter) WriteStepResult(ctx context.Context, result runnerlib.RunnerConfigStepResult) error {
+func (w *k8sStepStatusWriter) WriteStepResult(ctx context.Context, result seamcorev1alpha1.RunnerConfigStepResult) error {
 	return w.patchStatus(ctx, func(status map[string]interface{}) {
 		results, _ := status["stepResults"].([]interface{})
 		resultMap := map[string]interface{}{
-			"stepName": result.StepName,
-			"phase":    string(result.Phase),
+			"name":   result.Name,
+			"status": string(result.Status),
 		}
 		status["stepResults"] = append(results, resultMap)
 	})
