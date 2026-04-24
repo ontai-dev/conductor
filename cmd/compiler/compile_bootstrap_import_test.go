@@ -90,6 +90,7 @@ func TestBootstrap_ImportExistingCluster_LocalFilePath(t *testing.T) {
 name: import-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -138,6 +139,7 @@ func TestBootstrap_ImportExistingCluster_LocalFileMissingReturnsError(t *testing
 name: import-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -169,6 +171,7 @@ func TestBootstrap_ImportExistingCluster_InitNodeAbsentFromMapReturnsError(t *te
 name: import-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -206,6 +209,7 @@ func TestBootstrap_ImportMode_EmitsSeamTenantNamespaceManifest(t *testing.T) {
 name: my-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -283,6 +287,7 @@ func TestBootstrap_ImportMode_NamespaceNameIsSeamTenantNotTenant(t *testing.T) {
 name: target-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -328,6 +333,7 @@ func TestBootstrap_ImportExistingCluster_KubeconfigFallback(t *testing.T) {
 name: import-cluster
 namespace: seam-system
 mode: import
+role: management
 capi:
   enabled: false
 importExistingCluster: true
@@ -347,4 +353,234 @@ bootstrap:
 	if err == nil {
 		t.Fatal("expected error for missing kubeconfig in API fallback path; got nil")
 	}
+}
+
+// ── T-01: mode/role discriminator matrix ─────────────────────────────────────
+
+// TestReadClusterInput_ImportModeRequiresRole verifies that readClusterInput
+// rejects mode=import when role is absent. The discriminator matrix requires
+// role to be explicit on all import paths.
+func TestReadClusterInput_ImportModeRequiresRole(t *testing.T) {
+	input := `
+name: my-cluster
+namespace: seam-system
+mode: import
+capi:
+  enabled: false
+`
+	inputPath := writeInputFile(t, input)
+	_, err := readClusterInput(inputPath)
+	if err == nil {
+		t.Fatal("expected error for mode=import with absent role; got nil")
+	}
+	if !containsStr(err.Error(), "role") {
+		t.Errorf("error should mention role; got: %v", err)
+	}
+}
+
+// TestReadClusterInput_ImportModeInvalidRoleReturnsError verifies that
+// readClusterInput rejects mode=import with a role value other than
+// "management" or "tenant".
+func TestReadClusterInput_ImportModeInvalidRoleReturnsError(t *testing.T) {
+	input := `
+name: my-cluster
+namespace: seam-system
+mode: import
+role: worker
+capi:
+  enabled: false
+`
+	inputPath := writeInputFile(t, input)
+	_, err := readClusterInput(inputPath)
+	if err == nil {
+		t.Fatal("expected error for mode=import with invalid role; got nil")
+	}
+	if !containsStr(err.Error(), "worker") {
+		t.Errorf("error should mention the invalid role value; got: %v", err)
+	}
+}
+
+// TestReadClusterInput_ImportModeManagementRoleAccepted verifies that
+// readClusterInput accepts mode=import with role=management.
+func TestReadClusterInput_ImportModeManagementRoleAccepted(t *testing.T) {
+	input := `
+name: my-cluster
+namespace: seam-system
+mode: import
+role: management
+capi:
+  enabled: false
+`
+	inputPath := writeInputFile(t, input)
+	in, err := readClusterInput(inputPath)
+	if err != nil {
+		t.Fatalf("unexpected error for mode=import role=management: %v", err)
+	}
+	if in.Role != "management" {
+		t.Errorf("expected role=management; got %q", in.Role)
+	}
+}
+
+// TestReadClusterInput_ImportModeTenantRoleAccepted verifies that
+// readClusterInput accepts mode=import with role=tenant.
+func TestReadClusterInput_ImportModeTenantRoleAccepted(t *testing.T) {
+	input := `
+name: my-cluster
+namespace: seam-system
+mode: import
+role: tenant
+capi:
+  enabled: false
+`
+	inputPath := writeInputFile(t, input)
+	in, err := readClusterInput(inputPath)
+	if err != nil {
+		t.Fatalf("unexpected error for mode=import role=tenant: %v", err)
+	}
+	if in.Role != "tenant" {
+		t.Errorf("expected role=tenant; got %q", in.Role)
+	}
+}
+
+// TestBootstrap_BootstrapCAPIFalse_NoRoleEmitted verifies that compileBootstrap
+// with mode=bootstrap and capi.enabled=false does not emit a role field in the
+// TalosCluster CR. Role is implicit on all bootstrap paths.
+func TestBootstrap_BootstrapCAPIFalse_NoRoleEmitted(t *testing.T) {
+	input := `
+name: mgmt-cluster
+namespace: seam-system
+mode: bootstrap
+capi:
+  enabled: false
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.10:6443"
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.0.0.1"
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	outDir := t.TempDir()
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+	crData, err := os.ReadFile(filepath.Join(outDir, "mgmt-cluster.yaml"))
+	if err != nil {
+		t.Fatalf("TalosCluster CR not found: %v", err)
+	}
+	content := string(crData)
+	if containsStr(content, "role:") {
+		t.Errorf("TalosCluster CR must not contain role field on mode=bootstrap path; got:\n%s", content)
+	}
+}
+
+// TestBootstrap_BootstrapCAPITrue_NoRoleEmitted verifies that compileBootstrap
+// with mode=bootstrap and capi.enabled=true does not emit a role field.
+func TestBootstrap_BootstrapCAPITrue_NoRoleEmitted(t *testing.T) {
+	input := `
+name: tenant-cluster
+namespace: seam-system
+mode: bootstrap
+capi:
+  enabled: true
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  controlPlaneReplicas: 3
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.20:6443"
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.0.0.2"
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	outDir := t.TempDir()
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+	crData, err := os.ReadFile(filepath.Join(outDir, "tenant-cluster.yaml"))
+	if err != nil {
+		t.Fatalf("TalosCluster CR not found: %v", err)
+	}
+	if containsStr(string(crData), "role:") {
+		t.Errorf("TalosCluster CR must not contain role field on mode=bootstrap capi=true path")
+	}
+}
+
+// TestBootstrap_ImportManagement_RoleEmitted verifies that compileBootstrap
+// with mode=import and role=management emits role: management in the CR.
+func TestBootstrap_ImportManagement_RoleEmitted(t *testing.T) {
+	mcPath := generateMachineConfigFile(t, "mgmt", "cp1")
+	input := fmt.Sprintf(`
+name: mgmt
+namespace: seam-system
+mode: import
+role: management
+capi:
+  enabled: false
+importExistingCluster: true
+machineConfigPaths:
+  cp1: %s
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.10:6443"
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.0.0.1"
+      role: init
+`, mcPath)
+	inputPath := writeInputFile(t, input)
+	outDir := t.TempDir()
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+	crData, err := os.ReadFile(filepath.Join(outDir, "mgmt.yaml"))
+	if err != nil {
+		t.Fatalf("TalosCluster CR not found: %v", err)
+	}
+	assertContainsStr(t, string(crData), "role: management")
+}
+
+// TestBootstrap_ImportTenant_RoleEmitted verifies that compileBootstrap
+// with mode=import and role=tenant emits role: tenant in the CR.
+func TestBootstrap_ImportTenant_RoleEmitted(t *testing.T) {
+	mcPath := generateMachineConfigFile(t, "tnt", "cp1")
+	input := fmt.Sprintf(`
+name: tnt
+namespace: seam-system
+mode: import
+role: tenant
+capi:
+  enabled: false
+importExistingCluster: true
+machineConfigPaths:
+  cp1: %s
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.10:6443"
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.0.0.1"
+      role: init
+`, mcPath)
+	inputPath := writeInputFile(t, input)
+	outDir := t.TempDir()
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+	crData, err := os.ReadFile(filepath.Join(outDir, "tnt.yaml"))
+	if err != nil {
+		t.Fatalf("TalosCluster CR not found: %v", err)
+	}
+	assertContainsStr(t, string(crData), "role: tenant")
 }
