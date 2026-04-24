@@ -227,16 +227,21 @@ func stripScheme(endpoint string) string {
 	return endpoint
 }
 
-// clusterRole returns the TalosClusterRole for a ClusterInput. When the Role
-// field is explicitly set, it is used directly. Otherwise the default is
-// TalosClusterRoleManagement, which covers all bootstrap and talosconfig-only
-// import scenarios. Fix 3.
-func clusterRole(in ClusterInput) platformv1alpha1.TalosClusterRole {
+// clusterRole returns the TalosClusterRole for a ClusterInput.
+// mode=import requires an explicit role of "management" or "tenant"; absent or
+// invalid role returns an error. mode=bootstrap callers must not call this
+// function -- Role is not emitted on bootstrap paths.
+func clusterRole(in ClusterInput) (platformv1alpha1.TalosClusterRole, error) {
 	switch in.Role {
+	case "management":
+		return platformv1alpha1.TalosClusterRoleManagement, nil
 	case "tenant":
-		return platformv1alpha1.TalosClusterRoleTenant
+		return platformv1alpha1.TalosClusterRoleTenant, nil
 	default:
-		return platformv1alpha1.TalosClusterRoleManagement
+		if in.Mode == "import" {
+			return "", fmt.Errorf("mode=import requires role to be \"management\" or \"tenant\", got %q", in.Role)
+		}
+		return platformv1alpha1.TalosClusterRoleManagement, nil
 	}
 }
 
@@ -455,6 +460,9 @@ func readClusterInput(path string) (ClusterInput, error) {
 	}
 	if in.Mode == "" {
 		return ClusterInput{}, fmt.Errorf("input file %q: mode is required (bootstrap or import)", path)
+	}
+	if in.Mode == "import" && in.Role != "management" && in.Role != "tenant" {
+		return ClusterInput{}, fmt.Errorf("input file %q: mode=import requires role to be \"management\" or \"tenant\", got %q", path, in.Role)
 	}
 	return in, nil
 }
@@ -852,6 +860,21 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 
 	// Produce TalosCluster CR. ontai.dev/owns-runnerconfig signals Platform to add
 	// a finalizer and clean up the RunnerConfig in ont-system on deletion. Bug 3.
+	// Role is absent on all bootstrap paths (mode=bootstrap, capi.enabled=false or true).
+	// Role is present only on mode=import, where it is mandatory.
+	tcSpec := platformv1alpha1.TalosClusterSpec{
+		Mode:            tcMode,
+		TalosVersion:    b.TalosVersion,
+		ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
+		// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
+	}
+	if tcMode == platformv1alpha1.TalosClusterModeImport {
+		role, err := clusterRole(in)
+		if err != nil {
+			return fmt.Errorf("compileBootstrap: %w", err)
+		}
+		tcSpec.Role = role
+	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "platform.ontai.dev/v1alpha1",
@@ -864,13 +887,7 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 				"ontai.dev/owns-runnerconfig": "true",
 			},
 		},
-		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode:            tcMode,
-			Role:            clusterRole(in),
-			TalosVersion:    b.TalosVersion,
-			ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
-			// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
-		},
+		Spec: tcSpec,
 	}
 	if err := writeCRYAML(output, in.Name, tc); err != nil {
 		return fmt.Errorf("write TalosCluster CR: %w", err)
@@ -1156,12 +1173,14 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 
 	// Emit TalosCluster CR with mode=import so the operator can adopt the cluster
 	// without a bootstrap Job. conductor-schema.md §9.
-	// Fix 1: populate TalosVersion and ClusterEndpoint when bootstrap section present.
-	// Fix 3: Role derived from in.Role (defaults to management).
 	var talosVersion, clusterEndpoint string
 	if in.Bootstrap != nil {
 		talosVersion = in.Bootstrap.TalosVersion
 		clusterEndpoint = stripScheme(in.Bootstrap.ControlPlaneEndpoint)
+	}
+	role, err := clusterRole(in)
+	if err != nil {
+		return fmt.Errorf("compileImportTalosconfigSecret: %w", err)
 	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
@@ -1177,7 +1196,7 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
 			Mode:            platformv1alpha1.TalosClusterModeImport,
-			Role:            clusterRole(in),
+			Role:            role,
 			TalosVersion:    talosVersion,
 			ClusterEndpoint: clusterEndpoint,
 			// CAPI nil -- management cluster import path; nil suppresses capi block (C-34).
