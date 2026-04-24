@@ -117,7 +117,9 @@ func TestHelmCompilePackBuild_ChartMetadataPopulated(t *testing.T) {
 	chartSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-tar")
 		w.WriteHeader(http.StatusOK)
-		w.Write(chartTarball)
+		if _, err := w.Write(chartTarball); err != nil {
+			t.Errorf("chart server: write: %v", err)
+		}
 	}))
 	defer chartSrv.Close()
 
