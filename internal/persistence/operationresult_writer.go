@@ -5,8 +5,9 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"log/slog"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,11 +17,21 @@ import (
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
+// labelPackExecution is the label key used to group PackOperationResult CRs by
+// the PackExecution they belong to. The single-active-revision pattern relies on
+// this label for list queries.
+const labelPackExecution = "ontai.dev/pack-execution"
+
 // OperationResultWriter writes an OperationResultSpec to a named
 // PackOperationResult CR. This is the output channel between Conductor
 // execute-mode Jobs and the wrapper operator.
 type OperationResultWriter interface {
-	WriteResult(ctx context.Context, namespace, name string, result runnerlib.OperationResultSpec) error
+	// WriteResult implements the single-active-revision pattern: lists existing
+	// PackOperationResults for packExecutionRef, creates a new CR at revision N+1,
+	// logs the predecessor spec, then deletes the predecessor. After a successful
+	// call exactly one PackOperationResult labelled by packExecutionRef exists in
+	// the namespace.
+	WriteResult(ctx context.Context, namespace, packExecutionRef string, result runnerlib.OperationResultSpec) error
 }
 
 // kubeOperationResultWriter is the production OperationResultWriter backed by
@@ -37,51 +48,94 @@ func NewKubeOperationResultWriter(client ctrlclient.Client, clusterRef string) O
 	return &kubeOperationResultWriter{client: client, clusterRef: clusterRef}
 }
 
-// WriteResult serializes the OperationResultSpec fields into a PackOperationResult
-// CR and creates or updates it in the given namespace under the given name.
+// WriteResult implements the single-active-revision pattern for PackOperationResult.
+//
+// Steps:
+//  1. List all PackOperationResults in namespace labelled by packExecutionRef.
+//  2. Select the one with the highest Revision as the predecessor (N). If none
+//     exist, N=0 and there is no predecessor.
+//  3. Build the new spec at revision N+1 and create a CR named
+//     pack-deploy-result-{packExecutionRef}-r{N+1}.
+//  4. Log the predecessor spec at INFO level (GraphQuery DB stub).
+//  5. Delete the predecessor CR.
+//
+// After a successful call exactly one PackOperationResult labelled by
+// packExecutionRef exists in the namespace.
 func (w *kubeOperationResultWriter) WriteResult(
 	ctx context.Context,
-	namespace, name string,
+	namespace, packExecutionRef string,
 	result runnerlib.OperationResultSpec,
 ) error {
-	spec := buildPackOperationResultSpec(result, name, w.clusterRef)
+	list := &seamv1alpha1.PackOperationResultList{}
+	if err := w.client.List(ctx, list,
+		ctrlclient.InNamespace(namespace),
+		ctrlclient.MatchingLabels{labelPackExecution: packExecutionRef},
+	); err != nil {
+		return fmt.Errorf("operationresult writer: list %q in %q: %w", packExecutionRef, namespace, err)
+	}
+
+	var prev *seamv1alpha1.PackOperationResult
+	var highestRevision int64
+	for i := range list.Items {
+		item := &list.Items[i]
+		if item.Spec.Revision > highestRevision {
+			highestRevision = item.Spec.Revision
+			prev = item
+		}
+	}
+
+	newRevision := highestRevision + 1
+	newName := fmt.Sprintf("pack-deploy-result-%s-r%d", packExecutionRef, newRevision)
+
+	prevRef := ""
+	if prev != nil {
+		prevRef = prev.Name
+	}
+
+	spec := buildPackOperationResultSpec(result, packExecutionRef, w.clusterRef)
+	spec.Revision = newRevision
+	spec.PreviousRevisionRef = prevRef
 
 	por := &seamv1alpha1.PackOperationResult{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name:      name,
+			Name:      newName,
+			Labels:    map[string]string{labelPackExecution: packExecutionRef},
 		},
 		Spec: spec,
 	}
 
-	createErr := w.client.Create(ctx, por)
-	if createErr == nil {
-		return nil
-	}
-	if !apierrors.IsAlreadyExists(createErr) {
-		return fmt.Errorf("operationresult writer: create %q in %q: %w", name, namespace, createErr)
+	if err := w.client.Create(ctx, por); err != nil {
+		return fmt.Errorf("operationresult writer: create %q in %q: %w", newName, namespace, err)
 	}
 
-	existing := &seamv1alpha1.PackOperationResult{}
-	if err := w.client.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: name}, existing); err != nil {
-		return fmt.Errorf("operationresult writer: get existing %q in %q: %w", name, namespace, err)
+	if prev != nil {
+		specJSON, _ := json.Marshal(prev.Spec)
+		slog.InfoContext(ctx, "operationresult writer: superseding previous revision",
+			"predecessor", prev.Name,
+			"namespace", namespace,
+			"supersededRevision", prev.Spec.Revision,
+			"newRevision", newRevision,
+			"packExecutionRef", packExecutionRef,
+			"spec", string(specJSON),
+		)
+		if err := w.client.Delete(ctx, prev); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("operationresult writer: delete predecessor %q in %q: %w", prev.Name, namespace, err)
+		}
 	}
-	existing.Spec = spec
-	if err := w.client.Update(ctx, existing); err != nil {
-		return fmt.Errorf("operationresult writer: update existing %q in %q: %w", name, namespace, err)
-	}
+
 	return nil
 }
 
 // buildPackOperationResultSpec maps OperationResultSpec fields to
-// PackOperationResultSpec, deriving packExecutionRef from the result name
-// by stripping the "pack-deploy-result-" prefix.
+// PackOperationResultSpec. Revision and PreviousRevisionRef are set by
+// WriteResult after this function returns.
 func buildPackOperationResultSpec(
 	result runnerlib.OperationResultSpec,
-	name, clusterRef string,
+	packExecutionRef, clusterRef string,
 ) seamv1alpha1.PackOperationResultSpec {
 	spec := seamv1alpha1.PackOperationResultSpec{
-		PackExecutionRef: strings.TrimPrefix(name, "pack-deploy-result-"),
+		PackExecutionRef: packExecutionRef,
 		TargetClusterRef: clusterRef,
 		Capability:       result.Capability,
 		Phase:            result.Phase,
@@ -151,4 +205,3 @@ type NoopOperationResultWriter struct{}
 func (NoopOperationResultWriter) WriteResult(_ context.Context, _, _ string, _ runnerlib.OperationResultSpec) error {
 	return nil
 }
-

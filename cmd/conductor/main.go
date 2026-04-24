@@ -330,18 +330,19 @@ func (e *capabilityStepExecutor) Execute(
 		}, nil
 	}
 
-	// Derive the ConfigMap name: prefer step.Parameters["operationResultCM"] (set
-	// by buildStepParameters() from OPERATION_RESULT_CM env var — the name the
-	// owning operator reads back). Fall back to a deterministic pattern.
-	cmName := step.Parameters["operationResultCM"]
-	if cmName == "" {
-		cmName = fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
+	// packExecutionRef is the PackExecution CR name this step records results for.
+	// The operator sets step.Parameters["operationResultCM"] to the packExecutionRef
+	// (naming is a historical artifact from the ConfigMap era; T-16 wrapper migration
+	// will rename the parameter once all operators move to seam-core POR lookups).
+	packExecutionRef := step.Parameters["operationResultCM"]
+	if packExecutionRef == "" {
+		packExecutionRef = fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
 	}
 
 	params := capability.ExecuteParams{
 		Capability:        step.Capability,
 		ClusterRef:        clusterRef,
-		OperationResultCM: cmName,
+		OperationResultCM: packExecutionRef,
 		Namespace:         namespace,
 		ExecuteClients:    e.clients,
 	}
@@ -351,9 +352,9 @@ func (e *capabilityStepExecutor) Execute(
 			"capabilityStepExecutor: step %q capability %q: %w", step.Name, step.Capability, err)
 	}
 
-	if writeErr := e.writer.WriteResult(ctx, namespace, cmName, result); writeErr != nil {
+	if writeErr := e.writer.WriteResult(ctx, namespace, packExecutionRef, result); writeErr != nil {
 		return runnerlib.RunnerConfigStepResult{}, fmt.Errorf(
-			"capabilityStepExecutor: write ConfigMap for step %q: %w", step.Name, writeErr)
+			"capabilityStepExecutor: write result for step %q: %w", step.Name, writeErr)
 	}
 
 	phase := runnerlib.StepPhaseSucceeded
@@ -364,6 +365,6 @@ func (e *capabilityStepExecutor) Execute(
 	return runnerlib.RunnerConfigStepResult{
 		StepName:  step.Name,
 		Phase:     phase,
-		OutputRef: runnerlib.ConfigMapRef{Namespace: namespace, Name: cmName},
+		OutputRef: runnerlib.ConfigMapRef{Namespace: namespace, Name: packExecutionRef},
 	}, nil
 }
