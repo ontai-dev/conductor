@@ -52,6 +52,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		fmt.Fprintln(os.Stderr, "KUBEBUILDER_ASSETS not set; skipping integration suite (requires KUBEBUILDER_ASSETS and CONDUCTOR-ENVTEST-BINARIES closed)")
+		os.Exit(0)
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	crdPath := filepath.Join("..", "..", "config", "crd")
