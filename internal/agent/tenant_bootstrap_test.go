@@ -292,48 +292,52 @@ func TestSweep_NonSystemClusterRoleAnnotated(t *testing.T) {
 	}
 }
 
-// --- component profile creation ---
+// --- component profile creation (SA-based discovery) ---
 
-// TestSweep_ProfileCreation_SkipsAbsentNamespace verifies that a component
-// whose namespace does not exist on the tenant cluster is silently skipped.
-func TestSweep_ProfileCreation_SkipsAbsentNamespace(t *testing.T) {
+// TestSweep_ProfileCreation_SkipsAbsentSA verifies that a component whose
+// ServiceAccount does not exist on the cluster is silently skipped.
+// Namespace is irrelevant -- discovery is by SA name, not by namespace.
+func TestSweep_ProfileCreation_SkipsAbsentSA(t *testing.T) {
 	sweep, _, dyn, _ := newSweepSuite(t)
 
-	// No cert-manager namespace exists.
+	// No SA for any known component exists.
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
-		t.Fatalf("createComponentProfiles with absent namespaces: %v", err)
+		t.Fatalf("createComponentProfiles with absent SAs: %v", err)
 	}
 
-	// No PermissionSet should have been created.
+	// No PermissionSet should have been created in any namespace.
 	list, _ := dyn.Resource(tenantPermissionSetGVR).Namespace("cert-manager").List(context.Background(), metav1.ListOptions{})
 	if list != nil && len(list.Items) > 0 {
-		t.Errorf("PermissionSet should not be created when namespace is absent")
+		t.Errorf("PermissionSet should not be created when SA is absent")
 	}
 }
 
-// TestSweep_ProfileCreation_CreatesResourcesWhenNamespaceExists verifies that
-// PermissionSet, RBACPolicy, and RBACProfile are created when the component
-// namespace exists and security CRDs are available.
-func TestSweep_ProfileCreation_CreatesResourcesWhenNamespaceExists(t *testing.T) {
+// TestSweep_ProfileCreation_DiscoversByServiceAccountName verifies that
+// PermissionSet, RBACPolicy, and RBACProfile are created in the namespace
+// where the component's SA is found — not from a hardcoded namespace.
+func TestSweep_ProfileCreation_DiscoversByServiceAccountName(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 
-	addNamespace(t, kube, "cert-manager", nil)
+	// Create cert-manager SA in a non-conventional namespace to prove
+	// discovery is SA-based, not namespace-hardcoded.
+	addNamespace(t, kube, "tools", nil)
+	addServiceAccount(t, kube, "tools", "cert-manager", nil)
 
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
-	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("cert-manager").Get(
+	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("tools").Get(
 		context.Background(), "cert-manager-baseline", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Fatalf("PermissionSet not created: %v", err)
+		t.Fatalf("PermissionSet not created in discovered namespace %q: %v", "tools", err)
 	}
 	if ps.GetName() != "cert-manager-baseline" {
 		t.Errorf("PermissionSet name: got %q, want cert-manager-baseline", ps.GetName())
 	}
 
-	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("cert-manager").Get(
+	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("tools").Get(
 		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
 	)
 	if err != nil {
@@ -343,7 +347,7 @@ func TestSweep_ProfileCreation_CreatesResourcesWhenNamespaceExists(t *testing.T)
 		t.Errorf("RBACPolicy name: got %q", policy.GetName())
 	}
 
-	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("cert-manager").Get(
+	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("tools").Get(
 		context.Background(), "rbac-cert-manager", metav1.GetOptions{},
 	)
 	if err != nil {
@@ -354,12 +358,69 @@ func TestSweep_ProfileCreation_CreatesResourcesWhenNamespaceExists(t *testing.T)
 	}
 }
 
+// TestSweep_ProfileCreation_HintPreferredOnCollision verifies that when the
+// SA name exists in multiple namespaces, the NamespaceHint namespace is preferred.
+func TestSweep_ProfileCreation_HintPreferredOnCollision(t *testing.T) {
+	sweep, kube, dyn, _ := newSweepSuite(t)
+
+	// cert-manager SA exists in both "cert-manager" (hint) and "other-ns".
+	addNamespace(t, kube, "other-ns", nil)
+	addServiceAccount(t, kube, "other-ns", "cert-manager", nil)
+	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
+
+	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	// Profile should be in the hint namespace "cert-manager", not "other-ns".
+	_, err := dyn.Resource(tenantPermissionSetGVR).Namespace("cert-manager").Get(
+		context.Background(), "cert-manager-baseline", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Errorf("PermissionSet should be in hint namespace cert-manager: %v", err)
+	}
+	// other-ns should have nothing.
+	list, _ := dyn.Resource(tenantPermissionSetGVR).Namespace("other-ns").List(context.Background(), metav1.ListOptions{})
+	if list != nil && len(list.Items) > 0 {
+		t.Errorf("PermissionSet should NOT be created in non-hint namespace other-ns")
+	}
+}
+
+// TestSweep_ProfileCreation_PrincipalRefUsesDiscoveredNamespace verifies that
+// the RBACProfile principalRef is built from the discovered namespace, not hardcoded.
+func TestSweep_ProfileCreation_PrincipalRefUsesDiscoveredNamespace(t *testing.T) {
+	sweep, kube, dyn, _ := newSweepSuite(t)
+
+	addNamespace(t, kube, "custom-ns", nil)
+	addServiceAccount(t, kube, "custom-ns", "cert-manager", nil)
+
+	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("custom-ns").Get(
+		context.Background(), "rbac-cert-manager", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("RBACProfile not found: %v", err)
+	}
+
+	spec, _ := profile.Object["spec"].(map[string]interface{})
+	principalRef, _ := spec["principalRef"].(string)
+	wantPrincipal := "system:serviceaccount:custom-ns:cert-manager"
+	if principalRef != wantPrincipal {
+		t.Errorf("principalRef: got %q, want %q", principalRef, wantPrincipal)
+	}
+}
+
 // TestSweep_ProfileCreation_IsIdempotent verifies that running createComponentProfiles
 // twice does not fail or duplicate resources.
 func TestSweep_ProfileCreation_IsIdempotent(t *testing.T) {
 	sweep, kube, _, _ := newSweepSuite(t)
 
 	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
 		t.Fatalf("first createComponentProfiles: %v", err)
@@ -373,7 +434,6 @@ func TestSweep_ProfileCreation_IsIdempotent(t *testing.T) {
 // security.ontai.dev CRDs are not installed on the tenant cluster. The sweep
 // must return nil (not an error) so the enforcement gate still transitions.
 func TestSweep_ProfileCreation_SkipsMissingCRDs(t *testing.T) {
-	// Build a dynamic client scheme with NO security CRD types registered.
 	s := runtime.NewScheme()
 	kube := kubefake.NewClientset()
 	dyn := dynamicfake.NewSimpleDynamicClient(s)
@@ -385,9 +445,8 @@ func TestSweep_ProfileCreation_SkipsMissingCRDs(t *testing.T) {
 	}
 
 	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
-	// The fake client returns "no kind is registered" for unknown GVRs; the
-	// sweep should detect this and return nil.
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
 		t.Fatalf("createComponentProfiles with missing CRDs should not error: %v", err)
 	}
@@ -401,6 +460,7 @@ func TestRunOnce_SetsGateStrictOnSuccess(t *testing.T) {
 	sweep, kube, _, gate := newSweepSuite(t)
 
 	addNamespace(t, kube, "app-ns", nil)
+	addRole(t, kube, "app-ns", "app-role", nil)
 
 	sweep.RunOnce(context.Background())
 
@@ -452,6 +512,7 @@ func TestIsSystemNamespace(t *testing.T) {
 func TestSweep_PermissionSetSpec(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
@@ -494,12 +555,22 @@ func TestSweep_PermissionSetSpec(t *testing.T) {
 }
 
 // TestSweep_AllFiveComponentsCreated verifies that all five components in the
-// catalog get PermissionSet+RBACPolicy+RBACProfile when their namespaces exist.
+// catalog get PermissionSet+RBACPolicy+RBACProfile when their SAs are present.
+// Each component SA is created in the conventional namespace for clarity.
 func TestSweep_AllFiveComponentsCreated(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 
-	for _, comp := range tenantKnownComponents {
-		addNamespace(t, kube, comp.Namespace, nil)
+	// Map of component SA name → namespace for setup.
+	compNS := map[string]string{
+		"cert-manager":                       "cert-manager",
+		"kueue-controller-manager":            "kueue-system",
+		"cnpg-manager":                        "cnpg-system",
+		"metallb-controller":                  "metallb-system",
+		"local-path-provisioner-service-account": "local-path-storage",
+	}
+	for saName, ns := range compNS {
+		addNamespace(t, kube, ns, nil)
+		addServiceAccount(t, kube, ns, saName, nil)
 	}
 
 	if err := sweep.createComponentProfiles(context.Background()); err != nil {
@@ -507,17 +578,18 @@ func TestSweep_AllFiveComponentsCreated(t *testing.T) {
 	}
 
 	for _, comp := range tenantKnownComponents {
-		if _, err := dyn.Resource(tenantPermissionSetGVR).Namespace(comp.Namespace).Get(
+		ns := compNS[comp.ServiceAccountName]
+		if _, err := dyn.Resource(tenantPermissionSetGVR).Namespace(ns).Get(
 			context.Background(), comp.PermissionSetName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("PermissionSet %q not created for component %q", comp.PermissionSetName, comp.Name)
 		}
-		if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace(comp.Namespace).Get(
+		if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace(ns).Get(
 			context.Background(), comp.PolicyName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("RBACPolicy %q not created for component %q", comp.PolicyName, comp.Name)
 		}
-		if _, err := dyn.Resource(tenantRBACProfileGVR).Namespace(comp.Namespace).Get(
+		if _, err := dyn.Resource(tenantRBACProfileGVR).Namespace(ns).Get(
 			context.Background(), comp.ProfileName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("RBACProfile %q not created for component %q", comp.ProfileName, comp.Name)

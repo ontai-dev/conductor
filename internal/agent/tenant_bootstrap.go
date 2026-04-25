@@ -52,61 +52,65 @@ func mustBuildTenantSweepPatch() []byte {
 	return b
 }
 
-// tenantComponent describes a third-party component whose RBACProfile Guardian
-// creates on management clusters. Conductor role=tenant mirrors this on tenant
-// clusters when security CRDs are available. guardian-schema.md §6.
+// tenantComponent describes a third-party component whose profile Conductor
+// creates on tenant clusters. The install namespace is discovered at runtime
+// by finding ServiceAccountName across all non-system namespaces — never
+// hardcoded. Mirrors managementThirdPartyComponents in guardian. guardian-schema.md §6.
 type tenantComponent struct {
-	Name              string
-	Namespace         string
-	PrincipalRef      string
+	// Name is the human-readable component identifier.
+	Name string
+
+	// ServiceAccountName is the well-known SA name the component creates in its
+	// install namespace. Used to discover the actual namespace at runtime.
+	ServiceAccountName string
+
+	// NamespaceHint is the conventional install namespace, used only as a
+	// tiebreaker when the SA name matches in multiple non-system namespaces.
+	NamespaceHint string
+
 	ProfileName       string
 	PolicyName        string
 	PermissionSetName string
 }
 
 // tenantKnownComponents is the catalog of components for which Conductor creates
-// profiles on tenant clusters when the component namespace exists.
-// Mirrors managementThirdPartyComponents in guardian bootstrap_third_party_profiles.go.
+// profiles on tenant clusters. Namespaces are discovered via ServiceAccountName.
 var tenantKnownComponents = []tenantComponent{
 	{
-		Name:              "cert-manager",
-		Namespace:         "cert-manager",
-		PrincipalRef:      "system:serviceaccount:cert-manager:cert-manager",
-		ProfileName:       "rbac-cert-manager",
-		PolicyName:        "cert-manager-rbac-policy",
-		PermissionSetName: "cert-manager-baseline",
+		Name:               "cert-manager",
+		ServiceAccountName: "cert-manager",
+		NamespaceHint:      "cert-manager",
+		ProfileName:        "rbac-cert-manager",
+		PolicyName:         "cert-manager-rbac-policy",
+		PermissionSetName:  "cert-manager-baseline",
 	},
 	{
-		Name:              "kueue",
-		Namespace:         "kueue-system",
-		PrincipalRef:      "system:serviceaccount:kueue-system:kueue-controller-manager",
-		ProfileName:       "rbac-kueue",
-		PolicyName:        "kueue-rbac-policy",
-		PermissionSetName: "kueue-baseline",
+		Name:               "kueue",
+		ServiceAccountName: "kueue-controller-manager",
+		ProfileName:        "rbac-kueue",
+		PolicyName:         "kueue-rbac-policy",
+		PermissionSetName:  "kueue-baseline",
 	},
 	{
-		Name:              "cnpg",
-		Namespace:         "security-system",
-		PrincipalRef:      "system:serviceaccount:security-system:cloudnative-pg",
-		ProfileName:       "rbac-cnpg",
-		PolicyName:        "cnpg-rbac-policy",
-		PermissionSetName: "cnpg-baseline",
+		Name:               "cnpg",
+		ServiceAccountName: "cnpg-manager",
+		ProfileName:        "rbac-cnpg",
+		PolicyName:         "cnpg-rbac-policy",
+		PermissionSetName:  "cnpg-baseline",
 	},
 	{
-		Name:              "metallb",
-		Namespace:         "metallb-system",
-		PrincipalRef:      "system:serviceaccount:metallb-system:controller",
-		ProfileName:       "rbac-metallb",
-		PolicyName:        "metallb-rbac-policy",
-		PermissionSetName: "metallb-baseline",
+		Name:               "metallb",
+		ServiceAccountName: "metallb-controller",
+		ProfileName:        "rbac-metallb",
+		PolicyName:         "metallb-rbac-policy",
+		PermissionSetName:  "metallb-baseline",
 	},
 	{
-		Name:              "local-path-provisioner",
-		Namespace:         "local-path-storage",
-		PrincipalRef:      "system:serviceaccount:local-path-storage:local-path-provisioner",
-		ProfileName:       "rbac-local-path-provisioner",
-		PolicyName:        "local-path-provisioner-rbac-policy",
-		PermissionSetName: "local-path-provisioner-baseline",
+		Name:               "local-path-provisioner",
+		ServiceAccountName: "local-path-provisioner-service-account",
+		ProfileName:        "rbac-local-path-provisioner",
+		PolicyName:         "local-path-provisioner-rbac-policy",
+		PermissionSetName:  "local-path-provisioner-baseline",
 	},
 }
 
@@ -317,41 +321,78 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 }
 
 // createComponentProfiles creates baseline PermissionSet, RBACPolicy, and RBACProfile
-// for each known component whose namespace exists on the tenant cluster.
-// Skips silently if the security.ontai.dev CRDs are not installed on this cluster.
-// Creation is idempotent — existing resources are left unchanged.
+// for each known component discovered on the tenant cluster. Discovery finds the
+// component's install namespace by matching ServiceAccountName across all non-system
+// namespaces — no namespace is hardcoded. Skips silently if security CRDs are absent.
 func (s *TenantBootstrapSweep) createComponentProfiles(ctx context.Context) error {
 	for _, comp := range tenantKnownComponents {
-		if _, err := s.KubeClient.CoreV1().Namespaces().Get(ctx, comp.Namespace, metav1.GetOptions{}); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("check namespace %q: %w", comp.Namespace, err)
+		ns, principalRef, found := s.discoverComponentNamespace(ctx, comp)
+		if !found {
+			continue
 		}
 
-		if err := s.ensurePermissionSet(ctx, comp); err != nil {
+		if err := s.ensurePermissionSet(ctx, ns, comp); err != nil {
 			if isSecurityCRDAbsent(err) {
 				fmt.Printf("tenant bootstrap sweep: security CRDs not installed on this cluster, skipping profile creation\n")
 				return nil
 			}
 			return fmt.Errorf("PermissionSet for %q: %w", comp.Name, err)
 		}
-		if err := s.ensureRBACPolicy(ctx, comp); err != nil {
+		if err := s.ensureRBACPolicy(ctx, ns, comp); err != nil {
 			if isSecurityCRDAbsent(err) {
 				return nil
 			}
 			return fmt.Errorf("RBACPolicy for %q: %w", comp.Name, err)
 		}
-		if err := s.ensureRBACProfile(ctx, comp); err != nil {
+		if err := s.ensureRBACProfile(ctx, ns, principalRef, comp); err != nil {
 			if isSecurityCRDAbsent(err) {
 				return nil
 			}
 			return fmt.Errorf("RBACProfile for %q: %w", comp.Name, err)
 		}
 
-		fmt.Printf("tenant bootstrap sweep: component wrapped: %s in %s\n", comp.Name, comp.Namespace)
+		fmt.Printf("tenant bootstrap sweep: component wrapped: %s in %s\n", comp.Name, ns)
 	}
 	return nil
+}
+
+// discoverComponentNamespace finds the namespace where a component is installed
+// by listing all ServiceAccounts across all non-system namespaces and matching
+// by ServiceAccountName. Returns namespace, principalRef, and whether found.
+// When multiple namespaces have the same SA name, NamespaceHint is used as
+// the preferred namespace; otherwise the first match is used.
+func (s *TenantBootstrapSweep) discoverComponentNamespace(ctx context.Context, comp tenantComponent) (ns, principalRef string, found bool) {
+	saList, err := s.KubeClient.CoreV1().ServiceAccounts(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", "", false
+	}
+
+	var candidates []string
+	for _, sa := range saList.Items {
+		if sa.Name == comp.ServiceAccountName && !isSystemNamespace(sa.Namespace) {
+			candidates = append(candidates, sa.Namespace)
+		}
+	}
+
+	switch len(candidates) {
+	case 0:
+		return "", "", false
+	case 1:
+		ns = candidates[0]
+	default:
+		ns = candidates[0]
+		for _, c := range candidates {
+			if c == comp.NamespaceHint {
+				ns = c
+				break
+			}
+		}
+		fmt.Printf("tenant bootstrap sweep: multiple namespaces match SA %q, using %q\n",
+			comp.ServiceAccountName, ns)
+	}
+
+	principalRef = fmt.Sprintf("system:serviceaccount:%s:%s", ns, comp.ServiceAccountName)
+	return ns, principalRef, true
 }
 
 // isSecurityCRDAbsent returns true when the error indicates that the
@@ -377,8 +418,8 @@ func isSystemNamespace(ns string) bool {
 	return false
 }
 
-func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, comp tenantComponent) error {
-	_, err := s.DynamicClient.Resource(tenantPermissionSetGVR).Namespace(comp.Namespace).Get(
+func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, ns string, comp tenantComponent) error {
+	_, err := s.DynamicClient.Resource(tenantPermissionSetGVR).Namespace(ns).Get(
 		ctx, comp.PermissionSetName, metav1.GetOptions{},
 	)
 	if err == nil {
@@ -392,7 +433,7 @@ func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, comp ten
 			"apiVersion": "security.ontai.dev/v1alpha1",
 			"kind":       "PermissionSet",
 			"metadata": map[string]interface{}{
-				"namespace": comp.Namespace,
+				"namespace": ns,
 				"name":      comp.PermissionSetName,
 				"labels": map[string]interface{}{
 					"ontai.dev/managed-by":          "conductor",
@@ -414,14 +455,14 @@ func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, comp ten
 			},
 		},
 	}
-	_, err = s.DynamicClient.Resource(tenantPermissionSetGVR).Namespace(comp.Namespace).Create(
+	_, err = s.DynamicClient.Resource(tenantPermissionSetGVR).Namespace(ns).Create(
 		ctx, obj, metav1.CreateOptions{},
 	)
 	return err
 }
 
-func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, comp tenantComponent) error {
-	_, err := s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(comp.Namespace).Get(
+func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, ns string, comp tenantComponent) error {
+	_, err := s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(ns).Get(
 		ctx, comp.PolicyName, metav1.GetOptions{},
 	)
 	if err == nil {
@@ -435,7 +476,7 @@ func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, comp tenant
 			"apiVersion": "security.ontai.dev/v1alpha1",
 			"kind":       "RBACPolicy",
 			"metadata": map[string]interface{}{
-				"namespace": comp.Namespace,
+				"namespace": ns,
 				"name":      comp.PolicyName,
 				"labels": map[string]interface{}{
 					"ontai.dev/managed-by": "conductor",
@@ -449,14 +490,14 @@ func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, comp tenant
 			},
 		},
 	}
-	_, err = s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(comp.Namespace).Create(
+	_, err = s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(ns).Create(
 		ctx, obj, metav1.CreateOptions{},
 	)
 	return err
 }
 
-func (s *TenantBootstrapSweep) ensureRBACProfile(ctx context.Context, comp tenantComponent) error {
-	_, err := s.DynamicClient.Resource(tenantRBACProfileGVR).Namespace(comp.Namespace).Get(
+func (s *TenantBootstrapSweep) ensureRBACProfile(ctx context.Context, ns, principalRef string, comp tenantComponent) error {
+	_, err := s.DynamicClient.Resource(tenantRBACProfileGVR).Namespace(ns).Get(
 		ctx, comp.ProfileName, metav1.GetOptions{},
 	)
 	if err == nil {
@@ -470,7 +511,7 @@ func (s *TenantBootstrapSweep) ensureRBACProfile(ctx context.Context, comp tenan
 			"apiVersion": "security.ontai.dev/v1alpha1",
 			"kind":       "RBACProfile",
 			"metadata": map[string]interface{}{
-				"namespace": comp.Namespace,
+				"namespace": ns,
 				"name":      comp.ProfileName,
 				"labels": map[string]interface{}{
 					"ontai.dev/managed-by":        "conductor",
@@ -479,7 +520,7 @@ func (s *TenantBootstrapSweep) ensureRBACProfile(ctx context.Context, comp tenan
 				},
 			},
 			"spec": map[string]interface{}{
-				"principalRef":   comp.PrincipalRef,
+				"principalRef":   principalRef,
 				"targetClusters": []interface{}{"management"},
 				"permissionDeclarations": []interface{}{
 					map[string]interface{}{
@@ -491,7 +532,7 @@ func (s *TenantBootstrapSweep) ensureRBACProfile(ctx context.Context, comp tenan
 			},
 		},
 	}
-	_, err = s.DynamicClient.Resource(tenantRBACProfileGVR).Namespace(comp.Namespace).Create(
+	_, err = s.DynamicClient.Resource(tenantRBACProfileGVR).Namespace(ns).Create(
 		ctx, obj, metav1.CreateOptions{},
 	)
 	return err
