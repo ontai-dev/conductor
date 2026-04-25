@@ -16,11 +16,9 @@ import (
 	"path/filepath"
 	"sort"
 
-	conductorcrd "github.com/ontai-dev/conductor/config/crd"
 	guardiancrd "github.com/ontai-dev/guardian/config/crd"
 	platformcrd "github.com/ontai-dev/platform/config/crd"
 	seamcorecrd "github.com/ontai-dev/seam-core/config/crd"
-	wrappercrd "github.com/ontai-dev/wrapper/config/crd"
 )
 
 const launchHelp = `Usage: compiler launch --output <path> [--kubeconfig <path>]
@@ -74,9 +72,8 @@ func runLaunchSubcommand(args []string) {
 // CRD sources (all embedded at build time):
 //   - platform.ontai.dev: TalosCluster, day-2 CRDs, SeamInfrastructureCluster/Machine
 //   - security.ontai.dev: RBACPolicy, RBACProfile, IdentityBinding, IdentityProvider, PermissionSet
-//   - infra.ontai.dev: ClusterPack, PackExecution, PackInstance
-//   - infrastructure.ontai.dev: InfrastructureLineageIndex
-//   - runner.ontai.dev: RunnerConfig
+//   - infrastructure.ontai.dev: InfrastructureClusterPack, InfrastructurePackExecution,
+//     InfrastructurePackInstance, InfrastructureRunnerConfig, InfrastructureLineageIndex (seam-core)
 //
 // Output is deterministic: CRD files within each operator are sorted by name.
 // conductor-schema.md §9 Step 2.
@@ -86,16 +83,16 @@ func compileLaunchBundle(output string) error {
 	}
 
 	// Collect CRD YAML from all operator embedded filesystems.
-	// Order: platform, guardian, wrapper, seam-core, conductor.
+	// Order: platform, guardian, seam-core.
+	// wrapper and conductor no longer carry their own CRDs; all infrastructure.ontai.dev
+	// CRDs are declared in seam-core.
 	sources := []struct {
 		name string
 		fsys fs.FS
 	}{
 		{"platform", platformcrd.FS},
 		{"guardian", guardiancrd.FS},
-		{"wrapper", wrappercrd.FS},
 		{"seam-core", seamcorecrd.FS},
-		{"conductor", conductorcrd.FS},
 	}
 
 	var bundle bytes.Buffer

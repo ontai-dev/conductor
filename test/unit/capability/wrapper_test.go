@@ -70,8 +70,8 @@ func (s *stubOCIClient) PullManifests(_ context.Context, _ string) ([][]byte, er
 // ---------------------------------------------------------------------------
 
 var wrapperGVRs = map[string]schema.GroupVersionResource{
-	"PackExecution": {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packexecutions"},
-	"ClusterPack":   {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks"},
+	"InfrastructurePackExecution": {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackexecutions"},
+	"InfrastructureClusterPack":   {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks"},
 }
 
 func newWrapperDynClient(objects ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
@@ -260,8 +260,8 @@ func TestPackDeploy_ArtifactsNonNil(t *testing.T) {
 
 func packExecutionCR(targetClusterRef, packName, packVersion string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "infra.ontai.dev/v1alpha1",
-		"kind":       "PackExecution",
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructurePackExecution",
 		"metadata":   map[string]interface{}{"name": "pe-" + targetClusterRef, "namespace": "seam-tenant-" + targetClusterRef},
 		"spec": map[string]interface{}{
 			"targetClusterRef": targetClusterRef,
@@ -275,8 +275,8 @@ func packExecutionCR(targetClusterRef, packName, packVersion string) *unstructur
 
 func clusterPackCR(clusterRef, name, version, ociRef string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "infra.ontai.dev/v1alpha1",
-		"kind":       "ClusterPack",
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructureClusterPack",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "seam-tenant-" + clusterRef},
 		"spec": map[string]interface{}{
 			"version": version,

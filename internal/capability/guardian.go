@@ -22,7 +22,7 @@ import (
 // managementSignatureAnnotation is the annotation key used by the management
 // cluster Conductor to store the base64-encoded Ed25519 signature of the
 // PermissionSnapshot spec. INV-026.
-const managementSignatureAnnotation = "runner.ontai.dev/management-signature"
+const managementSignatureAnnotation = "infrastructure.ontai.dev/management-signature"
 
 // permissionSnapshotGVR is the GroupVersionResource for PermissionSnapshot.
 // security.ontai.dev/v1alpha1/permissionsnapshots — guardian-schema.md §7.

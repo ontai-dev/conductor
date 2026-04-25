@@ -271,7 +271,7 @@ func newFakeDynamicWithSignedSnapshot(clusterRef string, privKey ed25519.Private
 		specBytes, _ := json.Marshal(spec)
 		sigBytes := ed25519.Sign(privKey, specBytes)
 		meta["annotations"] = map[string]interface{}{
-			"runner.ontai.dev/management-signature": base64.StdEncoding.EncodeToString(sigBytes),
+			"infrastructure.ontai.dev/management-signature": base64.StdEncoding.EncodeToString(sigBytes),
 		}
 	}
 

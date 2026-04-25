@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
-	wrapperv1alpha1 "github.com/ontai-dev/wrapper/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // HelmSource describes a Helm chart source for automated packbuild.
@@ -217,18 +217,18 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 
 	// Emit ClusterPack CR.
 	ns := in.Namespace
-	cp := wrapperv1alpha1.ClusterPack{
+	cp := seamcorev1alpha1.InfrastructureClusterPack{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "infra.ontai.dev/v1alpha1",
-			Kind:       "ClusterPack",
+			APIVersion: "infrastructure.ontai.dev/v1alpha1",
+			Kind:       "InfrastructureClusterPack",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,
 			Namespace: ns,
 		},
-		Spec: wrapperv1alpha1.ClusterPackSpec{
+		Spec: seamcorev1alpha1.InfrastructureClusterPackSpec{
 			Version: in.Version,
-			RegistryRef: wrapperv1alpha1.PackRegistryRef{
+			RegistryRef: seamcorev1alpha1.InfrastructurePackRegistryRef{
 				URL:    in.RegistryURL,
 				Digest: workloadDigest,
 			},

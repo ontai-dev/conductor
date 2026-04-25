@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -204,10 +205,17 @@ func runExecute() {
 	// RunnerConfig.status.stepResults via the Kubernetes API.
 	statusWriter := kernel.NoopStepStatusWriter{}
 
+	execLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", execCtx.ClusterRef),
+		slog.String("capability", execCtx.Capability),
+	)
+	execLogger.Info("starting")
 	if err := kernel.RunExecute(execCtx, executor, statusWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}
+	execLogger.Info("completed")
 }
 
 // runAgent implements the agent-mode pipeline.
@@ -346,11 +354,19 @@ func (e *capabilityStepExecutor) Execute(
 		Namespace:         namespace,
 		ExecuteClients:    e.clients,
 	}
+	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", clusterRef),
+		slog.String("capability", step.Capability),
+		slog.String("packExecutionRef", packExecutionRef),
+	)
+	dispatchLogger.Info("capability dispatching")
 	result, err := handler.Execute(ctx, params)
 	if err != nil {
 		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
 			"capabilityStepExecutor: step %q capability %q: %w", step.Name, step.Capability, err)
 	}
+	dispatchLogger.Info("capability result", slog.String("status", string(result.Status)))
 
 	if writeErr := e.writer.WriteResult(ctx, namespace, packExecutionRef, result); writeErr != nil {
 		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(

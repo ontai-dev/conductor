@@ -1,44 +1,43 @@
-// Package runnerlib -- T-08 unit tests for PackReceiptSpec new fields.
+// Package runnerlib -- T-08 unit tests for InfrastructurePackReceiptSpec fields.
 //
 // Tests cover:
-//   - PackReceiptSpec carries RBACDigest, WorkloadDigest, ChartVersion,
+//   - InfrastructurePackReceiptSpec carries RBACDigest, WorkloadDigest, ChartVersion,
 //     ChartURL, ChartName, HelmVersion.
 //   - All six fields survive a JSON serialization round-trip.
 //   - Fields are zero-value (empty string) when not populated.
 //
-// T-08, Decision B, T-04 schema.
-package runnerlib
+// T-08, Decision B, T-04 schema. Types migrated to seam-core in T-2B-6.
+package runnerlib_test
 
 import (
 	"encoding/json"
 	"testing"
+
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 func TestPackReceiptSpec_NewFields_RoundTrip(t *testing.T) {
-	spec := PackReceiptSpec{
-		ClusterPackRef: ClusterPackRef{
-			Name:    "cert-manager-v1.13.3-r1",
-			Version: "v1.13.3",
-		},
-		TargetClusterRef:  "ccs-mgmt",
-		PackSignature:     "sig==",
-		SignatureVerified:  true,
-		RBACDigest:        "sha256:aabbcc",
-		WorkloadDigest:    "sha256:ddeeff",
-		ChartVersion:      "v1.13.3",
-		ChartURL:          "https://charts.jetstack.io",
-		ChartName:         "cert-manager",
-		HelmVersion:       "v3.14.0",
+	spec := seamcorev1alpha1.InfrastructurePackReceiptSpec{
+		ClusterPackRef:   "cert-manager-v1.13.3-r1",
+		TargetClusterRef: "ccs-mgmt",
+		PackSignature:    "sig==",
+		SignatureVerified: true,
+		RBACDigest:       "sha256:aabbcc",
+		WorkloadDigest:   "sha256:ddeeff",
+		ChartVersion:     "v1.13.3",
+		ChartURL:         "https://charts.jetstack.io",
+		ChartName:        "cert-manager",
+		HelmVersion:      "v3.14.0",
 	}
 
 	data, err := json.Marshal(spec)
 	if err != nil {
-		t.Fatalf("marshal PackReceiptSpec: %v", err)
+		t.Fatalf("marshal InfrastructurePackReceiptSpec: %v", err)
 	}
 
-	var got PackReceiptSpec
+	var got seamcorev1alpha1.InfrastructurePackReceiptSpec
 	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal PackReceiptSpec: %v", err)
+		t.Fatalf("unmarshal InfrastructurePackReceiptSpec: %v", err)
 	}
 
 	checks := map[string][2]string{
@@ -57,11 +56,8 @@ func TestPackReceiptSpec_NewFields_RoundTrip(t *testing.T) {
 }
 
 func TestPackReceiptSpec_NewFields_ZeroWhenAbsent(t *testing.T) {
-	spec := PackReceiptSpec{
-		ClusterPackRef: ClusterPackRef{
-			Name:    "raw-pack-v1.0.0-r1",
-			Version: "v1.0.0",
-		},
+	spec := seamcorev1alpha1.InfrastructurePackReceiptSpec{
+		ClusterPackRef:   "raw-pack-v1.0.0-r1",
 		TargetClusterRef: "ccs-mgmt",
 		SignatureVerified: true,
 		// No digest or chart fields -- raw or kustomize pack.

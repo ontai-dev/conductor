@@ -24,11 +24,11 @@ const capabilityPublishRetryInterval = 30 * time.Second
 const capabilityWatchInterval = 15 * time.Second
 
 // runnerConfigGVR is the GroupVersionResource for RunnerConfig CRs.
-// API group runner.ontai.dev, schema version v1alpha1. conductor-schema.md §5.
+// API group infrastructure.ontai.dev, schema version v1alpha1. conductor-schema.md §5.
 var runnerConfigGVR = schema.GroupVersionResource{
-	Group:    "runner.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "runnerconfigs",
+	Resource: "infrastructurerunnerconfigs",
 }
 
 // CapabilityPublisher writes the Conductor capability manifest to the RunnerConfig

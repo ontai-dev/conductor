@@ -3,6 +3,8 @@ package kernel
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 
 	"github.com/ontai-dev/conductor/internal/config"
 	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
@@ -61,6 +63,11 @@ func (NoopStepStatusWriter) WriteFailed(_ context.Context, _ string) error { ret
 // The owning operator watches the terminal condition — it never drives steps.
 // This boundary is permanent and locked. conductor-schema.md §17.
 func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter StepStatusWriter) error {
+	executeLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", ctx.ClusterRef),
+	)
+
 	// Phase 1 — Validate mode.
 	if ctx.Mode != config.ModeExecute {
 		ExitInvariantViolation(fmt.Sprintf(
@@ -114,10 +121,17 @@ func RunExecute(ctx config.ExecutionContext, executor StepExecutor, statusWriter
 		}
 
 		// Dispatch step to executor.
+		executeLogger.Info("step starting",
+			slog.String("step", step.Name),
+			slog.String("capability", step.Capability))
 		result, err := executor.Execute(goCtx, step, ctx.ClusterRef, ns)
 		if err != nil {
 			return fmt.Errorf("execute mode: step %q executor error: %w", step.Name, err)
 		}
+		executeLogger.Info("step completed",
+			slog.String("step", step.Name),
+			slog.String("capability", step.Capability),
+			slog.String("status", string(result.Status)))
 
 		// Write StepResult to status.
 		if writeErr := statusWriter.WriteStepResult(goCtx, result); writeErr != nil {

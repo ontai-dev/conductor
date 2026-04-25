@@ -20,21 +20,21 @@ import (
 )
 
 // packInstanceGVR is the GroupVersionResource for PackInstance CRs.
-// Defined by the Wrapper operator in infra.ontai.dev. conductor-schema.md §10.
+// Defined in infrastructure.ontai.dev (seam-core). conductor-schema.md §10.
 var packInstanceGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "packinstances",
+	Resource: "infrastructurepackinstances",
 }
 
 // clusterPackGVR is the GroupVersionResource for ClusterPack CRs.
-// Defined by the Wrapper operator in infra.ontai.dev. conductor-schema.md §10.
+// Defined in infrastructure.ontai.dev (seam-core). conductor-schema.md §10.
 // The management cluster Conductor signs ClusterPacks so the wrapper
 // ClusterPackReconciler can transition Status.Signed=true and Available.
 var clusterPackGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "clusterpacks",
+	Resource: "infrastructureclusterpacks",
 }
 
 // clusterPackSignatureAnnotation is the annotation key read by the wrapper
@@ -303,9 +303,9 @@ func (l *SigningLoop) signPermissionSnapshots(ctx context.Context) {
 //
 // Gap 28, INV-026.
 func (l *SigningLoop) storeSignedArtifactSecret(ctx context.Context, packInstanceName string, spec map[string]interface{}, sigB64 string) {
-	clusterName, _ := spec["clusterRef"].(string)
+	clusterName, _ := spec["targetClusterRef"].(string)
 	if clusterName == "" {
-		// Cannot determine target namespace without clusterRef — skip.
+		// Cannot determine target namespace without targetClusterRef — skip.
 		return
 	}
 

@@ -33,19 +33,19 @@ import (
 var namespaceGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
 
 // packExecutionGVR is the GroupVersionResource for PackExecution.
-// infra.ontai.dev/v1alpha1/packexecutions — wrapper-schema.md §4.
+// infrastructure.ontai.dev/v1alpha1/infrastructurepackexecutions — wrapper-schema.md §4.
 var packExecutionGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "packexecutions",
+	Resource: "infrastructurepackexecutions",
 }
 
 // clusterPackGVR is the GroupVersionResource for ClusterPack.
-// infra.ontai.dev/v1alpha1/clusterpacks — wrapper-schema.md §4.
+// infrastructure.ontai.dev/v1alpha1/infrastructureclusterpacks — wrapper-schema.md §4.
 var clusterPackGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "clusterpacks",
+	Resource: "infrastructureclusterpacks",
 }
 
 // Readiness-check GVRs. Used by isResourceReady to poll resource status.

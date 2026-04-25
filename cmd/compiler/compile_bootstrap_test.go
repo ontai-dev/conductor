@@ -86,7 +86,7 @@ func TestBootstrap_SecretHasCorrectStructure(t *testing.T) {
 	assertContainsStr(t, content, "apiVersion: v1")
 	assertContainsStr(t, content, "kind: Secret")
 	assertContainsStr(t, content, "name: seam-mc-ccs-mgmt-node1")
-	assertContainsStr(t, content, "namespace: seam-system")
+	assertContainsStr(t, content, "namespace: seam-tenant-ccs-mgmt")
 	assertContainsStr(t, content, "machineconfig.yaml:")
 	assertContainsStr(t, content, "ontai.dev/cluster: ccs-mgmt")
 }
@@ -108,8 +108,8 @@ func TestBootstrap_TalosClusterHasCorrectSpec(t *testing.T) {
 	}
 	content := string(data)
 
-	assertContainsStr(t, content, "apiVersion: platform.ontai.dev/v1alpha1")
-	assertContainsStr(t, content, "kind: TalosCluster")
+	assertContainsStr(t, content, "apiVersion: infrastructure.ontai.dev/v1alpha1")
+	assertContainsStr(t, content, "kind: InfrastructureTalosCluster")
 	assertContainsStr(t, content, "name: ccs-mgmt")
 	assertContainsStr(t, content, "mode: bootstrap")
 	// capi.enabled=false means nil CAPIConfig pointer -- capi block is absent (C-34).

@@ -30,14 +30,14 @@ import (
 
 var (
 	ws8bClusterPackGVR = schema.GroupVersionResource{
-		Group:    "infra.ontai.dev",
+		Group:    "infrastructure.ontai.dev",
 		Version:  "v1alpha1",
-		Resource: "clusterpacks",
+		Resource: "infrastructureclusterpacks",
 	}
 	ws8bPackReceiptGVR = schema.GroupVersionResource{
 		Group:    "infrastructure.ontai.dev",
 		Version:  "v1alpha1",
-		Resource: "packreceipts",
+		Resource: "infrastructurepackreceipts",
 	}
 )
 
@@ -121,7 +121,7 @@ func validateWS8bPackReceiptDigestCarryThrough(
 	Eventually(func() bool {
 		list, err := cl.Dynamic.Resource(ws8bPackReceiptGVR).Namespace(tenantNS).
 			List(ctx, metav1.ListOptions{
-				LabelSelector: "infra.ontai.dev/pack=" + ws8bPackName,
+				LabelSelector: "infrastructure.ontai.dev/pack=" + ws8bPackName,
 			})
 		if err != nil || len(list.Items) == 0 {
 			return false
@@ -155,7 +155,7 @@ func validateWS8bPackReceiptHelmFields(
 	Eventually(func() bool {
 		list, err := cl.Dynamic.Resource(ws8bPackReceiptGVR).Namespace(tenantNS).
 			List(ctx, metav1.ListOptions{
-				LabelSelector: "infra.ontai.dev/pack=" + ws8bPackName,
+				LabelSelector: "infrastructure.ontai.dev/pack=" + ws8bPackName,
 			})
 		if err != nil || len(list.Items) == 0 {
 			return false

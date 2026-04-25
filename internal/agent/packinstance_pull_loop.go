@@ -303,8 +303,8 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 
 	receipt := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "infra.ontai.dev/v1alpha1",
-			"kind":       "PackReceipt",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructurePackReceipt",
 			"metadata": map[string]interface{}{
 				"name":      receiptName,
 				"namespace": l.namespace,

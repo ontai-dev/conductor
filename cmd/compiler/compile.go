@@ -24,8 +24,9 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	wrapperv1alpha1 "github.com/ontai-dev/wrapper/api/v1alpha1"
 )
 
 // RegistryMirror configures one registry mirror entry in Talos machine config
@@ -801,6 +802,8 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 
 		// Strip cluster-name prefix from hostname before constructing the secret
 		// name so the prefix is not doubled (e.g. ccs-mgmt-cp1 → cp1). C-32.
+		// Machine config secrets always live in seam-tenant-{cluster}, not in the
+		// TalosCluster CR namespace (seam-system). Platform reads them from there.
 		bareHostname := strings.TrimPrefix(node.Hostname, in.Name+"-")
 		secretName := "seam-mc-" + in.Name + "-" + bareHostname
 		secret := corev1.Secret{
@@ -810,7 +813,7 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      secretName,
-				Namespace: ns,
+				Namespace: "seam-tenant-" + in.Name,
 				Labels: map[string]string{
 					"ontai.dev/cluster":    in.Name,
 					"ontai.dev/node":       node.Hostname,
@@ -877,8 +880,8 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "platform.ontai.dev/v1alpha1",
-			Kind:       "TalosCluster",
+			APIVersion: "infrastructure.ontai.dev/v1alpha1",
+			Kind:       "InfrastructureTalosCluster",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,
@@ -1077,18 +1080,18 @@ func compilePackBuild(input, output string) error {
 		ns = "seam-system"
 	}
 
-	cp := wrapperv1alpha1.ClusterPack{
+	cp := seamcorev1alpha1.InfrastructureClusterPack{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "infra.ontai.dev/v1alpha1",
-			Kind:       "ClusterPack",
+			APIVersion: "infrastructure.ontai.dev/v1alpha1",
+			Kind:       "InfrastructureClusterPack",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,
 			Namespace: ns,
 		},
-		Spec: wrapperv1alpha1.ClusterPackSpec{
+		Spec: seamcorev1alpha1.InfrastructureClusterPackSpec{
 			Version: in.Version,
-			RegistryRef: wrapperv1alpha1.PackRegistryRef{
+			RegistryRef: seamcorev1alpha1.InfrastructurePackRegistryRef{
 				URL:    in.RegistryURL,
 				Digest: in.Digest,
 			},
@@ -1184,8 +1187,8 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "platform.ontai.dev/v1alpha1",
-			Kind:       "TalosCluster",
+			APIVersion: "infrastructure.ontai.dev/v1alpha1",
+			Kind:       "InfrastructureTalosCluster",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      in.Name,

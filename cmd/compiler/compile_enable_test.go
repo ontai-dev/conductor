@@ -473,9 +473,7 @@ func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 	for _, group := range []string{
 		"platform.ontai.dev",
 		"security.ontai.dev",
-		"infra.ontai.dev",
 		"infrastructure.ontai.dev",
-		"runner.ontai.dev",
 	} {
 		if !strings.Contains(content, group) {
 			t.Errorf("CRD files missing API group %q", group)

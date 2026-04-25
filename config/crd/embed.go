@@ -1,12 +1,11 @@
-// Package crd exposes the conductor shared library's CRD YAML files
-// as an embedded filesystem. Contains the RunnerConfig CRD for the
-// runner.ontai.dev API group. Imported by the Compiler binary to build
-// the CRD manifest bundle for compiler launch. conductor-schema.md §9.
+// Package crd previously embedded conductor's own CRD YAML files.
+// After T-2B-9 migration, all conductor CRDs (InfrastructureRunnerConfig,
+// InfrastructurePackReceipt) are declared in seam-core (infrastructure.ontai.dev).
+// The compiler bundles them from seam-core/config/crd directly.
+// This package is retained for structural consistency only.
 package crd
 
 import "embed"
 
-// FS contains all CRD YAML files from this directory.
-//
-//go:embed *.yaml
+// FS is an empty embedded filesystem. Conductor's CRDs are now in seam-core.
 var FS embed.FS

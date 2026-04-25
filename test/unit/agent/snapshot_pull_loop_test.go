@@ -43,7 +43,7 @@ func makeSnapshot(name, ns, sigAnnotation string, specObj map[string]interface{}
 	obj.SetName(name)
 	obj.SetNamespace(ns)
 	if sigAnnotation != "" {
-		obj.SetAnnotations(map[string]string{"runner.ontai.dev/management-signature": sigAnnotation})
+		obj.SetAnnotations(map[string]string{"infrastructure.ontai.dev/management-signature": sigAnnotation})
 	}
 	if err := unstructured.SetNestedMap(obj.Object, specObj, "spec"); err != nil {
 		panic("makeSnapshot: set spec: " + err.Error())

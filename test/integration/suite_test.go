@@ -35,14 +35,14 @@ import (
 	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
-// runnerConfigGVR is the GroupVersionResource for RunnerConfig CRs.
-// The conductor uses dynamic clients to interact with RunnerConfig — the types
+// runnerConfigGVR is the GroupVersionResource for InfrastructureRunnerConfig CRs.
+// The conductor uses dynamic clients to interact with RunnerConfig -- the types
 // in runnerlib are plain Go structs (not controller-runtime managed objects),
 // so all CRD interactions use unstructured.Unstructured.
 var runnerConfigGVR = schema.GroupVersionResource{
-	Group:    "runner.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "runnerconfigs",
+	Resource: "infrastructurerunnerconfigs",
 }
 
 var (
@@ -112,8 +112,8 @@ func createRunnerConfig(ctx context.Context, t *testing.T, ns, name string, spec
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "runner.ontai.dev/v1alpha1",
-			"kind":       "RunnerConfig",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructureRunnerConfig",
 			"metadata": map[string]interface{}{
 				"name":      name,
 				"namespace": ns,

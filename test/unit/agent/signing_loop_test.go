@@ -25,9 +25,9 @@ import (
 
 // packInstanceGVR mirrors the GVR defined in signing_loop.go.
 var packInstanceGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "packinstances",
+	Resource: "infrastructurepackinstances",
 }
 
 // psGVR mirrors the permissionSnapshotGVR in signing_loop.go.
@@ -39,9 +39,9 @@ var psGVR = schema.GroupVersionResource{
 
 // clusterPackGVR mirrors the GVR defined in signing_loop.go.
 var clusterPackGVR = schema.GroupVersionResource{
-	Group:    "infra.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "clusterpacks",
+	Resource: "infrastructureclusterpacks",
 }
 
 // secretGVR mirrors the secretGVR defined in signing_loop.go (core v1 Secrets).
@@ -160,7 +160,7 @@ func TestSigningLoop_SignsUnsignedPackInstance(t *testing.T) {
 	pub, priv := genKeyPair(t)
 	privPath := writePrivKeyFile(t, priv)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-dev", "packRef": "base-pack-v1"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-dev", "packRef": "base-pack-v1"}
 	cr := makeCR(packInstanceGVR, "pack-instance-1", "ont-system", spec)
 
 	gvrs := []schema.GroupVersionResource{packInstanceGVR, psGVR, clusterPackGVR}
@@ -184,7 +184,7 @@ func TestSigningLoop_SignsUnsignedPackInstance(t *testing.T) {
 	}
 
 	annotations := got.GetAnnotations()
-	sigB64, ok := annotations["runner.ontai.dev/management-signature"]
+	sigB64, ok := annotations["infrastructure.ontai.dev/management-signature"]
 	if !ok || sigB64 == "" {
 		t.Fatal("expected management-signature annotation to be set after signing")
 	}
@@ -231,7 +231,7 @@ func TestSigningLoop_SignsUnsignedPermissionSnapshot(t *testing.T) {
 	}
 
 	annotations := got.GetAnnotations()
-	sigB64, ok := annotations["runner.ontai.dev/management-signature"]
+	sigB64, ok := annotations["infrastructure.ontai.dev/management-signature"]
 	if !ok || sigB64 == "" {
 		t.Fatal("expected management-signature annotation to be set")
 	}
@@ -249,11 +249,11 @@ func TestSigningLoop_SkipsAlreadySignedCRs(t *testing.T) {
 	_, priv := genKeyPair(t)
 	privPath := writePrivKeyFile(t, priv)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-dev"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-dev"}
 	cr := makeCR(packInstanceGVR, "pack-signed", "ont-system", spec)
 	// Pre-set a fixed (fake) signature annotation.
 	cr.SetAnnotations(map[string]string{
-		"runner.ontai.dev/management-signature": "ZmFrZXNpZ25hdHVyZQ==",
+		"infrastructure.ontai.dev/management-signature": "ZmFrZXNpZ25hdHVyZQ==",
 	})
 
 	gvrs := []schema.GroupVersionResource{packInstanceGVR, psGVR, clusterPackGVR}
@@ -271,7 +271,7 @@ func TestSigningLoop_SkipsAlreadySignedCRs(t *testing.T) {
 	// Annotation must still be the original fake value (not overwritten).
 	got, _ := fakeClient.Resource(packInstanceGVR).Namespace("ont-system").Get(
 		context.Background(), "pack-signed", metav1.GetOptions{})
-	if sig := got.GetAnnotations()["runner.ontai.dev/management-signature"]; sig != "ZmFrZXNpZ25hdHVyZQ==" {
+	if sig := got.GetAnnotations()["infrastructure.ontai.dev/management-signature"]; sig != "ZmFrZXNpZ25hdHVyZQ==" {
 		t.Errorf("already-signed CR must not be re-signed; got %q", sig)
 	}
 }
@@ -331,7 +331,7 @@ func TestSigningLoop_StoresNewSecretForPackInstance(t *testing.T) {
 	pub, priv := genKeyPair(t)
 	privPath := writePrivKeyFile(t, priv)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-dev", "packRef": "base-pack-v1"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-dev", "packRef": "base-pack-v1"}
 	cr := makeCR(packInstanceGVR, "my-pack", "seam-tenant-ccs-dev", spec)
 
 	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
@@ -357,7 +357,7 @@ func TestSigningLoop_StoresNewSecretForPackInstance(t *testing.T) {
 	pi, _ := fakeClient.Resource(packInstanceGVR).Namespace("seam-tenant-ccs-dev").Get(
 		context.Background(), "my-pack", metav1.GetOptions{},
 	)
-	piSig := pi.GetAnnotations()["runner.ontai.dev/management-signature"]
+	piSig := pi.GetAnnotations()["infrastructure.ontai.dev/management-signature"]
 
 	data := secret.Object["data"].(map[string]interface{})
 	secretSig, _ := data["signature"].(string)
@@ -385,11 +385,11 @@ func TestSigningLoop_IdempotentSkipWhenSignatureMatches(t *testing.T) {
 	_, priv := genKeyPair(t)
 	privPath := writePrivKeyFile(t, priv)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-dev"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-dev"}
 	cr := makeCR(packInstanceGVR, "existing-pack", "seam-tenant-ccs-dev", spec)
 	// Pre-set a stable fake signature annotation on the PackInstance.
 	cr.SetAnnotations(map[string]string{
-		"runner.ontai.dev/management-signature": "stableSig==",
+		"infrastructure.ontai.dev/management-signature": "stableSig==",
 	})
 
 	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
@@ -436,11 +436,11 @@ func TestSigningLoop_OverwritesSecretOnSignatureMismatch(t *testing.T) {
 	_, priv := genKeyPair(t)
 	privPath := writePrivKeyFile(t, priv)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-dev"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-dev"}
 	cr := makeCR(packInstanceGVR, "updated-pack", "seam-tenant-ccs-dev", spec)
 	// PackInstance annotation carries the new (current) signature.
 	cr.SetAnnotations(map[string]string{
-		"runner.ontai.dev/management-signature": "newSig==",
+		"infrastructure.ontai.dev/management-signature": "newSig==",
 	})
 
 	fakeClient := newFakeDynamicClientWithGVRs(allSigningLoopGVRs(), cr)
@@ -482,7 +482,7 @@ func TestSigningLoop_OverwritesSecretOnSignatureMismatch(t *testing.T) {
 
 // TestSigningLoop_SignsUnsignedClusterPack verifies that after one signAll cycle,
 // an unsigned ClusterPack receives the "ontai.dev/pack-signature" annotation
-// (not "runner.ontai.dev/management-signature"). The wrapper
+// (not "infrastructure.ontai.dev/management-signature"). The wrapper
 // ClusterPackReconciler reads this specific annotation to transition
 // Status.Signed=true and Available. conductor-schema.md §10 steps 9–10.
 func TestSigningLoop_SignsUnsignedClusterPack(t *testing.T) {
@@ -513,12 +513,12 @@ func TestSigningLoop_SignsUnsignedClusterPack(t *testing.T) {
 
 	annotations := got.GetAnnotations()
 	// Wrapper reads "ontai.dev/pack-signature" — must use this key, not
-	// "runner.ontai.dev/management-signature". wrapper-schema.md §3.
+	// "infrastructure.ontai.dev/management-signature". wrapper-schema.md §3.
 	sigB64, ok := annotations["ontai.dev/pack-signature"]
 	if !ok || sigB64 == "" {
 		t.Fatal("expected ontai.dev/pack-signature annotation to be set on ClusterPack after signing")
 	}
-	if _, wrongKey := annotations["runner.ontai.dev/management-signature"]; wrongKey {
+	if _, wrongKey := annotations["infrastructure.ontai.dev/management-signature"]; wrongKey {
 		t.Error("ClusterPack must not carry runner.ontai.dev/management-signature; wrapper reads ontai.dev/pack-signature")
 	}
 
