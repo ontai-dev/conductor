@@ -1,7 +1,7 @@
-// Package persistence TalosClusterOperationResultWriter creates
-// InfrastructureTalosClusterOperationResult CRs for day-2 TalosCluster
-// operations. One CR per Job, named by the OPERATION_RESULT_CR env var.
-// conductor-schema.md §8, seam-core-schema.md.
+// Package persistence TalosClusterResultWriter appends operation records to the
+// per-cluster InfrastructureTalosClusterOperationResult CR.
+// One TCOR per cluster, named by cluster name, lives in seam-tenant-{clusterRef}.
+// conductor-schema.md §8, seam-core-schema.md §TCOR.
 package persistence
 
 import (
@@ -12,38 +12,75 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	seamv1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
-// TalosClusterResultWriter creates an InfrastructureTalosClusterOperationResult
-// CR in the Job namespace. Used by day-2 TalosCluster execute-mode Jobs.
+// tenantNamespaceFor returns the seam-tenant-{clusterRef} namespace name.
+func tenantNamespaceFor(clusterRef string) string {
+	return "seam-tenant-" + clusterRef
+}
+
+// TalosClusterResultWriter appends a completed operation record to the
+// per-cluster InfrastructureTalosClusterOperationResult CR.
 type TalosClusterResultWriter interface {
-	// WriteTalosClusterResult creates the TCOR CR named crName in namespace.
-	// Idempotent: if the CR already exists (re-run), it is updated in-place.
-	WriteTalosClusterResult(ctx context.Context, namespace, crName, jobRef string, result runnerlib.OperationResultSpec) error
+	// AppendOperationRecord appends the result as a TalosClusterOperationRecord
+	// to the TCOR named clusterRef in seam-tenant-{clusterRef}.
+	// jobRef is the Kubernetes Job name that produced the result (used by the
+	// platform reconciler to correlate the record with the Job it submitted).
+	// Returns ExecutionFailure if the TCOR does not exist — the platform operator
+	// is responsible for creating it before submitting any day-2 Jobs.
+	AppendOperationRecord(ctx context.Context, clusterRef, jobRef string, result runnerlib.OperationResultSpec) error
 }
 
 // kubeTalosClusterResultWriter is the production implementation.
 type kubeTalosClusterResultWriter struct {
-	client     ctrlclient.Client
-	clusterRef string
+	client ctrlclient.Client
 }
 
 // NewKubeTalosClusterResultWriter constructs a TalosClusterResultWriter backed
-// by the provided controller-runtime client. clusterRef is written to spec.clusterRef.
-func NewKubeTalosClusterResultWriter(client ctrlclient.Client, clusterRef string) TalosClusterResultWriter {
-	return &kubeTalosClusterResultWriter{client: client, clusterRef: clusterRef}
+// by the provided controller-runtime client.
+func NewKubeTalosClusterResultWriter(client ctrlclient.Client) TalosClusterResultWriter {
+	return &kubeTalosClusterResultWriter{client: client}
 }
 
-// WriteTalosClusterResult creates (or idempotently updates) the TCOR CR.
-func (w *kubeTalosClusterResultWriter) WriteTalosClusterResult(
+// AppendOperationRecord gets the cluster TCOR and appends the record.
+func (w *kubeTalosClusterResultWriter) AppendOperationRecord(
 	ctx context.Context,
-	namespace, crName, jobRef string,
+	clusterRef, jobRef string,
 	result runnerlib.OperationResultSpec,
 ) error {
+	tenantNS := tenantNamespaceFor(clusterRef)
+	tcor := &seamv1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := w.client.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: tenantNS}, tcor); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("tcor writer: TCOR %s/%s not found — platform must create it before submitting day-2 Jobs", tenantNS, clusterRef)
+		}
+		return fmt.Errorf("tcor writer: get TCOR %s/%s: %w", tenantNS, clusterRef, err)
+	}
+
+	record := buildOperationRecord(jobRef, result)
+	patch := ctrlclient.MergeFrom(tcor.DeepCopy())
+	if tcor.Spec.Operations == nil {
+		tcor.Spec.Operations = make(map[string]seamv1alpha1.TalosClusterOperationRecord)
+	}
+	tcor.Spec.Operations[jobRef] = record
+	if err := w.client.Patch(ctx, tcor, patch); err != nil {
+		return fmt.Errorf("tcor writer: patch TCOR %s/%s: %w", tenantNS, clusterRef, err)
+	}
+
+	slog.InfoContext(ctx, "tcor writer: appended record",
+		"cluster", clusterRef, "namespace", tenantNS,
+		"jobRef", jobRef, "status", record.Status,
+		"revision", tcor.Spec.Revision)
+	return nil
+}
+
+// buildOperationRecord converts an OperationResultSpec into a TalosClusterOperationRecord.
+func buildOperationRecord(jobRef string, result runnerlib.OperationResultSpec) seamv1alpha1.TalosClusterOperationRecord {
 	status := seamv1alpha1.TalosClusterResultSucceeded
 	if result.Status == runnerlib.ResultFailed {
 		status = seamv1alpha1.TalosClusterResultFailed
@@ -54,9 +91,8 @@ func (w *kubeTalosClusterResultWriter) WriteTalosClusterResult(
 		message = result.FailureReason.Reason
 	}
 
-	spec := seamv1alpha1.InfrastructureTalosClusterOperationResultSpec{
+	rec := seamv1alpha1.TalosClusterOperationRecord{
 		Capability: result.Capability,
-		ClusterRef: w.clusterRef,
 		JobRef:     jobRef,
 		Status:     status,
 		Message:    message,
@@ -64,61 +100,33 @@ func (w *kubeTalosClusterResultWriter) WriteTalosClusterResult(
 
 	if !result.StartedAt.IsZero() {
 		t := metav1.NewTime(result.StartedAt)
-		spec.StartedAt = &t
+		rec.StartedAt = &t
 	} else {
 		now := metav1.NewTime(time.Now())
-		spec.StartedAt = &now
+		rec.StartedAt = &now
 	}
 	if !result.CompletedAt.IsZero() {
 		t := metav1.NewTime(result.CompletedAt)
-		spec.CompletedAt = &t
+		rec.CompletedAt = &t
 	} else {
 		now := metav1.NewTime(time.Now())
-		spec.CompletedAt = &now
+		rec.CompletedAt = &now
 	}
 
 	if result.FailureReason != nil {
-		spec.FailureReason = &seamv1alpha1.TalosClusterOperationFailureReason{
+		rec.FailureReason = &seamv1alpha1.TalosClusterOperationFailureReason{
 			Category: string(result.FailureReason.Category),
 			Reason:   result.FailureReason.Reason,
 		}
 	}
 
-	tcor := &seamv1alpha1.InfrastructureTalosClusterOperationResult{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      crName,
-		},
-		Spec: spec,
-	}
-
-	existing := &seamv1alpha1.InfrastructureTalosClusterOperationResult{}
-	err := w.client.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: crName}, existing)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("tcor writer: get existing %q in %q: %w", crName, namespace, err)
-	}
-
-	if apierrors.IsNotFound(err) {
-		if createErr := w.client.Create(ctx, tcor); createErr != nil {
-			return fmt.Errorf("tcor writer: create %q in %q: %w", crName, namespace, createErr)
-		}
-		slog.InfoContext(ctx, "tcor writer: created", "name", crName, "namespace", namespace, "status", status)
-		return nil
-	}
-
-	// Already exists — update spec in place (idempotent re-run).
-	existing.Spec = spec
-	if updateErr := w.client.Update(ctx, existing); updateErr != nil {
-		return fmt.Errorf("tcor writer: update %q in %q: %w", crName, namespace, updateErr)
-	}
-	slog.InfoContext(ctx, "tcor writer: updated", "name", crName, "namespace", namespace, "status", status)
-	return nil
+	return rec
 }
 
 // NoopTalosClusterResultWriter discards all writes. Used in unit tests.
 type NoopTalosClusterResultWriter struct{}
 
-// WriteTalosClusterResult discards the result without writing anything.
-func (NoopTalosClusterResultWriter) WriteTalosClusterResult(_ context.Context, _, _, _ string, _ runnerlib.OperationResultSpec) error {
+// AppendOperationRecord discards the result without writing anything.
+func (NoopTalosClusterResultWriter) AppendOperationRecord(_ context.Context, _, _ string, _ runnerlib.OperationResultSpec) error {
 	return nil
 }

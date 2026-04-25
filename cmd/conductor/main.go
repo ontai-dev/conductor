@@ -193,7 +193,7 @@ func runExecute() {
 	var porWriter persistence.OperationResultWriter
 	var tcorWriter persistence.TalosClusterResultWriter
 	if execCtx.OperationResultCR != "" {
-		tcorWriter = persistence.NewKubeTalosClusterResultWriter(ctrlClient, execCtx.ClusterRef)
+		tcorWriter = persistence.NewKubeTalosClusterResultWriter(ctrlClient)
 	} else {
 		porWriter = persistence.NewKubeOperationResultWriter(ctrlClient, execCtx.ClusterRef)
 	}
@@ -386,10 +386,12 @@ func (e *capabilityStepExecutor) Execute(
 
 	// Write result to the appropriate persistence target.
 	if operationResultCR != "" && e.tcorWriter != nil {
-		// Day-2 path: write InfrastructureTalosClusterOperationResult.
-		if writeErr := e.tcorWriter.WriteTalosClusterResult(ctx, namespace, operationResultCR, step.Name, result); writeErr != nil {
+		// Day-2 path: append record to per-cluster TCOR.
+		// operationResultCR is the Job name (OPERATION_RESULT_CR env var), used as
+		// jobRef so the platform reconciler can correlate the record with the Job it submitted.
+		if writeErr := e.tcorWriter.AppendOperationRecord(ctx, clusterRef, operationResultCR, result); writeErr != nil {
 			return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
-				"capabilityStepExecutor: write TCOR for step %q: %w", step.Name, writeErr)
+				"capabilityStepExecutor: append TCOR record for step %q: %w", step.Name, writeErr)
 		}
 	} else if e.writer != nil {
 		// Pack path: write PackOperationResult.
