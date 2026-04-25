@@ -192,14 +192,21 @@ type BootstrapSection struct {
 	// ControlPlaneEndpoint is the canonical HTTPS endpoint for the Kubernetes
 	// API server (e.g., https://10.20.0.10:6443). Used as the cluster endpoint
 	// in all generated machine configurations and the talosconfig.
-	ControlPlaneEndpoint string `yaml:"controlPlaneEndpoint"`
+	// Optional when machineConfigPaths is provided — the compiler extracts the
+	// endpoint automatically from the init node's machine config YAML.
+	// +optional
+	ControlPlaneEndpoint string `yaml:"controlPlaneEndpoint,omitempty"`
 
 	// TalosVersion is the Talos OS version to target (e.g., "v1.9.3").
 	// Used to select the appropriate VersionContract for config generation.
 	TalosVersion string `yaml:"talosVersion"`
 
-	// KubernetesVersion is the Kubernetes version to install (e.g., "1.32.0").
-	KubernetesVersion string `yaml:"kubernetesVersion"`
+	// KubernetesVersion is the Kubernetes version to install (e.g., "1.32.3").
+	// Optional — defaults to the highest supported version for the given TalosVersion
+	// per the official Talos support matrix when absent. Set bootstrap.kubernetesVersion
+	// explicitly to pin a specific patch version.
+	// +optional
+	KubernetesVersion string `yaml:"kubernetesVersion,omitempty"`
 
 	// InstallerImage is the fully-qualified Talos installer image reference.
 	// Defaults to ghcr.io/siderolabs/installer:{talosVersion} when empty.
@@ -207,8 +214,9 @@ type BootstrapSection struct {
 	InstallerImage string `yaml:"installerImage,omitempty"`
 
 	// InstallDisk is the default block device for Talos installation across
-	// all nodes (e.g., "/dev/sda").
-	// Defaults to "/dev/sda" when empty.
+	// all nodes (e.g., "/dev/sda", "/dev/vda").
+	// Optional when machineConfigPaths is provided — the compiler extracts the
+	// install disk from the init node's machine config. Defaults to "/dev/sda".
 	// +optional
 	InstallDisk string `yaml:"installDisk,omitempty"`
 
@@ -226,6 +234,104 @@ func stripScheme(endpoint string) string {
 		return endpoint[i+3:]
 	}
 	return endpoint
+}
+
+// talosK8sVersionMatrix maps Talos minor version keys (e.g., "v1.9") to the highest
+// Kubernetes patch version officially supported by that Talos release series.
+// Source: https://www.talos.dev/latest/introduction/support-matrix/
+// Update this map when new Talos releases extend the support matrix.
+var talosK8sVersionMatrix = map[string]string{
+	"v1.9": "1.32.3",
+	"v1.8": "1.31.5",
+	"v1.7": "1.30.9",
+	"v1.6": "1.29.14",
+	"v1.5": "1.28.15",
+}
+
+// defaultKubernetesVersion returns the highest Kubernetes version officially
+// supported by the given Talos version per the support matrix. talosVersion must
+// be "vMAJOR.MINOR.PATCH" format. Returns an error when the Talos minor version
+// is absent from the matrix — in that case set bootstrap.kubernetesVersion explicitly.
+func defaultKubernetesVersion(talosVersion string) (string, error) {
+	bare := strings.TrimPrefix(talosVersion, "v")
+	parts := strings.SplitN(bare, ".", 3)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid talosVersion %q: expected vMAJOR.MINOR.PATCH", talosVersion)
+	}
+	key := "v" + parts[0] + "." + parts[1]
+	k8sVer, ok := talosK8sVersionMatrix[key]
+	if !ok {
+		return "", fmt.Errorf("no default Kubernetes version for Talos %q: set bootstrap.kubernetesVersion explicitly or add an entry to talosK8sVersionMatrix", talosVersion)
+	}
+	return k8sVer, nil
+}
+
+// extractEndpointFromMachineConfig parses machineConfigBytes as a Talos machine
+// config and returns the cluster.controlPlane.endpoint value.
+func extractEndpointFromMachineConfig(machineConfigBytes []byte) (string, error) {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(machineConfigBytes, &raw); err != nil {
+		return "", fmt.Errorf("parse machineconfig: %w", err)
+	}
+	cluster, ok := raw["cluster"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("machineconfig: missing cluster section")
+	}
+	cp, ok := cluster["controlPlane"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("machineconfig: missing cluster.controlPlane section")
+	}
+	endpoint, ok := cp["endpoint"].(string)
+	if !ok || endpoint == "" {
+		return "", fmt.Errorf("machineconfig: cluster.controlPlane.endpoint is empty or missing")
+	}
+	return endpoint, nil
+}
+
+// extractInstallDiskFromMachineConfig parses machineConfigBytes and returns the
+// machine.install.disk value. Returns empty string when absent or unparseable
+// (callers should fall back to "/dev/sda").
+func extractInstallDiskFromMachineConfig(machineConfigBytes []byte) string {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(machineConfigBytes, &raw); err != nil {
+		return ""
+	}
+	machine, ok := raw["machine"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	install, ok := machine["install"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	disk, _ := install["disk"].(string)
+	return disk
+}
+
+// extractFromInitNode reads the init or first cp node entry from mcPaths, reads
+// that file, and calls the supplied extractor. Returns ("", nil) when mcPaths is
+// empty (callers must handle the missing case themselves).
+func extractFromInitNode(mcPaths map[string]string, nodes []BootstrapNode, extractor func([]byte) (string, error)) (string, error) {
+	if len(mcPaths) == 0 {
+		return "", nil
+	}
+	for _, preferredRole := range []string{"init", "controlplane"} {
+		for _, n := range nodes {
+			if n.Role != preferredRole {
+				continue
+			}
+			mcPath, ok := mcPaths[n.Hostname]
+			if !ok {
+				continue
+			}
+			mcBytes, err := os.ReadFile(mcPath)
+			if err != nil {
+				return "", fmt.Errorf("read machineconfig for %q from %q: %w", n.Hostname, mcPath, err)
+			}
+			return extractor(mcBytes)
+		}
+	}
+	return "", nil
 }
 
 // clusterRole returns the TalosClusterRole for a ClusterInput.
@@ -549,19 +655,16 @@ func writeCRYAML(outDir, name string, obj interface{}) error {
 	return nil
 }
 
-// validateBootstrapInput checks all required fields in the BootstrapSection.
+// validateBootstrapInput checks required fields in the BootstrapSection.
+// controlPlaneEndpoint, kubernetesVersion, and installDisk are optional:
+// they are resolved after validation via machineConfigPaths extraction or
+// the Talos support matrix.
 func validateBootstrapInput(b *BootstrapSection) error {
 	if b == nil {
 		return fmt.Errorf("bootstrap section is required for the bootstrap subcommand")
 	}
-	if b.ControlPlaneEndpoint == "" {
-		return fmt.Errorf("bootstrap.controlPlaneEndpoint is required")
-	}
 	if b.TalosVersion == "" {
 		return fmt.Errorf("bootstrap.talosVersion is required")
-	}
-	if b.KubernetesVersion == "" {
-		return fmt.Errorf("bootstrap.kubernetesVersion is required")
 	}
 	if len(b.Nodes) == 0 {
 		return fmt.Errorf("bootstrap.nodes must contain at least one node")
@@ -631,11 +734,46 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	}
 	b := in.Bootstrap
 
-	// Apply defaults.
+	// Resolve controlPlaneEndpoint: explicit > extracted from machineConfigPaths.
+	controlPlaneEndpoint := b.ControlPlaneEndpoint
+	if controlPlaneEndpoint == "" {
+		ep, err := extractFromInitNode(in.MachineConfigPaths, b.Nodes, extractEndpointFromMachineConfig)
+		if err != nil {
+			return fmt.Errorf("input %q: extract controlPlaneEndpoint: %w", input, err)
+		}
+		if ep == "" {
+			return fmt.Errorf("input %q: bootstrap.controlPlaneEndpoint is required when machineConfigPaths is not provided", input)
+		}
+		controlPlaneEndpoint = ep
+	}
+
+	// Resolve kubernetesVersion: explicit > support matrix.
+	kubernetesVersion := b.KubernetesVersion
+	if kubernetesVersion == "" {
+		k8sVer, err := defaultKubernetesVersion(b.TalosVersion)
+		if err != nil {
+			return fmt.Errorf("input %q: resolve kubernetesVersion: %w", input, err)
+		}
+		kubernetesVersion = k8sVer
+	}
+
+	// Resolve installDisk: explicit > extracted from machineConfigPaths > default.
 	installDisk := b.InstallDisk
 	if installDisk == "" {
-		installDisk = "/dev/sda"
+		extracted, err := extractFromInitNode(in.MachineConfigPaths, b.Nodes,
+			func(mcBytes []byte) (string, error) {
+				return extractInstallDiskFromMachineConfig(mcBytes), nil
+			})
+		if err != nil {
+			return fmt.Errorf("input %q: extract installDisk: %w", input, err)
+		}
+		if extracted != "" {
+			installDisk = extracted
+		} else {
+			installDisk = "/dev/sda"
+		}
 	}
+
 	installerImage := b.InstallerImage
 	if installerImage == "" {
 		installerImage = "ghcr.io/siderolabs/installer:" + b.TalosVersion
@@ -743,8 +881,8 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	// Build the generate input with cluster-wide settings.
 	genInput, err := generate.NewInput(
 		in.Name,
-		b.ControlPlaneEndpoint,
-		b.KubernetesVersion,
+		controlPlaneEndpoint,
+		kubernetesVersion,
 		generate.WithVersionContract(versionContract),
 		generate.WithSecretsBundle(secretsBundle),
 		generate.WithInstallDisk(installDisk),
@@ -873,9 +1011,10 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	// Role is absent on all bootstrap paths (mode=bootstrap, capi.enabled=false or true).
 	// Role is present only on mode=import, where it is mandatory.
 	tcSpec := platformv1alpha1.TalosClusterSpec{
-		Mode:            tcMode,
-		TalosVersion:    b.TalosVersion,
-		ClusterEndpoint: stripScheme(b.ControlPlaneEndpoint),
+		Mode:              tcMode,
+		TalosVersion:      b.TalosVersion,
+		KubernetesVersion: kubernetesVersion,
+		ClusterEndpoint:   stripScheme(controlPlaneEndpoint),
 		// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
 	}
 	if tcMode == platformv1alpha1.TalosClusterModeImport {
@@ -1184,10 +1323,14 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 
 	// Emit TalosCluster CR with mode=import so the operator can adopt the cluster
 	// without a bootstrap Job. conductor-schema.md §9.
-	var talosVersion, clusterEndpoint string
+	var talosVersion, clusterEndpoint, kubernetesVersion string
 	if in.Bootstrap != nil {
 		talosVersion = in.Bootstrap.TalosVersion
 		clusterEndpoint = stripScheme(in.Bootstrap.ControlPlaneEndpoint)
+		kubernetesVersion = in.Bootstrap.KubernetesVersion
+		if kubernetesVersion == "" && talosVersion != "" {
+			kubernetesVersion, _ = defaultKubernetesVersion(talosVersion)
+		}
 	}
 	role, err := clusterRole(in)
 	if err != nil {
@@ -1206,10 +1349,11 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 			},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode:            platformv1alpha1.TalosClusterModeImport,
-			Role:            role,
-			TalosVersion:    talosVersion,
-			ClusterEndpoint: clusterEndpoint,
+			Mode:              platformv1alpha1.TalosClusterModeImport,
+			Role:              role,
+			TalosVersion:      talosVersion,
+			KubernetesVersion: kubernetesVersion,
+			ClusterEndpoint:   clusterEndpoint,
 			// CAPI nil -- management cluster import path; nil suppresses capi block (C-34).
 		},
 	}
