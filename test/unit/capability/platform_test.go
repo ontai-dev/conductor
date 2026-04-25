@@ -98,19 +98,21 @@ func newPlatformDynClient(objects ...*unstructured.Unstructured) *dynamicfake.Fa
 // ---------------------------------------------------------------------------
 
 type stubTalosClient struct {
-	bootstrapErr      error
-	applyConfigErr    error
-	upgradeErr        error
-	rebootErr         error
-	resetErr          error
-	etcdSnapshotErr   error
-	etcdRecoverErr    error
-	etcdDefragErr     error
-	bootstrapCalled   bool
-	upgradeCalled     bool
-	rebootCalled      bool
-	resetCalled       bool
-	defragmentCalled  bool
+	bootstrapErr          error
+	applyConfigErr        error
+	upgradeErr            error
+	rebootErr             error
+	resetErr              error
+	etcdSnapshotErr       error
+	etcdRecoverErr        error
+	etcdDefragErr         error
+	getMachineConfigErr   error
+	getMachineConfigBytes []byte
+	bootstrapCalled       bool
+	upgradeCalled         bool
+	rebootCalled          bool
+	resetCalled           bool
+	defragmentCalled      bool
 }
 
 func (s *stubTalosClient) Bootstrap(_ context.Context) error {
@@ -141,6 +143,9 @@ func (s *stubTalosClient) EtcdRecover(_ context.Context, _ io.Reader) error {
 func (s *stubTalosClient) EtcdDefragment(_ context.Context) error {
 	s.defragmentCalled = true
 	return s.etcdDefragErr
+}
+func (s *stubTalosClient) GetMachineConfig(_ context.Context) ([]byte, error) {
+	return s.getMachineConfigBytes, s.getMachineConfigErr
 }
 func (s *stubTalosClient) Close() error { return nil }
 

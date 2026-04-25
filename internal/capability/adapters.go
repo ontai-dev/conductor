@@ -289,6 +289,22 @@ func (a *TalosClientAdapter) EtcdDefragment(ctx context.Context) error {
 	return err
 }
 
+// GetMachineConfig reads the running machine config from /system/state/config.yaml
+// on the Talos node. Returns raw YAML bytes. Used after node operations to capture
+// the post-operation config state.
+func (a *TalosClientAdapter) GetMachineConfig(ctx context.Context) ([]byte, error) {
+	rc, err := a.inner.Read(ctx, "/system/state/config.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("GetMachineConfig: read /system/state/config.yaml: %w", err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("GetMachineConfig: read response: %w", err)
+	}
+	return data, nil
+}
+
 // Close releases the underlying gRPC connection.
 func (a *TalosClientAdapter) Close() error {
 	return a.inner.Close()

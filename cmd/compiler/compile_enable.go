@@ -1601,6 +1601,11 @@ func writePlatformExecutorRoleFile(dir string) error {
 				Resources: []string{"infrastructuretalosclusteroperationresults"},
 				Verbs:     []string{"get", "create", "update", "patch"},
 			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			},
 		},
 	}
 	rb := rbacv1.RoleBinding{
@@ -2601,14 +2606,21 @@ func operatorClusterRules(operatorName string) []rbacv1.PolicyRule {
 			},
 		)
 	case "platform":
-		return append(common, rbacv1.PolicyRule{
-			APIGroups: []string{"platform.ontai.dev"},
-			Resources: []string{"talosclusters", "talosclusters/status",
-				"etcdmaintenances", "nodemaintenances", "pkirotations",
-				"clusterresets", "hardeningprofiles", "upgradepolicies",
-				"nodeoperations", "clustermaintenances", "maintenancebundles"},
-			Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-		})
+		return append(common,
+			rbacv1.PolicyRule{
+				APIGroups: []string{"platform.ontai.dev"},
+				Resources: []string{"talosclusters", "talosclusters/status",
+					"etcdmaintenances", "nodemaintenances", "pkirotations",
+					"clusterresets", "hardeningprofiles", "upgradepolicies",
+					"nodeoperations", "clustermaintenances", "maintenancebundles"},
+				Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			rbacv1.PolicyRule{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"infrastructuretalosclusteroperationresults"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+		)
 	case "wrapper":
 		return append(common, rbacv1.PolicyRule{
 			APIGroups: []string{"infrastructure.ontai.dev"},

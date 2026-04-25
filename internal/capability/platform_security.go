@@ -57,16 +57,19 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 			fmt.Sprintf("no PKIRotation CR found in %s", ns)), nil
 	}
 
-	// PKI rotation in Talos is performed by generating new certificates and
-	// applying updated machine configs. The Talos API handles the certificate
-	// rotation lifecycle when machine configs with new CA refs are applied.
-	// ApplyConfiguration with mode=reboot triggers a full cert rotation cycle.
-	pkiRotationConfig := []byte(`{"machine":{"ca":{}}}`) // triggers CA regeneration flow
-
+	// Read the current machine config from the node and re-apply it in staged mode.
+	// This initiates a rotation cycle: the staged config is applied on next reboot,
+	// refreshing certificate-backed component configuration. conductor-schema.md §6.
 	stepStart := time.Now().UTC()
-	if err := params.TalosClient.ApplyConfiguration(ctx, pkiRotationConfig, "staged"); err != nil {
+	configBytes, err := params.TalosClient.GetMachineConfig(ctx)
+	if err != nil {
 		return failureResult(runnerlib.CapabilityPKIRotate, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("ApplyConfiguration for PKI rotation: %v", err)), nil
+			fmt.Sprintf("GetMachineConfig for PKI rotation: %v", err)), nil
+	}
+
+	if err := params.TalosClient.ApplyConfiguration(ctx, configBytes, "staged"); err != nil {
+		return failureResult(runnerlib.CapabilityPKIRotate, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("ApplyConfiguration staged for PKI rotation: %v", err)), nil
 	}
 
 	return runnerlib.OperationResultSpec{
@@ -79,7 +82,7 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 			{
 				Name: "pki-rotate", Status: runnerlib.ResultSucceeded,
 				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("PKI rotation staged for cluster %s", params.ClusterRef),
+				Message: fmt.Sprintf("PKI rotation staged for cluster %s; config staged for next reboot", params.ClusterRef),
 			},
 		},
 	}, nil

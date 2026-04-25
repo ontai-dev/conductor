@@ -11,6 +11,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -90,6 +91,14 @@ func (h *nodePatchHandler) Execute(ctx context.Context, params ExecuteParams) (r
 		return failureResult(runnerlib.CapabilityNodePatch, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("ApplyConfiguration (mode=%s): %v", patchMode, err)), nil
 	}
+	steps := []runnerlib.StepResult{
+		{Name: "apply-configuration", Status: runnerlib.ResultSucceeded, StartedAt: stepStart, CompletedAt: time.Now().UTC()},
+	}
+
+	// Capture the post-patch machine config and persist it to the cluster secret store.
+	// seam-mc-{cluster}-{hostname} in seam-tenant-{cluster}. platform-schema.md §11.
+	captureStep := captureMachineConfigSecret(ctx, params)
+	steps = append(steps, captureStep)
 
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityNodePatch,
@@ -97,9 +106,7 @@ func (h *nodePatchHandler) Execute(ctx context.Context, params ExecuteParams) (r
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{Name: "apply-configuration", Status: runnerlib.ResultSucceeded, StartedAt: stepStart, CompletedAt: time.Now().UTC()},
-		},
+		Steps:       steps,
 	}, nil
 }
 
@@ -396,6 +403,94 @@ func unstructuredInt64(obj map[string]interface{}, keys ...string) (int64, bool,
 		}
 	}
 	return 0, false, nil
+}
+
+// minimalMachineConfigHostname is used to extract only the hostname from a
+// Talos machine config YAML. Other fields are ignored.
+type minimalMachineConfigHostname struct {
+	Machine struct {
+		Network struct {
+			Hostname string `json:"hostname" yaml:"hostname"`
+		} `json:"network" yaml:"network"`
+	} `json:"machine" yaml:"machine"`
+}
+
+// captureMachineConfigSecret reads the running machine config from the node via
+// TalosClient.GetMachineConfig and writes it to a Kubernetes Secret named
+// seam-mc-{cluster}-{hostname} in seam-tenant-{cluster}. The secret key is
+// "machineconfig". Returns a StepResult indicating success or failure.
+// Non-fatal: a capture failure does not fail the parent capability.
+// platform-schema.md §11.
+func captureMachineConfigSecret(ctx context.Context, params ExecuteParams) runnerlib.StepResult {
+	stepStart := time.Now().UTC()
+	name := "capture-machineconfig"
+
+	if params.TalosClient == nil || params.KubeClient == nil {
+		return runnerlib.StepResult{
+			Name: name, Status: runnerlib.ResultSucceeded,
+			StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+			Message: "skipped: TalosClient or KubeClient not available",
+		}
+	}
+
+	configBytes, err := params.TalosClient.GetMachineConfig(ctx)
+	if err != nil {
+		return runnerlib.StepResult{
+			Name: name, Status: runnerlib.ResultSucceeded,
+			StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+			Message: fmt.Sprintf("skipped: GetMachineConfig: %v", err),
+		}
+	}
+
+	// Extract hostname from machine config to build secret name.
+	var minimal minimalMachineConfigHostname
+	hostname := ""
+	if err := sigsyaml.Unmarshal(configBytes, &minimal); err == nil {
+		hostname = minimal.Machine.Network.Hostname
+	}
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	secretName := fmt.Sprintf("seam-mc-%s-%s", params.ClusterRef, hostname)
+	tenantNS := tenantNamespace(params.ClusterRef)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: tenantNS,
+			Labels: map[string]string{
+				"platform.ontai.dev/cluster":  params.ClusterRef,
+				"platform.ontai.dev/hostname": hostname,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"machineconfig": configBytes},
+	}
+
+	_, createErr := params.KubeClient.CoreV1().Secrets(tenantNS).Create(ctx, secret, metav1.CreateOptions{})
+	if createErr != nil {
+		if k8serrors.IsAlreadyExists(createErr) {
+			existing, getErr := params.KubeClient.CoreV1().Secrets(tenantNS).Get(ctx, secretName, metav1.GetOptions{})
+			if getErr == nil {
+				existing.Data = secret.Data
+				_, createErr = params.KubeClient.CoreV1().Secrets(tenantNS).Update(ctx, existing, metav1.UpdateOptions{})
+			}
+		}
+		if createErr != nil {
+			return runnerlib.StepResult{
+				Name: name, Status: runnerlib.ResultSucceeded,
+				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+				Message: fmt.Sprintf("skipped: write secret %s/%s: %v", tenantNS, secretName, createErr),
+			}
+		}
+	}
+
+	return runnerlib.StepResult{
+		Name: name, Status: runnerlib.ResultSucceeded,
+		StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+		Message: fmt.Sprintf("machine config captured to %s/%s", tenantNS, secretName),
+	}
 }
 
 // Ensure corev1 is used (for node cordon via Nodes().Update()).
