@@ -96,11 +96,28 @@ func (w *kubeOperationResultWriter) WriteResult(
 	spec.Revision = newRevision
 	spec.PreviousRevisionRef = prevRef
 
+	// Set ownerReference to the PackExecution so Kubernetes GC deletes this POR
+	// when the PE is deleted, preventing stale PORs from surviving a redeploy.
+	// If the PE is already gone (late-arriving result), skip the ownerRef.
+	var ownerRefs []metav1.OwnerReference
+	pe := &seamv1alpha1.InfrastructurePackExecution{}
+	if getErr := w.client.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: packExecutionRef}, pe); getErr == nil {
+		blockOwner := true
+		ownerRefs = []metav1.OwnerReference{{
+			APIVersion:         "infrastructure.ontai.dev/v1alpha1",
+			Kind:               "InfrastructurePackExecution",
+			Name:               pe.Name,
+			UID:                pe.UID,
+			BlockOwnerDeletion: &blockOwner,
+		}}
+	}
+
 	por := &seamv1alpha1.PackOperationResult{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      newName,
-			Labels:    map[string]string{labelPackExecution: packExecutionRef},
+			Namespace:       namespace,
+			Name:            newName,
+			Labels:          map[string]string{labelPackExecution: packExecutionRef},
+			OwnerReferences: ownerRefs,
 		},
 		Spec: spec,
 	}

@@ -438,6 +438,13 @@ type PackBuildInput struct {
 	// +optional
 	BasePackName string `yaml:"basePackName,omitempty"`
 
+	// ValuesFile is the path to the values/overlay file used during pack compilation.
+	// For Helm packs: relative to the PackBuildInput file location. Merged with chart
+	// defaults at render time and recorded in the output ClusterPack CR for traceability.
+	// For kustomize/raw packs: the overlay or patch file used in the external build.
+	// +optional
+	ValuesFile string `yaml:"valuesFile,omitempty"`
+
 	// HelmSource defines the Helm chart source for automated packbuild.
 	// When present, the compiler fetches, renders, and pushes the chart
 	// automatically instead of requiring pre-built OCI digests.
@@ -1101,6 +1108,7 @@ func compilePackBuild(input, output string) error {
 			RBACDigest:     in.RBACDigest,
 			WorkloadDigest: in.WorkloadDigest,
 			BasePackName:   in.BasePackName,
+			ValuesFile:     in.ValuesFile,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)

@@ -243,6 +243,7 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 			ChartVersion:        hs.Version,
 			ChartName:           chartName,
 			HelmVersion:         helmSDKVersion(),
+			ValuesFile:          hs.ValuesFile,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
