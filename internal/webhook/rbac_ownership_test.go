@@ -144,6 +144,110 @@ func TestRBACOwnership_AllInterceptedKindsEnforced(t *testing.T) {
 	}
 }
 
+// makeAdmissionReviewNamed builds an AdmissionReview with an explicit resource name.
+// Used for cluster-scoped resources where the name carries semantic meaning (e.g., "system:node").
+func makeAdmissionReviewNamed(kind, ns, name, op string, annotations map[string]string) []byte {
+	objMeta := struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations,omitempty"`
+		} `json:"metadata"`
+	}{}
+	objMeta.Metadata.Annotations = annotations
+	objRaw, _ := json.Marshal(objMeta)
+
+	review := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "admission.k8s.io/v1",
+			Kind:       "AdmissionReview",
+		},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "test-uid",
+			Namespace: ns,
+			Operation: admissionv1.Operation(op),
+			Kind:      metav1.GroupVersionKind{Kind: kind},
+			Name:      name,
+			Object:    runtime.RawExtension{Raw: objRaw},
+		},
+	}
+	b, _ := json.Marshal(review)
+	return b
+}
+
+// TestRBACOwnership_KubePublicAlwaysAdmitted verifies that resources in kube-public
+// are always admitted. kube-public carries Kubernetes cluster-info ConfigMap RBAC.
+func TestRBACOwnership_KubePublicAlwaysAdmitted(t *testing.T) {
+	gate := NewEnforcementGate()
+	gate.SetStrict()
+	wh := NewTenantRBACOwnershipWebhook(gate)
+
+	body := makeAdmissionReview("Role", "kube-public", "CREATE", nil)
+	resp := admitRequest(wh, body)
+	if !resp.Allowed {
+		t.Error("kube-public Role should always be admitted")
+	}
+}
+
+// TestRBACOwnership_KubeNodeLeaseAlwaysAdmitted verifies that resources in
+// kube-node-lease are always admitted.
+func TestRBACOwnership_KubeNodeLeaseAlwaysAdmitted(t *testing.T) {
+	gate := NewEnforcementGate()
+	gate.SetStrict()
+	wh := NewTenantRBACOwnershipWebhook(gate)
+
+	body := makeAdmissionReview("ServiceAccount", "kube-node-lease", "CREATE", nil)
+	resp := admitRequest(wh, body)
+	if !resp.Allowed {
+		t.Error("kube-node-lease ServiceAccount should always be admitted")
+	}
+}
+
+// TestRBACOwnership_SystemPrefixClusterRoleAdmitted verifies that ClusterRoles
+// whose name starts with "system:" are always admitted in strict mode. These are
+// Kubernetes built-ins modified during upgrades and bootstrapping.
+func TestRBACOwnership_SystemPrefixClusterRoleAdmitted(t *testing.T) {
+	gate := NewEnforcementGate()
+	gate.SetStrict()
+	wh := NewTenantRBACOwnershipWebhook(gate)
+
+	for _, name := range []string{"system:node", "system:controller:node-controller", "system:auth-delegator"} {
+		body := makeAdmissionReviewNamed("ClusterRole", "", name, "UPDATE", nil)
+		resp := admitRequest(wh, body)
+		if !resp.Allowed {
+			t.Errorf("strict mode: ClusterRole %q (system: prefix) should always be admitted, got denied", name)
+		}
+	}
+}
+
+// TestRBACOwnership_SystemPrefixClusterRoleBindingAdmitted verifies that
+// ClusterRoleBindings whose name starts with "system:" are always admitted.
+func TestRBACOwnership_SystemPrefixClusterRoleBindingAdmitted(t *testing.T) {
+	gate := NewEnforcementGate()
+	gate.SetStrict()
+	wh := NewTenantRBACOwnershipWebhook(gate)
+
+	for _, name := range []string{"system:node", "system:kube-controller-manager", "system:coredns"} {
+		body := makeAdmissionReviewNamed("ClusterRoleBinding", "", name, "UPDATE", nil)
+		resp := admitRequest(wh, body)
+		if !resp.Allowed {
+			t.Errorf("strict mode: ClusterRoleBinding %q (system: prefix) should always be admitted, got denied", name)
+		}
+	}
+}
+
+// TestRBACOwnership_NonSystemClusterRoleEnforced verifies that cluster-scoped
+// ClusterRoles WITHOUT the system: prefix are still subject to enforcement.
+func TestRBACOwnership_NonSystemClusterRoleEnforced(t *testing.T) {
+	gate := NewEnforcementGate()
+	gate.SetStrict()
+	wh := NewTenantRBACOwnershipWebhook(gate)
+
+	body := makeAdmissionReviewNamed("ClusterRole", "", "my-app-clusterrole", "CREATE", nil)
+	resp := admitRequest(wh, body)
+	if resp.Allowed {
+		t.Error("strict mode: unannotated ClusterRole without system: prefix should be rejected")
+	}
+}
+
 // TestEnforcementGate_StartsInAuditMode verifies the gate is in audit mode on construction.
 func TestEnforcementGate_StartsInAuditMode(t *testing.T) {
 	gate := NewEnforcementGate()

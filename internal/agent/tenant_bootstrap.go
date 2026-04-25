@@ -198,13 +198,16 @@ func (s *TenantBootstrapSweep) runOnce(ctx context.Context) error {
 // sweepAllNamespaces annotates all un-owned RBAC resources in all non-exempt
 // namespaces and all cluster-scoped RBAC. kube-system is always skipped.
 func (s *TenantBootstrapSweep) sweepAllNamespaces(ctx context.Context) error {
+	if s.KubeClient == nil {
+		return fmt.Errorf("KubeClient not initialized")
+	}
 	nsList, err := s.KubeClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list namespaces: %w", err)
 	}
 
 	for _, ns := range nsList.Items {
-		if ns.Name == "kube-system" {
+		if isSystemNamespace(ns.Name) {
 			continue
 		}
 		if ns.Labels[webhookExemptLabel] == webhookExemptValue {
@@ -361,6 +364,17 @@ func isSecurityCRDAbsent(err error) bool {
 	return strings.Contains(msg, "no kind is registered") ||
 		strings.Contains(msg, "no matches for kind") ||
 		strings.Contains(msg, "the server could not find the requested resource")
+}
+
+// isSystemNamespace returns true for namespaces that must never be swept.
+// Kubernetes writes RBAC to these during normal operations and upgrades;
+// the sweep must not touch them. Matches the exemption set in the webhook.
+func isSystemNamespace(ns string) bool {
+	switch ns {
+	case "kube-system", "kube-public", "kube-node-lease":
+		return true
+	}
+	return false
 }
 
 func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, comp tenantComponent) error {

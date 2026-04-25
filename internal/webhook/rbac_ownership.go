@@ -18,11 +18,6 @@ import (
 const (
 	rbacOwnerAnnotation      = "ontai.dev/rbac-owner"
 	rbacOwnerAnnotationValue = "guardian"
-
-	// exemptNamespaceLabel is the label that marks a namespace as exempt from
-	// RBAC ownership enforcement. Matches guardian's WebhookModeLabelKey.
-	exemptNamespaceLabel = "seam.ontai.dev/webhook-mode"
-	exemptNamespaceValue = "exempt"
 )
 
 // rbacInterceptedKinds is the set of resource kinds subject to RBAC ownership
@@ -97,12 +92,15 @@ func (w *TenantRBACOwnershipWebhook) admit(_ context.Context, req *admissionv1.A
 		return allowAdmission()
 	}
 
-	// kube-system is always exempt — system RBAC must not be blocked.
-	// Namespaces carrying the exempt label are also admitted unconditionally.
-	if req.Namespace == "kube-system" {
+	// Kubernetes system namespaces and known exempt namespaces are never blocked.
+	if isExemptNamespace(req) {
 		return allowAdmission()
 	}
-	if isExemptNamespace(req) {
+
+	// Cluster-scoped resources (ClusterRole, ClusterRoleBinding) have empty
+	// namespace. Kubernetes built-in names start with "system:" — these must
+	// never be blocked regardless of enforcement mode (upgrades, bootstrapping).
+	if req.Namespace == "" && strings.HasPrefix(req.Name, "system:") {
 		return allowAdmission()
 	}
 
@@ -153,21 +151,13 @@ func extractAnnotations(raw []byte) map[string]string {
 	return obj.Metadata.Annotations
 }
 
-// isExemptNamespace returns true if the request's namespace carries the exempt label.
-// Parses the namespace name from the request — the label itself must be detected
-// by the caller or via namespace metadata; here we use the name heuristic for
-// known system namespaces. ont-system is exempt to prevent the conductor agent
-// from blocking its own RBAC resources.
+// isExemptNamespace returns true if the request's namespace is a well-known
+// Kubernetes or Seam system namespace. These namespaces are never subject to
+// RBAC ownership enforcement — Kubernetes and platform bootstrap RBAC must land
+// unconditionally. Cluster-scoped resources (empty namespace) are NOT exempted
+// here; the system: prefix check in admit() covers those.
 func isExemptNamespace(req *admissionv1.AdmissionRequest) bool {
-	ns := req.Namespace
-	return ns == "ont-system" ||
-		strings.HasSuffix(ns, "-system") && isKnownSystemNamespace(ns)
-}
-
-// isKnownSystemNamespace returns true for well-known Kubernetes system namespaces
-// that should not be subject to RBAC ownership enforcement by Conductor.
-func isKnownSystemNamespace(ns string) bool {
-	switch ns {
+	switch req.Namespace {
 	case "kube-system", "kube-public", "kube-node-lease",
 		"ont-system", "seam-system":
 		return true
