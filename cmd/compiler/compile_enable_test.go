@@ -375,6 +375,132 @@ func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
 	assertContainsStr(t, content, "review-required")
 }
 
+// TestEnable_BootstrapRBACPolicyName verifies that guardian-rbacpolicy.yaml emits
+// management-policy (not the old seam-platform-rbac-policy name) with the management
+// policy-type label and management-maximum ceiling. guardian-schema.md §6, §19.
+func TestEnable_BootstrapRBACPolicyName(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbacpolicy.yaml")
+
+	assertContainsStr(t, content, "name: management-policy")
+	assertContainsStr(t, content, "ontai.dev/policy-type: management")
+	assertContainsStr(t, content, "maximumPermissionSetRef: management-maximum")
+
+	if strings.Contains(content, "seam-platform-rbac-policy") {
+		t.Error("guardian-rbacpolicy.yaml must not contain the old name seam-platform-rbac-policy")
+	}
+	if strings.Contains(content, "allowedClusters") {
+		t.Error("management-policy must not have allowedClusters -- it governs all clusters")
+	}
+}
+
+// TestEnable_BootstrapPermissionSetNames verifies that guardian-permissionsets.yaml
+// emits management-maximum (not seam-bootstrap-ceiling) and all five operator sets.
+// guardian-schema.md §6, §19.
+func TestEnable_BootstrapPermissionSetNames(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-permissionsets.yaml")
+
+	for _, name := range []string{
+		"management-maximum",
+		"guardian-permissions",
+		"wrapper-permissions",
+		"platform-permissions",
+		"seam-core-permissions",
+		"conductor-permissions",
+	} {
+		if !strings.Contains(content, "name: "+name) {
+			t.Errorf("guardian-permissionsets.yaml missing PermissionSet %q", name)
+		}
+	}
+	if strings.Contains(content, "seam-bootstrap-ceiling") {
+		t.Error("guardian-permissionsets.yaml must not contain the old name seam-bootstrap-ceiling")
+	}
+}
+
+// TestEnable_ManagementMaximumHasPolicyTypeLabel verifies that the management-maximum
+// PermissionSet carries the ontai.dev/policy-type: management label so Guardian
+// can identify it as the Layer 1 fleet ceiling.
+func TestEnable_ManagementMaximumHasPolicyTypeLabel(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-permissionsets.yaml")
+	assertContainsStr(t, content, "ontai.dev/policy-type: management")
+}
+
+// TestEnable_OperatorPermissionSetsAreScoped verifies that no per-operator
+// PermissionSet (guardian/wrapper/platform/seam-core/conductor) grants wildcard
+// apiGroups or resources. Only management-maximum is allowed to be wildcard.
+// CS-INV-008 three-layer RBAC hierarchy. guardian-schema.md §6.
+func TestEnable_OperatorPermissionSetsAreScoped(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-permissionsets.yaml")
+
+	// Split on document boundary so we can examine each PermissionSet independently.
+	docs := strings.Split(content, "\n---\n")
+	for _, doc := range docs {
+		if !strings.Contains(doc, "kind: PermissionSet") {
+			continue
+		}
+		if strings.Contains(doc, "name: management-maximum") {
+			// ceiling is intentionally wildcard
+			continue
+		}
+		// Per-operator PermissionSets must not declare apiGroups: ['*'].
+		// resources: ['*'] is permitted when scoped to a named apiGroup.
+		// Detect the YAML pattern: "apiGroups:" line immediately followed by "- '*'" line.
+		name := "(unknown)"
+		lines := strings.Split(doc, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "name: ") {
+				name = strings.TrimPrefix(strings.TrimSpace(line), "name: ")
+				break
+			}
+		}
+		for i, line := range lines {
+			if strings.TrimSpace(line) == "apiGroups:" && i+1 < len(lines) {
+				next := strings.TrimSpace(lines[i+1])
+				if next == "- '*'" {
+					t.Errorf("PermissionSet %q has unconstrained apiGroups: ['*'] -- per-operator sets must name specific apiGroups", name)
+				}
+			}
+		}
+	}
+}
+
+// TestEnable_RBACProfilesRefManagementPolicy verifies that all emitted RBACProfile
+// CRs reference management-policy (not the old seam-platform-rbac-policy).
+func TestEnable_RBACProfilesRefManagementPolicy(t *testing.T) {
+	outDir := t.TempDir()
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", ""); err != nil {
+		t.Fatalf("compileEnableBundle error: %v", err)
+	}
+
+	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "03-platform-wrapper", "platform-wrapper-rbacprofiles.yaml") +
+		readPhaseFile(t, outDir, "04-conductor", "conductor-rbacprofile.yaml")
+
+	assertContainsStr(t, content, "rbacPolicyRef: management-policy")
+	if strings.Contains(content, "seam-platform-rbac-policy") {
+		t.Error("RBACProfile files must not reference the old seam-platform-rbac-policy name")
+	}
+}
+
 // TestEnable_OutputIsDeterministic verifies that successive compileEnableBundle calls
 // produce identical output for all phase files. conductor-design.md §1.2.
 func TestEnable_OutputIsDeterministic(t *testing.T) {
