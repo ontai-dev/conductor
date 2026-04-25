@@ -598,6 +598,43 @@ PackReceipt, PermissionSnapshotReceipt, admission webhook, PermissionService gRP
 drift detection, and PermissionSnapshot pull loop. It does not activate signing loops.
 Signing is management-only. INV-026.
 
+**Tenant RBAC bootstrap sweep (TenantBootstrapSweep):**
+When role=tenant, Conductor runs an RBAC bootstrap sweep on leader election using
+`TenantBootstrapSweep`. The sweep runs once on startup and then periodically (every
+5 minutes) so that newly deployed Helm charts are picked up without restart.
+
+Phase 1 (annotation sweep): stamps `ontai.dev/rbac-owner=guardian` and
+`ontai.dev/rbac-enforcement-mode=audit` on all pre-existing Role, ClusterRole,
+RoleBinding, ClusterRoleBinding, and ServiceAccount resources using the typed
+kubernetes client. This establishes the governance baseline on cluster join.
+
+Phase 2 (profile creation): creates PermissionSet, RBACPolicy, and RBACProfile
+for each known third-party component (cert-manager, kueue, cnpg, metallb,
+local-path-provisioner) via the dynamic client using GVRs under
+`security.ontai.dev/v1alpha1`. Components whose namespace is absent on the cluster
+are silently skipped -- they will be picked up on the next periodic run once their
+Helm chart is deployed. If security CRDs are not installed (Guardian not deployed),
+the entire profile creation phase is skipped gracefully.
+
+After both phases complete, `EnforcementGate.SetStrict()` is called, which
+transitions the admission webhook from audit mode to strict mode.
+
+**EnforcementGate and admission webhook:**
+The `EnforcementGate` is an atomic bool that starts in audit mode (false) and
+transitions to strict mode (true) exactly once after the bootstrap sweep completes.
+The `TenantRBACOwnershipWebhook` is registered at `/validate/rbac-ownership` on
+the tenant cluster Conductor webhook server. In audit mode it logs unannotated RBAC
+resources but admits them. In strict mode it rejects any RBAC resource that lacks
+the `ontai.dev/rbac-owner=guardian` annotation. The webhook exempts kube-system,
+ont-system, and other known system namespaces unconditionally. This mirrors Guardian's
+enforcement model (CS-INV-001, guardian-schema.md §5) from the Conductor process so
+that tenant clusters without Guardian deployed are still governed.
+
+The management cluster Conductor does NOT register the RBAC ownership webhook --
+Guardian owns that enforcement path on the management cluster. `NewWebhookServer`
+accepts a `*EnforcementGate` parameter: nil suppresses the endpoint (management),
+non-nil enables it (tenant).
+
 **Invariants:**
 - Conductor with an absent or unrecognized role field exits immediately with
   InvariantViolation structured exit. This is a hard gate - a Conductor without a
