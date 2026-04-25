@@ -1,5 +1,6 @@
 # conductor-schema
-> API Group: runner.ontai.dev
+> CRD types: infrastructure.ontai.dev/v1alpha1 (InfrastructureRunnerConfig, InfrastructurePackReceipt) -- schema owned by seam-core (Decision G)
+> Runtime behavior and capability schema: this document
 > Repository: conductor (produces both Compiler and Conductor binaries)
 > All agents absorb this document. This schema governs both binaries.
 
@@ -103,9 +104,9 @@ operators and by both binaries. It is the single source of RunnerConfig schema,
 generation logic, and capability manifest structure.
 
 **Library exports:**
-- RunnerConfig schema types
-- GenerateFromTalosCluster(spec) → RunnerConfig
-- GenerateFromPackBuild(spec) → RunnerConfig
+- RunnerConfig and PackReceipt generation logic (imports types from seam-core/api/v1alpha1; does not define schema)
+- GenerateFromTalosCluster(spec) → InfrastructureRunnerConfig
+- GenerateFromPackBuild(spec) → InfrastructureRunnerConfig
 - CapabilityManifest types
 - OperationResult types
 - Job spec builder functions
@@ -118,8 +119,9 @@ operator logic changes are required for new capabilities.
 
 ## 5. CRDs
 
-### RunnerConfig
+### InfrastructureRunnerConfig
 
+Kind: InfrastructureRunnerConfig. API group: infrastructure.ontai.dev/v1alpha1. Schema owned by seam-core (Decision G).
 Scope: Namespaced - ont-system (management cluster), tenant-{cluster-name} (targets).
 Short name: rc
 
@@ -321,7 +323,7 @@ The management cluster bootstrap sequence is owned exclusively by the Compiler i
 Forms the management cluster itself. Reads TalosCluster spec and human-provided machineconfig inputs. Validates spec against platform-schema.md rules. SOPS-encrypts talos-secret, machineconfigs, and talosconfig using the admin's age key. Writes encrypted files to output path. Produces bootstrap CRs (TalosCluster in mode: bootstrap) as YAML. No cluster connection required. Compiler never applies resources - the GitOps pipeline or operator's kubectl applies the output.
 
 **Step 2 - `compiler launch`**
-Installs all Seam CRDs onto the management cluster. Reads the CRD manifest set for all Seam API groups (platform.ontai.dev, security.ontai.dev, infra.ontai.dev, runner.ontai.dev, infrastructure.ontai.dev). Produces a CRD manifest YAML bundle ready for GitOps application. No cluster connection required. Compiler never applies resources.
+Installs all Seam CRDs onto the management cluster. Reads the CRD manifest set for all Seam API groups (infrastructure.ontai.dev, security.ontai.dev, platform.ontai.dev). The old groups runner.ontai.dev and infra.ontai.dev are superseded by infrastructure.ontai.dev as of Phase 2B (2026-04-25). Produces a CRD manifest YAML bundle ready for GitOps application. No cluster connection required. Compiler never applies resources.
 
 **Step 3 - `compiler enable`**
 Produces the complete Seam operator deployment manifest bundle as YAML output. The bundle
@@ -838,7 +840,8 @@ new message types requires a Platform Governor directive before implementation.
 
 ---
 
-*runner.ontai.dev schema - conductor repository*
+*Conductor behavioral schema - conductor repository*
+*CRD type schema authority: seam-core (infrastructure.ontai.dev). Supersedes runner.ontai.dev. Decision G, Phase 2B 2026-04-25.*
 *Amendments appended below with date and rationale.*
 
 2026-03-30 - Two-binary model adopted. Compiler confined to compile mode (debian).
