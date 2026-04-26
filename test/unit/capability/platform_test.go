@@ -21,10 +21,9 @@ import (
 // Fake dynamic client helpers
 // ---------------------------------------------------------------------------
 
-// platformKindToResource maps canonical Kind names to their GVR resource names.
-// Required because resource names are irregular plurals (e.g., policy→policies).
+// platformKindToResource maps canonical Kind names to their GVR resource names
+// under platform.ontai.dev. Required because resource names are irregular plurals.
 var platformKindToResource = map[string]string{
-	"TalosCluster":     "talosclusters",
 	"UpgradePolicy":    "upgradepolicies",
 	"NodeOperation":    "nodeoperations",
 	"NodeMaintenance":  "nodemaintenances",
@@ -34,8 +33,14 @@ var platformKindToResource = map[string]string{
 	"HardeningProfile": "hardeningprofiles",
 }
 
-// newPlatformDynClient builds a fake dynamic client with all platform GVRs
-// registered and pre-creates the provided objects using the canonical Kind names.
+// infraKindToResource maps seam-core infrastructure.ontai.dev Kind names to GVR resources.
+// TalosCluster migrated to infrastructure.ontai.dev in the seam rebranding.
+var infraKindToResource = map[string]string{
+	"InfrastructureTalosCluster": "infrastructuretalosclusters",
+}
+
+// newPlatformDynClient builds a fake dynamic client with all platform and infrastructure
+// GVRs registered and pre-creates the provided objects using their canonical Kind names.
 func newPlatformDynClient(objects ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
 	s := runtime.NewScheme()
 	for kind, resource := range platformKindToResource {
@@ -49,21 +54,40 @@ func newPlatformDynClient(objects ...*unstructured.Unstructured) *dynamicfake.Fa
 		)
 		_ = resource
 	}
+	for kind, resource := range infraKindToResource {
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Kind: kind},
+			&unstructured.Unstructured{},
+		)
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Kind: kind + "List"},
+			&unstructured.UnstructuredList{},
+		)
+		_ = resource
+	}
 	client := dynamicfake.NewSimpleDynamicClient(s)
 	for _, obj := range objects {
 		kind := obj.GetKind()
-		resource, ok := platformKindToResource[kind]
-		if !ok {
-			continue
-		}
-		gvr := schema.GroupVersionResource{
-			Group: "platform.ontai.dev", Version: "v1alpha1", Resource: resource,
-		}
-		ns := obj.GetNamespace()
-		if ns == "" {
-			_, _ = client.Resource(gvr).Create(context.Background(), obj, metav1.CreateOptions{})
-		} else {
-			_, _ = client.Resource(gvr).Namespace(ns).Create(context.Background(), obj, metav1.CreateOptions{})
+		if resource, ok := platformKindToResource[kind]; ok {
+			gvr := schema.GroupVersionResource{
+				Group: "platform.ontai.dev", Version: "v1alpha1", Resource: resource,
+			}
+			ns := obj.GetNamespace()
+			if ns == "" {
+				_, _ = client.Resource(gvr).Create(context.Background(), obj, metav1.CreateOptions{})
+			} else {
+				_, _ = client.Resource(gvr).Namespace(ns).Create(context.Background(), obj, metav1.CreateOptions{})
+			}
+		} else if resource, ok := infraKindToResource[kind]; ok {
+			gvr := schema.GroupVersionResource{
+				Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: resource,
+			}
+			ns := obj.GetNamespace()
+			if ns == "" {
+				_, _ = client.Resource(gvr).Create(context.Background(), obj, metav1.CreateOptions{})
+			} else {
+				_, _ = client.Resource(gvr).Namespace(ns).Create(context.Background(), obj, metav1.CreateOptions{})
+			}
 		}
 	}
 	return client
@@ -74,19 +98,21 @@ func newPlatformDynClient(objects ...*unstructured.Unstructured) *dynamicfake.Fa
 // ---------------------------------------------------------------------------
 
 type stubTalosClient struct {
-	bootstrapErr      error
-	applyConfigErr    error
-	upgradeErr        error
-	rebootErr         error
-	resetErr          error
-	etcdSnapshotErr   error
-	etcdRecoverErr    error
-	etcdDefragErr     error
-	bootstrapCalled   bool
-	upgradeCalled     bool
-	rebootCalled      bool
-	resetCalled       bool
-	defragmentCalled  bool
+	bootstrapErr          error
+	applyConfigErr        error
+	upgradeErr            error
+	rebootErr             error
+	resetErr              error
+	etcdSnapshotErr       error
+	etcdRecoverErr        error
+	etcdDefragErr         error
+	getMachineConfigErr   error
+	getMachineConfigBytes []byte
+	bootstrapCalled       bool
+	upgradeCalled         bool
+	rebootCalled          bool
+	resetCalled           bool
+	defragmentCalled      bool
 }
 
 func (s *stubTalosClient) Bootstrap(_ context.Context) error {
@@ -117,6 +143,9 @@ func (s *stubTalosClient) EtcdRecover(_ context.Context, _ io.Reader) error {
 func (s *stubTalosClient) EtcdDefragment(_ context.Context) error {
 	s.defragmentCalled = true
 	return s.etcdDefragErr
+}
+func (s *stubTalosClient) GetMachineConfig(_ context.Context) ([]byte, error) {
+	return s.getMachineConfigBytes, s.getMachineConfigErr
 }
 func (s *stubTalosClient) Close() error { return nil }
 
@@ -185,8 +214,8 @@ func TestBootstrap_CallsBootstrapAPIWhenClusterExists(t *testing.T) {
 
 	cluster := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "platform.ontai.dev/v1alpha1",
-			"kind": "TalosCluster",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructureTalosCluster",
 			"metadata":   map[string]interface{}{"name": "ccs-test", "namespace": "ont-system"},
 			"spec":       map[string]interface{}{},
 		},

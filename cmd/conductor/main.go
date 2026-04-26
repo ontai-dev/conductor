@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -185,16 +186,25 @@ func runExecute() {
 		fmt.Fprintf(os.Stderr, "conductor execute: build ctrl-runtime client: %v\n", err)
 		os.Exit(1)
 	}
-	writer := persistence.NewKubeOperationResultWriter(ctrlClient, execCtx.ClusterRef)
+
+	// Select the appropriate result writer based on which target env var is set.
+	// Day-2 path (OPERATION_RESULT_CR): writes InfrastructureTalosClusterOperationResult.
+	// Pack path (OPERATION_RESULT_CM): writes PackOperationResult.
+	var porWriter persistence.OperationResultWriter
+	var tcorWriter persistence.TalosClusterResultWriter
+	if execCtx.OperationResultCR != "" {
+		tcorWriter = persistence.NewKubeTalosClusterResultWriter(ctrlClient)
+	} else {
+		porWriter = persistence.NewKubeOperationResultWriter(ctrlClient, execCtx.ClusterRef)
+	}
 
 	// capabilityStepExecutor wraps the registry and persistence writer to
 	// implement kernel.StepExecutor — dispatches each step's capability inline.
-	// TODO: replace with a Job-materialising implementation once the sequencer
-	// architecture moves to true child-Job creation per step.
 	executor := &capabilityStepExecutor{
-		reg:     reg,
-		writer:  writer,
-		clients: clients,
+		reg:        reg,
+		writer:     porWriter,
+		tcorWriter: tcorWriter,
+		clients:    clients,
 	}
 
 	// NoopStepStatusWriter is used until the RunnerConfig status-write
@@ -204,10 +214,17 @@ func runExecute() {
 	// RunnerConfig.status.stepResults via the Kubernetes API.
 	statusWriter := kernel.NoopStepStatusWriter{}
 
+	execLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", execCtx.ClusterRef),
+		slog.String("capability", execCtx.Capability),
+	)
+	execLogger.Info("starting")
 	if err := kernel.RunExecute(execCtx, executor, statusWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
 		os.Exit(1)
 	}
+	execLogger.Info("completed")
 }
 
 // runAgent implements the agent-mode pipeline.
@@ -267,9 +284,9 @@ func runAgent(args []string) {
 	}
 }
 
-// buildStepParameters collects pack-deploy relevant env vars into the
-// RunnerConfigStep.Parameters map. Keys match the parameter vocabulary
-// consumed by capability handlers. wrapper-schema.md §4, conductor-schema.md §6.
+// buildStepParameters collects execute-mode env vars into the RunnerConfigStep.Parameters
+// map. Keys match the parameter vocabulary consumed by capability handlers.
+// wrapper-schema.md §4, conductor-schema.md §6.
 func buildStepParameters() map[string]string {
 	params := map[string]string{}
 	if v := os.Getenv("PACK_REGISTRY_REF"); v != "" {
@@ -281,8 +298,13 @@ func buildStepParameters() map[string]string {
 	if v := os.Getenv("PACK_SIGNATURE"); v != "" {
 		params["signature"] = v
 	}
+	// Pack-deploy result target (wrapper path).
 	if v := os.Getenv("OPERATION_RESULT_CM"); v != "" {
 		params["operationResultCM"] = v
+	}
+	// Day-2 TalosCluster result target (platform path).
+	if v := os.Getenv("OPERATION_RESULT_CR"); v != "" {
+		params["operationResultCR"] = v
 	}
 	kubeconfigPath := "/var/run/secrets/kubeconfig/kubeconfig"
 	if v := os.Getenv("KUBECONFIG"); v != "" {
@@ -303,16 +325,19 @@ func printUsage() {
 }
 
 // capabilityStepExecutor implements kernel.StepExecutor by dispatching each step
-// to the capability registry directly and writing the result ConfigMap via the
-// persistence writer. This is the inline-dispatch production implementation —
-// each step runs its capability handler in the same process.
+// to the capability registry directly and writing the result via the appropriate
+// persistence writer. This is the inline-dispatch production implementation.
 //
-// TODO: replace with a Job-materialising implementation once the sequencer
-// architecture evolves to create a Kueue child Job per step.
+// Two writer paths:
+//   - tcorWriter non-nil: day-2 TalosCluster ops — writes InfrastructureTalosClusterOperationResult CR.
+//   - writer non-nil: pack-deploy ops — writes PackOperationResult CR.
+//
+// Exactly one writer is non-nil for a given Job invocation.
 type capabilityStepExecutor struct {
-	reg     *capability.Registry
-	writer  persistence.OperationResultWriter
-	clients capability.ExecuteClients
+	reg        *capability.Registry
+	writer     persistence.OperationResultWriter
+	tcorWriter persistence.TalosClusterResultWriter
+	clients    capability.ExecuteClients
 }
 
 func (e *capabilityStepExecutor) Execute(
@@ -330,31 +355,50 @@ func (e *capabilityStepExecutor) Execute(
 		}, nil
 	}
 
-	// packExecutionRef is the PackExecution CR name this step records results for.
-	// The operator sets step.Parameters["operationResultCM"] to the packExecutionRef
-	// (naming is a historical artifact from the ConfigMap era; T-16 wrapper migration
-	// will rename the parameter once all operators move to seam-core POR lookups).
-	packExecutionRef := step.Parameters["operationResultCM"]
-	if packExecutionRef == "" {
-		packExecutionRef = fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
+	params := capability.ExecuteParams{
+		Capability:     step.Capability,
+		ClusterRef:     clusterRef,
+		Namespace:      namespace,
+		ExecuteClients: e.clients,
 	}
 
-	params := capability.ExecuteParams{
-		Capability:        step.Capability,
-		ClusterRef:        clusterRef,
-		OperationResultCM: packExecutionRef,
-		Namespace:         namespace,
-		ExecuteClients:    e.clients,
+	// Day-2 path: OPERATION_RESULT_CR is set in step parameters.
+	// Pack path: OPERATION_RESULT_CM carries the packExecutionRef.
+	operationResultCR := step.Parameters["operationResultCR"]
+	packExecutionRef := step.Parameters["operationResultCM"]
+	if packExecutionRef == "" && operationResultCR == "" {
+		packExecutionRef = fmt.Sprintf("step-%s-%s", step.Name, clusterRef)
 	}
+	params.OperationResultCM = packExecutionRef
+
+	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", clusterRef),
+		slog.String("capability", step.Capability),
+	)
+	dispatchLogger.Info("capability dispatching")
 	result, err := handler.Execute(ctx, params)
 	if err != nil {
 		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
 			"capabilityStepExecutor: step %q capability %q: %w", step.Name, step.Capability, err)
 	}
+	dispatchLogger.Info("capability result", slog.String("status", string(result.Status)))
 
-	if writeErr := e.writer.WriteResult(ctx, namespace, packExecutionRef, result); writeErr != nil {
-		return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
-			"capabilityStepExecutor: write result for step %q: %w", step.Name, writeErr)
+	// Write result to the appropriate persistence target.
+	if operationResultCR != "" && e.tcorWriter != nil {
+		// Day-2 path: append record to per-cluster TCOR.
+		// operationResultCR is the Job name (OPERATION_RESULT_CR env var), used as
+		// jobRef so the platform reconciler can correlate the record with the Job it submitted.
+		if writeErr := e.tcorWriter.AppendOperationRecord(ctx, clusterRef, operationResultCR, result); writeErr != nil {
+			return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
+				"capabilityStepExecutor: append TCOR record for step %q: %w", step.Name, writeErr)
+		}
+	} else if e.writer != nil {
+		// Pack path: write PackOperationResult.
+		if writeErr := e.writer.WriteResult(ctx, namespace, packExecutionRef, result); writeErr != nil {
+			return seamv1alpha1.RunnerConfigStepResult{}, fmt.Errorf(
+				"capabilityStepExecutor: write POR for step %q: %w", step.Name, writeErr)
+		}
 	}
 
 	status := seamv1alpha1.RunnerStepSucceeded

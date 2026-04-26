@@ -155,9 +155,18 @@ type WebhookServer struct {
 // NewWebhookServer constructs a WebhookServer listening on addr with the given
 // TLS cert and key. addr is typically ":8443". certFile and keyFile are paths
 // to the TLS certificate and private key (PEM), typically from mounted Secrets.
-func NewWebhookServer(addr, certFile, keyFile string) *WebhookServer {
+//
+// When gate is non-nil (tenant clusters only), the /validate/rbac-ownership
+// endpoint is registered. It starts in audit mode and transitions to strict
+// after TenantBootstrapSweep completes. When gate is nil (management cluster),
+// the endpoint is not registered — Guardian owns RBAC enforcement there.
+func NewWebhookServer(addr, certFile, keyFile string, gate *EnforcementGate) *WebhookServer {
 	mux := http.NewServeMux()
 	mux.Handle("/validate/sealed-causal-chain", NewSealedCausalChainWebhook())
+
+	if gate != nil {
+		mux.Handle("/validate/rbac-ownership", NewTenantRBACOwnershipWebhook(gate))
+	}
 
 	return &WebhookServer{
 		inner: &http.Server{

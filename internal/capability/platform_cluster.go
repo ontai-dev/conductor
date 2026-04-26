@@ -13,12 +13,12 @@ import (
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
 
-// talosClusterGVR is the GroupVersionResource for TalosCluster.
-// platform.ontai.dev/v1alpha1/talosclusters — platform-schema.md §5.
+// talosClusterGVR is the GroupVersionResource for InfrastructureTalosCluster.
+// infrastructure.ontai.dev/v1alpha1/infrastructuretalosclusters — seam-core-schema.md §4.
 var talosClusterGVR = schema.GroupVersionResource{
-	Group:    "platform.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "talosclusters",
+	Resource: "infrastructuretalosclusters",
 }
 
 // clusterResetGVR is the GroupVersionResource for ClusterReset.

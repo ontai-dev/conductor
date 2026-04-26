@@ -277,15 +277,22 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, mgmtFedAddr)
 	}
 
-	// Phase 3 — Admission webhook server (tenant clusters only).
-	// Management cluster: the admission webhook is owned by Guardian. Conductor
-	// must not start a competing instance. conductor-schema.md §15.
-	// Tenant clusters: enforces ontai.dev/rbac-owner=guardian annotation on all
-	// RBAC resources via a local webhook. Runs on all replicas (not gated by
-	// leader election) so the webhook serves requests without leadership dependency.
-	// WEBHOOK_TLS_CERT_PATH, WEBHOOK_TLS_KEY_PATH, and WEBHOOK_ADDR are read from
-	// the environment. When cert/key are absent the webhook is skipped even on
-	// tenant clusters (development/test mode). seam-core-schema.md §5.
+	// Phase 3 — Tenant bootstrap sweep + RBAC enforcement gate (tenant clusters only).
+	// The gate starts in audit mode. TenantBootstrapSweep annotates all existing RBAC
+	// (audit phase) and creates component profiles, then sets the gate to strict.
+	// After that point the webhook rejects RBAC resources without ownership annotation.
+	// guardian-schema.md §3 Step 2, §6. CS-INV-001.
+	var enforcementGate *webhook.EnforcementGate
+	var tenantSweep *agent.TenantBootstrapSweep
+	if role == RoleTenant {
+		enforcementGate = webhook.NewEnforcementGate()
+		tenantSweep = &agent.TenantBootstrapSweep{
+			KubeClient:    client,
+			DynamicClient: dynamicClient,
+			Gate:          enforcementGate,
+		}
+	}
+
 	if WebhookEnabled(role) {
 		certPath := os.Getenv("WEBHOOK_TLS_CERT_PATH")
 		keyPath := os.Getenv("WEBHOOK_TLS_KEY_PATH")
@@ -294,7 +301,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			if webhookAddr == "" {
 				webhookAddr = ":8443"
 			}
-			wh := webhook.NewWebhookServer(webhookAddr, certPath, keyPath)
+			wh := webhook.NewWebhookServer(webhookAddr, certPath, keyPath, enforcementGate)
 			go func() {
 				if err := wh.Start(goCtx, certPath, keyPath); err != nil {
 					fmt.Printf("conductor agent: cluster=%q webhook server error: %v\n",
@@ -324,7 +331,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, tenantSweep)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -350,6 +357,7 @@ func onLeaderStart(
 	signingLoop *agent.SigningLoop,
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
+	tenantSweep *agent.TenantBootstrapSweep,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
 	// If the RunnerConfig does not yet exist (Platform creates it after Conductor
@@ -399,6 +407,17 @@ func onLeaderStart(
 	// Gap 28, conductor-schema.md §10.
 	if packInstancePullLoop != nil {
 		go packInstancePullLoop.Run(leaderCtx, signingInterval)
+	}
+
+	// Start tenant bootstrap sweep (tenant clusters only).
+	// Phase 1 (audit): annotates all pre-existing RBAC with ownership annotations.
+	// Phase 2 (profile creation): creates component profiles in component namespaces.
+	// After both phases: sets enforcement gate to strict — webhook begins rejecting
+	// RBAC without ontai.dev/rbac-owner=guardian. Re-runs periodically to pick up
+	// newly deployed components. guardian-schema.md §3 Step 2, §6.
+	if tenantSweep != nil {
+		const sweepInterval = 5 * time.Minute
+		go tenantSweep.RunPeriodic(leaderCtx, sweepInterval)
 	}
 
 	// Block until leadership is lost.

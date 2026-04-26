@@ -19,15 +19,15 @@ func newFakeDynamicClient(scheme *runtime.Scheme) *dynamicfake.FakeDynamicClient
 	// Register the RunnerConfig GVR in the RESTMapper by adding it to the scheme.
 	// dynamicfake uses the scheme to resolve GVKs; we add a dummy unstructured type.
 	gvk := schema.GroupVersionKind{
-		Group:   "runner.ontai.dev",
+		Group:   "infrastructure.ontai.dev",
 		Version: "v1alpha1",
-		Kind:    "RunnerConfig",
+		Kind:    "InfrastructureRunnerConfig",
 	}
 	scheme.AddKnownTypeWithName(gvk, &runtime.Unknown{})
 	gvkList := schema.GroupVersionKind{
-		Group:   "runner.ontai.dev",
+		Group:   "infrastructure.ontai.dev",
 		Version: "v1alpha1",
-		Kind:    "RunnerConfigList",
+		Kind:    "InfrastructureRunnerConfigList",
 	}
 	scheme.AddKnownTypeWithName(gvkList, &runtime.Unknown{})
 	_ = meta.NewDefaultRESTMapper(nil)

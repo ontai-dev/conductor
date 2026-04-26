@@ -53,8 +53,9 @@ func TestLaunch_BundleContainsGuardianCRDs(t *testing.T) {
 	assertContainsStr(t, content, "rbacprofiles")
 }
 
-// TestLaunch_BundleContainsWrapperCRDs verifies that infra.ontai.dev CRDs
-// are present in the bundle. wrapper-schema.md.
+// TestLaunch_BundleContainsWrapperCRDs verifies that infrastructure.ontai.dev CRDs
+// for wrapper types (InfrastructureClusterPack etc.) are present in the bundle.
+// wrapper-schema.md. Wrapper CRDs migrated to seam-core (infrastructure.ontai.dev).
 func TestLaunch_BundleContainsWrapperCRDs(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileLaunchBundle(outDir); err != nil {
@@ -63,8 +64,8 @@ func TestLaunch_BundleContainsWrapperCRDs(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(outDir, "crds.yaml"))
 	content := string(data)
 
-	assertContainsStr(t, content, "infra.ontai.dev")
-	assertContainsStr(t, content, "clusterpacks")
+	assertContainsStr(t, content, "infrastructure.ontai.dev")
+	assertContainsStr(t, content, "infrastructureclusterpacks")
 }
 
 // TestLaunch_BundleContainsSeamCoreCRDs verifies that infrastructure.ontai.dev
@@ -81,8 +82,8 @@ func TestLaunch_BundleContainsSeamCoreCRDs(t *testing.T) {
 	assertContainsStr(t, content, "infrastructurelineageindices")
 }
 
-// TestLaunch_BundleContainsRunnerConfigCRD verifies that the RunnerConfig CRD
-// from the conductor shared lib is present in the bundle. conductor-schema.md §5.
+// TestLaunch_BundleContainsRunnerConfigCRD verifies that the InfrastructureRunnerConfig CRD
+// from seam-core (infrastructure.ontai.dev) is present in the bundle. conductor-schema.md §5.
 func TestLaunch_BundleContainsRunnerConfigCRD(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileLaunchBundle(outDir); err != nil {
@@ -91,8 +92,8 @@ func TestLaunch_BundleContainsRunnerConfigCRD(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(outDir, "crds.yaml"))
 	content := string(data)
 
-	assertContainsStr(t, content, "runner.ontai.dev")
-	assertContainsStr(t, content, "runnerconfigs")
+	assertContainsStr(t, content, "infrastructure.ontai.dev")
+	assertContainsStr(t, content, "infrastructurerunnerconfigs")
 }
 
 // TestLaunch_BundleIsDeterministic verifies that successive compileLaunchBundle

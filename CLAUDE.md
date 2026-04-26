@@ -2,14 +2,15 @@
 > Read ~/ontai/CLAUDE.md first. The constraints below extend the root constitutional document.
 
 ### Schema authority
-Primary: docs/conductor-schema.md (owned by this repo, imported by all operators as the RunnerConfig contract)
+Primary: docs/conductor-schema.md (conductor behavioral specification: modes, capabilities, job protocol, signing)
+CRD schema authority: ~/ontai/seam-core/docs/seam-core-schema.md (Decision G: seam-core owns InfrastructureRunnerConfig, InfrastructurePackReceipt, and all cross-operator CRD type definitions)
 Supporting: all operator schema docs -- conductor implements capabilities for every domain.
 Read ALL schema documents before any capability implementation work begins.
 
 ### Invariants
 CR-INV-001 -- Three-mode boundary is absolute: compile, executor, agent. No mode bleed. Compile-mode clients raise a fatal error if invoked in executor or agent mode. (root INV-014)
 CR-INV-002 -- talos goclient is executor and agent mode only. Never in compile mode. (root INV-013)
-CR-INV-003 -- The shared library is the API between runners and operators. Breaking changes to the shared library require a major version bump and operator dependency updates before the runner release is cut.
+CR-INV-003 -- The shared library (pkg/runnerlib) provides generation logic and job-spec builders. CRD type definitions are imported from seam-core/api/v1alpha1, not defined in runnerlib. Breaking changes to generation logic or job-spec builders require a major version bump and operator dependency updates before the runner release is cut. Breaking changes to CRD types require a seam-core PR first (Decision G, Decision 11).
 CR-INV-004 -- Named capabilities are additive. New capabilities never change existing capability behavior. Existing capability parameter schemas are never modified in a breaking way.
 CR-INV-005 -- The capability manifest in RunnerConfig status is self-declared by the agent on startup. Operators never hardcode capability availability assumptions.
 CR-INV-006 -- Leader election in agent mode is not optional. One leader writes to RunnerConfig status and receipt CRs. All other replicas are standby.

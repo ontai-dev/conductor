@@ -72,12 +72,15 @@ func signSpec(t *testing.T, priv ed25519.PrivateKey, specObj map[string]interfac
 // and an optional signature annotation. sigAnnotation may be "" for unsigned.
 func makeReceipt(name string, specObj map[string]interface{}, sigAnnotation string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(packReceiptGVR.GroupVersion().WithKind("Packreceipt"))
+	// Kind must match what newFakeDynamicClientWithReceiptsAndObjects registers:
+	// capitalize(resource[:len-1]) — strips trailing 's' then uppercases first letter.
+	receiptKind := capitalize(packReceiptGVR.Resource[:len(packReceiptGVR.Resource)-1])
+	obj.SetGroupVersionKind(packReceiptGVR.GroupVersion().WithKind(receiptKind))
 	obj.SetName(name)
 	obj.SetNamespace("ont-system")
 	if sigAnnotation != "" {
 		obj.SetAnnotations(map[string]string{
-			"runner.ontai.dev/management-signature": sigAnnotation,
+			"infrastructure.ontai.dev/management-signature": sigAnnotation,
 		})
 	}
 	if err := unstructured.SetNestedMap(obj.Object, specObj, "spec"); err != nil {

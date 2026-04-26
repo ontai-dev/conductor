@@ -52,7 +52,7 @@ func TestPackBuild_ProducesClusterPackYAML(t *testing.T) {
 }
 
 // TestPackBuild_ClusterPackHasCorrectAPIVersionAndKind verifies the emitted
-// ClusterPack CR carries apiVersion=infra.ontai.dev/v1alpha1 and kind=ClusterPack.
+// ClusterPack CR carries apiVersion=infrastructure.ontai.dev/v1alpha1 and kind=InfrastructureClusterPack.
 // conductor-schema.md §9.
 func TestPackBuild_ClusterPackHasCorrectAPIVersionAndKind(t *testing.T) {
 	inputPath := writePackBuildInput(t, validPackBuildInput)
@@ -72,11 +72,11 @@ func TestPackBuild_ClusterPackHasCorrectAPIVersionAndKind(t *testing.T) {
 		t.Fatalf("parse output YAML: %v", err)
 	}
 
-	if cr["apiVersion"] != "infra.ontai.dev/v1alpha1" {
-		t.Errorf("apiVersion: got %q; want %q", cr["apiVersion"], "infra.ontai.dev/v1alpha1")
+	if cr["apiVersion"] != "infrastructure.ontai.dev/v1alpha1" {
+		t.Errorf("apiVersion: got %q; want %q", cr["apiVersion"], "infrastructure.ontai.dev/v1alpha1")
 	}
-	if cr["kind"] != "ClusterPack" {
-		t.Errorf("kind: got %q; want %q", cr["kind"], "ClusterPack")
+	if cr["kind"] != "InfrastructureClusterPack" {
+		t.Errorf("kind: got %q; want %q", cr["kind"], "InfrastructureClusterPack")
 	}
 }
 

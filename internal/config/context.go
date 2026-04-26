@@ -36,9 +36,15 @@ const (
 	// Stamped into the Job spec by the operator. Required in execute mode.
 	EnvClusterRef = "CLUSTER_REF"
 
-	// EnvOperationResultCM is the ConfigMap name the executor writes
-	// OperationResultSpec to before exit. Required in execute mode.
+	// EnvOperationResultCM is the PackExecution ref for pack-deploy operations.
+	// The executor writes a PackOperationResult CR keyed by this ref.
+	// Set by wrapper for pack-deploy Jobs. Mutually exclusive with EnvOperationResultCR.
 	EnvOperationResultCM = "OPERATION_RESULT_CM"
+
+	// EnvOperationResultCR is the InfrastructureTalosClusterOperationResult CR name
+	// the executor creates before exit for day-2 TalosCluster operations.
+	// Set by platform for day-2 Jobs. Mutually exclusive with EnvOperationResultCM.
+	EnvOperationResultCR = "OPERATION_RESULT_CR"
 
 	// EnvPodNamespace is the Kubernetes downward API variable that carries the
 	// namespace the Conductor pod runs in. Defaults to ont-system when absent.
@@ -63,14 +69,20 @@ type ExecutionContext struct {
 	// and agent modes.
 	ClusterRef string
 
-	// OperationResultCM is the ConfigMap to write OperationResultSpec to.
-	// Non-empty in execute mode only.
+	// OperationResultCM is the PackExecution ref used by pack-deploy Jobs to write
+	// a PackOperationResult CR. Set from OPERATION_RESULT_CM. Non-empty only for
+	// pack-deploy execute mode. Mutually exclusive with OperationResultCR.
 	OperationResultCM string
+
+	// OperationResultCR is the InfrastructureTalosClusterOperationResult CR name
+	// written by day-2 TalosCluster Jobs. Set from OPERATION_RESULT_CR. Non-empty
+	// only for day-2 execute mode. Mutually exclusive with OperationResultCM.
+	OperationResultCR string
 
 	// Namespace is the Kubernetes namespace this invocation runs in.
 	// Populated from POD_NAMESPACE (downward API); defaults to ont-system.
-	// Used by execute mode to address the OperationResult ConfigMap and by
-	// agent mode to address RunnerConfig and Lease resources.
+	// Used by execute mode to address the OperationResult CR and by agent mode
+	// to address RunnerConfig and Lease resources.
 	Namespace string
 
 	// RunnerConfig is the RunnerConfigSpec loaded from the mounted ConfigMap or
@@ -79,8 +91,9 @@ type ExecutionContext struct {
 }
 
 // BuildExecuteContext constructs an ExecutionContext for execute mode.
-// Reads CAPABILITY, CLUSTER_REF, and OPERATION_RESULT_CM from the environment.
-// Returns a ValidationFailure error if any required variable is absent.
+// Reads CAPABILITY, CLUSTER_REF, and one of OPERATION_RESULT_CM or
+// OPERATION_RESULT_CR from the environment. Returns a ValidationFailure error
+// if any required variable is absent or if neither result target is set.
 func BuildExecuteContext() (ExecutionContext, error) {
 	cap := os.Getenv(EnvCapability)
 	if cap == "" {
@@ -97,9 +110,10 @@ func BuildExecuteContext() (ExecutionContext, error) {
 	}
 
 	resultCM := os.Getenv(EnvOperationResultCM)
-	if resultCM == "" {
+	resultCR := os.Getenv(EnvOperationResultCR)
+	if resultCM == "" && resultCR == "" {
 		return ExecutionContext{}, errors.New(
-			"execute mode: OPERATION_RESULT_CM environment variable is required but not set",
+			"execute mode: one of OPERATION_RESULT_CM or OPERATION_RESULT_CR is required but neither is set",
 		)
 	}
 
@@ -113,6 +127,7 @@ func BuildExecuteContext() (ExecutionContext, error) {
 		Capability:        cap,
 		ClusterRef:        clusterRef,
 		OperationResultCM: resultCM,
+		OperationResultCR: resultCR,
 		Namespace:         ns,
 	}, nil
 }

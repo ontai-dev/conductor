@@ -62,8 +62,8 @@ var _ capability.GuardianIntakeClient = (*stubGuardianClient)(nil)
 
 func clusterPackSplitCR(clusterRef, name, version, registryURL, rbacDigest, workloadDigest string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "infra.ontai.dev/v1alpha1",
-		"kind":       "ClusterPack",
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructureClusterPack",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "seam-tenant-" + clusterRef},
 		"spec": map[string]interface{}{
 			"version": version,
@@ -278,8 +278,8 @@ func TestPackDeploy_SplitPath_LayerRefsUsesBaseURLWhenRegistryRefDigestSet(t *te
 
 	// ClusterPack with registryRef.digest set (helm-compiled pack).
 	cp := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "infra.ontai.dev/v1alpha1",
-		"kind":       "ClusterPack",
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructureClusterPack",
 		"metadata":   map[string]interface{}{"name": "nginx-ingress", "namespace": "seam-tenant-" + clusterRef},
 		"spec": map[string]interface{}{
 			"version": "v1.0.0",
@@ -484,8 +484,8 @@ metadata:
 // don't exist, which would fail applyParsedManifest in unit tests).
 func newThreeBucketDynClient(objects ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
 	kinds := map[string]schema.GroupVersionResource{
-		"PackExecution":                {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packexecutions"},
-		"ClusterPack":                  {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks"},
+		"InfrastructurePackExecution":  {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackexecutions"},
+		"InfrastructureClusterPack":    {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks"},
 		"Deployment":                   {Group: "apps", Version: "v1", Resource: "deployments"},
 		"MutatingWebhookConfiguration": {Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"},
 		"Namespace":                    {Group: "", Version: "v1", Resource: "namespaces"},
@@ -508,8 +508,8 @@ func newThreeBucketDynClient(objects ...*unstructured.Unstructured) *dynamicfake
 		return true, &unstructured.Unstructured{}, nil
 	})
 	wrapperGVRs := map[string]schema.GroupVersionResource{
-		"PackExecution": {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packexecutions"},
-		"ClusterPack":   {Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks"},
+		"InfrastructurePackExecution": {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackexecutions"},
+		"InfrastructureClusterPack":   {Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks"},
 	}
 	for _, obj := range objects {
 		gvr, ok := wrapperGVRs[obj.GetKind()]
@@ -530,8 +530,8 @@ func newThreeBucketDynClient(objects ...*unstructured.Unstructured) *dynamicfake
 // and workloadDigest all set (three-bucket pack, e.g., cert-manager).
 func clusterPackThreeBucketCR(clusterRef, name, version, registryURL, rbacDigest, clusterScopedDigest, workloadDigest string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "infra.ontai.dev/v1alpha1",
-		"kind":       "ClusterPack",
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructureClusterPack",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "seam-tenant-" + clusterRef},
 		"spec": map[string]interface{}{
 			"version": version,

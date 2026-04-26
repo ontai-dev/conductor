@@ -56,8 +56,8 @@ func makePackArtifactSecret(secretName, ns, artifactB64, sigB64 string) *unstruc
 func makeExistingPackReceipt(name, ns string, verified bool, sigB64 string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "runner.ontai.dev/v1alpha1",
-			"kind":       "PackReceipt",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructurePackReceipt",
 			"metadata": map[string]interface{}{
 				"name":      name,
 				"namespace": ns,

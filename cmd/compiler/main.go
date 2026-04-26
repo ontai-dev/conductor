@@ -45,6 +45,9 @@ func main() {
 	case "domain":
 		fmt.Fprintln(os.Stderr, "this subcommand is reserved for future Sovereign Domain surface and is not yet implemented")
 		os.Exit(1)
+	case "--help", "-h", "help":
+		printUsageTo(os.Stdout)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "compiler: unknown subcommand %q\n", os.Args[1])
 		printUsage()
@@ -179,19 +182,23 @@ func runSubcommand(name string, args []string, helpText string, fn func(input, o
 	}
 }
 
-func printUsage() {
-	fmt.Fprintln(os.Stderr, "Compiler produces manifests for human review — it never applies resources to any cluster.")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Usage: compiler <subcommand> [flags]")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  bootstrap    Compile a cluster declaration into machine configs and bootstrap CRs")
-	fmt.Fprintln(os.Stderr, "  launch       Produce the CRD bundle for management cluster bootstrap (Step 2)")
-	fmt.Fprintln(os.Stderr, "  enable       Produce the phased deployment manifest bundle (Steps 3–8)")
-	fmt.Fprintln(os.Stderr, "  packbuild    Compile a PackBuild spec into a ClusterPack CR")
-	fmt.Fprintln(os.Stderr, "  maintenance  Compile a MaintenanceBundle CR with pre-resolved scheduling context")
-	fmt.Fprintln(os.Stderr, "  component    Produce RBACProfile CR YAML from the embedded catalog or a descriptor")
-	fmt.Fprintln(os.Stderr, "  domain       Reserved — not yet implemented")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Run 'compiler <subcommand> -h' for subcommand-specific flags and contracts.")
+// printUsage prints usage to w. Use os.Stdout for --help (exit 0) and os.Stderr
+// for error paths (exit 1).
+func printUsageTo(w *os.File) {
+	fmt.Fprintln(w, "Compiler produces manifests for human review — it never applies resources to any cluster.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Usage: compiler <subcommand> [flags]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Subcommands:")
+	fmt.Fprintln(w, "  bootstrap    Compile a cluster declaration into machine configs and bootstrap CRs")
+	fmt.Fprintln(w, "  launch       Produce the CRD bundle for management cluster bootstrap (Step 2)")
+	fmt.Fprintln(w, "  enable       Produce the phased deployment manifest bundle (Steps 3–8)")
+	fmt.Fprintln(w, "  packbuild    Compile a PackBuild spec into a ClusterPack CR")
+	fmt.Fprintln(w, "  maintenance  Compile a MaintenanceBundle CR with pre-resolved scheduling context")
+	fmt.Fprintln(w, "  component    Produce RBACProfile CR YAML from the embedded catalog or a descriptor")
+	fmt.Fprintln(w, "  domain       Reserved — not yet implemented")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Run 'compiler <subcommand> -h' for subcommand-specific flags and contracts.")
 }
+
+func printUsage() { printUsageTo(os.Stderr) }

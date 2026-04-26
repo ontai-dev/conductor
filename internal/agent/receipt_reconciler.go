@@ -17,12 +17,11 @@ import (
 )
 
 // packReceiptGVR is the GroupVersionResource for PackReceipt CRs.
-// Defined in runner.ontai.dev — conductor owns PackReceipt as the sole author
-// and manager on every target cluster. conductor-schema.md §10, §15.
+// Defined in infrastructure.ontai.dev (seam-core). conductor-schema.md §10, §15.
 var packReceiptGVR = schema.GroupVersionResource{
-	Group:    "runner.ontai.dev",
+	Group:    "infrastructure.ontai.dev",
 	Version:  "v1alpha1",
-	Resource: "packreceipts",
+	Resource: "infrastructurepackreceipts",
 }
 
 // permissionSnapshotReceiptGVR is the GroupVersionResource for PermissionSnapshotReceipt CRs.
@@ -36,7 +35,7 @@ var permissionSnapshotReceiptGVR = schema.GroupVersionResource{
 // managementSignatureAnnotation is the annotation key under which the
 // management cluster Conductor writes the base64-encoded Ed25519 signature
 // of the receipt CR's spec field. INV-026.
-const managementSignatureAnnotation = "runner.ontai.dev/management-signature"
+const managementSignatureAnnotation = "infrastructure.ontai.dev/management-signature"
 
 // ReceiptReconciler reconciles PackReceipt and PermissionSnapshotReceipt CRs.
 //

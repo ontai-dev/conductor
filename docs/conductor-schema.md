@@ -1,5 +1,6 @@
 # conductor-schema
-> API Group: runner.ontai.dev
+> CRD types: infrastructure.ontai.dev/v1alpha1 (InfrastructureRunnerConfig, InfrastructurePackReceipt) -- schema owned by seam-core (Decision G)
+> Runtime behavior and capability schema: this document
 > Repository: conductor (produces both Compiler and Conductor binaries)
 > All agents absorb this document. This schema governs both binaries.
 
@@ -103,9 +104,9 @@ operators and by both binaries. It is the single source of RunnerConfig schema,
 generation logic, and capability manifest structure.
 
 **Library exports:**
-- RunnerConfig schema types
-- GenerateFromTalosCluster(spec) → RunnerConfig
-- GenerateFromPackBuild(spec) → RunnerConfig
+- RunnerConfig and PackReceipt generation logic (imports types from seam-core/api/v1alpha1; does not define schema)
+- GenerateFromTalosCluster(spec) → InfrastructureRunnerConfig
+- GenerateFromPackBuild(spec) → InfrastructureRunnerConfig
 - CapabilityManifest types
 - OperationResult types
 - Job spec builder functions
@@ -118,8 +119,9 @@ operator logic changes are required for new capabilities.
 
 ## 5. CRDs
 
-### RunnerConfig
+### InfrastructureRunnerConfig
 
+Kind: InfrastructureRunnerConfig. API group: infrastructure.ontai.dev/v1alpha1. Schema owned by seam-core (Decision G).
 Scope: Namespaced - ont-system (management cluster), tenant-{cluster-name} (targets).
 Short name: rc
 
@@ -321,7 +323,7 @@ The management cluster bootstrap sequence is owned exclusively by the Compiler i
 Forms the management cluster itself. Reads TalosCluster spec and human-provided machineconfig inputs. Validates spec against platform-schema.md rules. SOPS-encrypts talos-secret, machineconfigs, and talosconfig using the admin's age key. Writes encrypted files to output path. Produces bootstrap CRs (TalosCluster in mode: bootstrap) as YAML. No cluster connection required. Compiler never applies resources - the GitOps pipeline or operator's kubectl applies the output.
 
 **Step 2 - `compiler launch`**
-Installs all Seam CRDs onto the management cluster. Reads the CRD manifest set for all Seam API groups (platform.ontai.dev, security.ontai.dev, infra.ontai.dev, runner.ontai.dev, infrastructure.ontai.dev). Produces a CRD manifest YAML bundle ready for GitOps application. No cluster connection required. Compiler never applies resources.
+Installs all Seam CRDs onto the management cluster. Reads the CRD manifest set for all Seam API groups (infrastructure.ontai.dev, security.ontai.dev, platform.ontai.dev). The old groups runner.ontai.dev and infra.ontai.dev are superseded by infrastructure.ontai.dev as of Phase 2B (2026-04-25). Produces a CRD manifest YAML bundle ready for GitOps application. No cluster connection required. Compiler never applies resources.
 
 **Step 3 - `compiler enable`**
 Produces the complete Seam operator deployment manifest bundle as YAML output. The bundle
@@ -596,6 +598,43 @@ PackReceipt, PermissionSnapshotReceipt, admission webhook, PermissionService gRP
 drift detection, and PermissionSnapshot pull loop. It does not activate signing loops.
 Signing is management-only. INV-026.
 
+**Tenant RBAC bootstrap sweep (TenantBootstrapSweep):**
+When role=tenant, Conductor runs an RBAC bootstrap sweep on leader election using
+`TenantBootstrapSweep`. The sweep runs once on startup and then periodically (every
+5 minutes) so that newly deployed Helm charts are picked up without restart.
+
+Phase 1 (annotation sweep): stamps `ontai.dev/rbac-owner=guardian` and
+`ontai.dev/rbac-enforcement-mode=audit` on all pre-existing Role, ClusterRole,
+RoleBinding, ClusterRoleBinding, and ServiceAccount resources using the typed
+kubernetes client. This establishes the governance baseline on cluster join.
+
+Phase 2 (profile creation): creates PermissionSet, RBACPolicy, and RBACProfile
+for each known third-party component (cert-manager, kueue, cnpg, metallb,
+local-path-provisioner) via the dynamic client using GVRs under
+`security.ontai.dev/v1alpha1`. Components whose namespace is absent on the cluster
+are silently skipped -- they will be picked up on the next periodic run once their
+Helm chart is deployed. If security CRDs are not installed (Guardian not deployed),
+the entire profile creation phase is skipped gracefully.
+
+After both phases complete, `EnforcementGate.SetStrict()` is called, which
+transitions the admission webhook from audit mode to strict mode.
+
+**EnforcementGate and admission webhook:**
+The `EnforcementGate` is an atomic bool that starts in audit mode (false) and
+transitions to strict mode (true) exactly once after the bootstrap sweep completes.
+The `TenantRBACOwnershipWebhook` is registered at `/validate/rbac-ownership` on
+the tenant cluster Conductor webhook server. In audit mode it logs unannotated RBAC
+resources but admits them. In strict mode it rejects any RBAC resource that lacks
+the `ontai.dev/rbac-owner=guardian` annotation. The webhook exempts kube-system,
+ont-system, and other known system namespaces unconditionally. This mirrors Guardian's
+enforcement model (CS-INV-001, guardian-schema.md §5) from the Conductor process so
+that tenant clusters without Guardian deployed are still governed.
+
+The management cluster Conductor does NOT register the RBAC ownership webhook --
+Guardian owns that enforcement path on the management cluster. `NewWebhookServer`
+accepts a `*EnforcementGate` parameter: nil suppresses the endpoint (management),
+non-nil enables it (tenant).
+
 **Invariants:**
 - Conductor with an absent or unrecognized role field exits immediately with
   InvariantViolation structured exit. This is a hard gate - a Conductor without a
@@ -838,7 +877,8 @@ new message types requires a Platform Governor directive before implementation.
 
 ---
 
-*runner.ontai.dev schema - conductor repository*
+*Conductor behavioral schema - conductor repository*
+*CRD type schema authority: seam-core (infrastructure.ontai.dev). Supersedes runner.ontai.dev. Decision G, Phase 2B 2026-04-25.*
 *Amendments appended below with date and rationale.*
 
 2026-03-30 - Two-binary model adopted. Compiler confined to compile mode (debian).

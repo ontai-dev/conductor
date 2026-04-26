@@ -42,6 +42,11 @@ type TalosNodeClient interface {
 	// EtcdDefragment defrags the etcd database on this node.
 	EtcdDefragment(ctx context.Context) error
 
+	// GetMachineConfig reads the running machine config from the node.
+	// Returns the raw YAML bytes of the machine config as stored at
+	// /system/state/config.yaml on the node.
+	GetMachineConfig(ctx context.Context) ([]byte, error)
+
 	// Close releases the underlying gRPC connection.
 	Close() error
 }
