@@ -1,6 +1,7 @@
 package capability_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"testing"
@@ -810,4 +811,184 @@ func clusterResetCR(clusterRef string, approved bool) *unstructured.Unstructured
 		},
 		"spec": map[string]interface{}{"drainGracePeriodSeconds": "30"},
 	}}
+}
+
+func etcdMaintenanceCR(clusterRef, operation string, extraSpec map[string]interface{}) *unstructured.Unstructured {
+	spec := map[string]interface{}{"operation": operation}
+	for k, v := range extraSpec {
+		spec[k] = v
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "platform.ontai.dev/v1alpha1",
+		"kind":       "EtcdMaintenance",
+		"metadata":   map[string]interface{}{"name": "em-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
+		"spec":       spec,
+	}}
+}
+
+// stubStorageClient records Upload/Download calls and returns configured errors.
+type stubStorageClient struct {
+	uploadErr    error
+	downloadErr  error
+	downloadData []byte
+	uploadCalled bool
+	lastBucket   string
+	lastKey      string
+}
+
+func (s *stubStorageClient) Upload(_ context.Context, bucket, key string, _ io.Reader) error {
+	s.uploadCalled = true
+	s.lastBucket = bucket
+	s.lastKey = key
+	return s.uploadErr
+}
+
+func (s *stubStorageClient) Download(_ context.Context, bucket, key string) (io.ReadCloser, error) {
+	s.lastBucket = bucket
+	s.lastKey = key
+	if s.downloadErr != nil {
+		return nil, s.downloadErr
+	}
+	return io.NopCloser(bytes.NewReader(s.downloadData)), nil
+}
+
+// ---------------------------------------------------------------------------
+// etcd-backup
+// ---------------------------------------------------------------------------
+
+func TestEtcdBackup_NilClientsReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdBackup)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{Capability: runnerlib.CapabilityEtcdBackup})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "etcd-backup nil clients")
+}
+
+func TestEtcdBackup_MissingCRReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdBackup)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityEtcdBackup,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			StorageClient: &stubStorageClient{},
+			DynamicClient: newPlatformDynClient(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "etcd-backup no CR")
+}
+
+func TestEtcdBackup_UploadSnapshotToS3(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdBackup)
+
+	clusterRef := "ccs-test"
+	storage := &stubStorageClient{}
+	cr := etcdMaintenanceCR(clusterRef, "backup", map[string]interface{}{
+		"s3Destination": map[string]interface{}{"bucket": "ont-backups", "key": "snapshot.db"},
+	})
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityEtcdBackup,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			StorageClient: storage,
+			DynamicClient: newPlatformDynClient(cr),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
+	}
+	if !storage.uploadCalled {
+		t.Error("expected StorageClient.Upload() to be called")
+	}
+	if storage.lastBucket != "ont-backups" {
+		t.Errorf("expected bucket=ont-backups; got %q", storage.lastBucket)
+	}
+	if len(result.Artifacts) == 0 {
+		t.Error("expected at least one artifact in result")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// etcd-restore
+// ---------------------------------------------------------------------------
+
+func TestEtcdRestore_NilClientsReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdRestore)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{Capability: runnerlib.CapabilityEtcdRestore})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "etcd-restore nil clients")
+}
+
+func TestEtcdRestore_MissingCRReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdRestore)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityEtcdRestore,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			StorageClient: &stubStorageClient{},
+			DynamicClient: newPlatformDynClient(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "etcd-restore no CR")
+}
+
+func TestEtcdRestore_DownloadsAndRecoversFromS3(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityEtcdRestore)
+
+	clusterRef := "ccs-test"
+	storage := &stubStorageClient{downloadData: []byte("etcd-snapshot-data")}
+	cr := etcdMaintenanceCR(clusterRef, "restore", map[string]interface{}{
+		"s3SnapshotPath": map[string]interface{}{"bucket": "ont-backups", "key": "snapshot.db"},
+	})
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityEtcdRestore,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			StorageClient: storage,
+			DynamicClient: newPlatformDynClient(cr),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
+	}
+	if storage.lastBucket != "ont-backups" {
+		t.Errorf("expected bucket=ont-backups; got %q", storage.lastBucket)
+	}
+	if storage.lastKey != "snapshot.db" {
+		t.Errorf("expected key=snapshot.db; got %q", storage.lastKey)
+	}
 }
