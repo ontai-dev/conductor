@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/yaml"
@@ -117,9 +118,8 @@ bootstrap:
 	}
 
 	// All expected output files must be present.
-	// seam-tenant-namespace.yaml is NOT expected: Platform creates the namespace
-	// when the TalosCluster CR is admitted (CP-INV-004). platform-schema.md §9.
 	for _, name := range []string{
+		"seam-tenant-namespace.yaml",
 		"seam-mc-import-cluster-cp1.yaml",
 		"seam-mc-import-cluster-wk1.yaml",
 		"import-cluster.yaml",
@@ -128,10 +128,6 @@ bootstrap:
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Errorf("expected output file %q not found: %v", name, err)
 		}
-	}
-	// Verify compiler does NOT emit the namespace manifest.
-	if _, err := os.Stat(filepath.Join(outDir, "seam-tenant-namespace.yaml")); err == nil {
-		t.Error("seam-tenant-namespace.yaml must not be emitted: Platform owns namespace creation (CP-INV-004)")
 	}
 }
 
@@ -203,11 +199,13 @@ bootstrap:
 
 // ── seam-tenant namespace manifest ───────────────────────────────────────────
 
-// TestBootstrap_ImportMode_DoesNotEmitSeamTenantNamespaceManifest verifies that
-// compileBootstrap with importExistingCluster=true does NOT produce seam-tenant-namespace.yaml.
-// Platform creates the namespace when the TalosCluster CR is admitted (CP-INV-004).
-// platform-schema.md §9.
-func TestBootstrap_ImportMode_DoesNotEmitSeamTenantNamespaceManifest(t *testing.T) {
+// TestBootstrap_ImportMode_EmitsSeamTenantNamespaceManifest verifies that
+// compileBootstrap with importExistingCluster=true produces seam-tenant-namespace.yaml
+// with the correct name (seam-tenant-{clusterName}) and required labels.
+// The manifest is required so the admin can apply it before the Secrets (which
+// live in seam-tenant-{cluster}) in a single kubectl apply -f compiled/bootstrap/.
+// Governor ruling 2026-04-21: mode=import compiler output must include the namespace.
+func TestBootstrap_ImportMode_EmitsSeamTenantNamespaceManifest(t *testing.T) {
 	mcPath := generateMachineConfigFile(t, "my-cluster", "cp1")
 	input := fmt.Sprintf(`
 name: my-cluster
@@ -238,15 +236,20 @@ bootstrap:
 	}
 
 	nsPath := filepath.Join(outDir, "seam-tenant-namespace.yaml")
-	if _, err := os.Stat(nsPath); err == nil {
-		t.Error("seam-tenant-namespace.yaml must not be emitted for mode=import: Platform owns namespace creation (CP-INV-004)")
+	nsData, err := os.ReadFile(nsPath)
+	if err != nil {
+		t.Fatalf("seam-tenant-namespace.yaml not emitted: %v", err)
 	}
+	content := string(nsData)
+	assertContainsStr(t, content, "name: seam-tenant-my-cluster")
+	assertContainsStr(t, content, "ontai.dev/tenant: \"true\"")
+	assertContainsStr(t, content, "ontai.dev/cluster: my-cluster")
 }
 
 // TestBootstrap_BootstrapMode_DoesNotEmitSeamTenantNamespaceManifest verifies that
 // compileBootstrap in mode=bootstrap (importExistingCluster=false) does NOT emit
-// seam-tenant-namespace.yaml. Platform creates the namespace for all cluster modes.
-// platform-schema.md §9, CP-INV-004.
+// seam-tenant-namespace.yaml. Platform creates the namespace for bootstrap/CAPI clusters.
+// Governor ruling 2026-04-21.
 func TestBootstrap_BootstrapMode_DoesNotEmitSeamTenantNamespaceManifest(t *testing.T) {
 	input := `
 name: fresh-cluster
@@ -273,8 +276,52 @@ bootstrap:
 
 	nsPath := filepath.Join(outDir, "seam-tenant-namespace.yaml")
 	if _, err := os.Stat(nsPath); err == nil {
-		t.Error("seam-tenant-namespace.yaml must not be emitted for mode=bootstrap: Platform owns namespace creation (CP-INV-004)")
+		t.Error("seam-tenant-namespace.yaml must not be emitted for mode=bootstrap")
 	}
+}
+
+// TestBootstrap_ImportMode_NamespaceNameIsSeamTenantNotTenant verifies that the
+// emitted namespace name is seam-tenant-{clusterName}, not tenant-{clusterName}.
+// tenant-{x} is permanently abolished. Governor ruling 2026-04-21.
+func TestBootstrap_ImportMode_NamespaceNameIsSeamTenantNotTenant(t *testing.T) {
+	mcPath := generateMachineConfigFile(t, "target-cluster", "node1")
+	input := fmt.Sprintf(`
+name: target-cluster
+namespace: seam-system
+mode: import
+role: management
+capi:
+  enabled: false
+importExistingCluster: true
+machineConfigPaths:
+  node1: %s
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.10:6443"
+  talosVersion: "v1.7.0"
+  kubernetesVersion: "1.30.0"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: node1
+      ip: "10.0.0.1"
+      role: init
+`, mcPath)
+
+	inputPath := writeInputFile(t, input)
+	outDir := t.TempDir()
+
+	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
+		t.Fatalf("compileBootstrap error: %v", err)
+	}
+
+	nsData, err := os.ReadFile(filepath.Join(outDir, "seam-tenant-namespace.yaml"))
+	if err != nil {
+		t.Fatalf("seam-tenant-namespace.yaml not found: %v", err)
+	}
+	content := string(nsData)
+	if strings.Contains(content, "name: tenant-target-cluster") {
+		t.Error("namespace name must be seam-tenant-target-cluster, not tenant-target-cluster")
+	}
+	assertContainsStr(t, content, "name: seam-tenant-target-cluster")
 }
 
 // ── Kubernetes API fallback (machineConfigPaths absent) ───────────────────────
