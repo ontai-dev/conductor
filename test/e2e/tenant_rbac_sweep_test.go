@@ -38,7 +38,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	rbacv1 "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -307,32 +306,6 @@ func validatePermissionSetSpec(ctx context.Context, cl *e2ehelpers.ClusterClient
 	verbs, ok := rule["verbs"].([]interface{})
 	Expect(ok).To(BeTrue(), "permissions[0].verbs absent")
 	Expect(verbs).To(HaveLen(7), "expected 7 standard verbs in baseline PermissionSet")
-}
-
-// validateWebhookRejectsUnannotatedRole attempts to create a Role without the
-// ownership annotation and expects it to be rejected. Used to verify enforcement
-// is active. The Role is created in a governed namespace (not a system namespace).
-func validateWebhookRejectsUnannotatedRole(ctx context.Context, cl *e2ehelpers.ClusterClient, ns string) {
-	By(fmt.Sprintf("verifying admission webhook rejects unannotated Role in %s on cluster %s", ns, cl.Name))
-	if !namespaceExists(ctx, cl, ns) {
-		Skip(fmt.Sprintf("namespace %s absent on cluster %s — cannot validate webhook rejection", ns, cl.Name))
-	}
-
-	testRole := &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "e2e-sweep-test-unannotated-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000),
-			Namespace: ns,
-		},
-		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"},
-		}},
-	}
-
-	_, err := cl.Typed.RbacV1().Roles(ns).Create(ctx, testRole, metav1.CreateOptions{})
-	Expect(err).To(HaveOccurred(),
-		"webhook should reject unannotated Role in %s on cluster %s (enforcement mode should be active)", ns, cl.Name)
-	Expect(apierrors.IsForbidden(err)).To(BeTrue(),
-		"expected 403 Forbidden from webhook, got: %v", err)
 }
 
 // validateWebhookAdmitsRoleInKubeSystem attempts to create a Role in kube-system

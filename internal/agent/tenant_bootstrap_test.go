@@ -101,14 +101,6 @@ func addClusterRole(t *testing.T, kube *kubefake.Clientset, name string, annotat
 	}
 }
 
-func addClusterRoleBinding(t *testing.T, kube *kubefake.Clientset, name string, annotations map[string]string) {
-	t.Helper()
-	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: annotations}}
-	if _, err := kube.RbacV1().ClusterRoleBindings().Create(context.Background(), crb, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("add ClusterRoleBinding %q: %v", name, err)
-	}
-}
-
 func getRoleAnnotation(t *testing.T, kube *kubefake.Clientset, ns, name, key string) string {
 	t.Helper()
 	r, err := kube.RbacV1().Roles(ns).Get(context.Background(), name, metav1.GetOptions{})
