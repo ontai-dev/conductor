@@ -614,30 +614,6 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	return in, nil
 }
 
-// writeSeamTenantNamespaceManifest writes a Namespace manifest for
-// seam-tenant-{clusterName} to the output directory. The manifest carries the
-// ontai.dev/tenant and ontai.dev/cluster labels required by the namespace model.
-// For mode=import clusters: Platform does not create this namespace, so the compiler
-// bootstrap output must include it for GitOps to apply. Returns the filename.
-// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
-func writeSeamTenantNamespaceManifest(clusterName, output string) (string, error) {
-	ns := corev1.Namespace{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "seam-tenant-" + clusterName,
-			Labels: map[string]string{
-				"ontai.dev/tenant":  "true",
-				"ontai.dev/cluster": clusterName,
-			},
-		},
-	}
-	const filename = "seam-tenant-namespace.yaml"
-	if err := writeCRYAML(output, "seam-tenant-namespace", ns); err != nil {
-		return "", fmt.Errorf("write seam-tenant namespace manifest: %w", err)
-	}
-	return filename, nil
-}
-
 // writeCRYAML marshals the given object to Kubernetes CR YAML and writes it to
 // the output directory as {name}.yaml.
 func writeCRYAML(outDir, name string, obj interface{}) error {
@@ -982,15 +958,10 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	// Platform can generate the kubeconfig via ensureKubeconfigSecret. Applies to
 	// both the machineConfigPaths path (local file PKI) and the Kubernetes API path
 	// (Seam clusters). Failure is a warning -- the operator can apply manually.
-	// Also emit the seam-tenant namespace manifest (Governor ruling 2026-04-21:
-	// Platform does not create seam-tenant-{name} for mode=import clusters; the
-	// compiler bootstrap output must include it).
+	// Note: seam-tenant namespace is NOT emitted here. Platform operator creates it
+	// when the TalosCluster CR is admitted (CP-INV-004: Platform is sole namespace
+	// creation authority). platform-schema.md §9.
 	if in.ImportExistingCluster {
-		nsFile, err := writeSeamTenantNamespaceManifest(in.Name, output)
-		if err != nil {
-			return err
-		}
-		secretNames = append([]string{nsFile}, secretNames...)
 		if tcfgFile, err := writeTalosconfigSecret(in, talosconfigPath, output); err != nil {
 			return err
 		} else if tcfgFile != "" {
@@ -1149,14 +1120,16 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string, mo
 		"Platform's TalosClusterReconciler watches this CR and submits the bootstrap Conductor Job."
 
 	if mode == platformv1alpha1.TalosClusterModeImport {
-		step1Desc = "Apply ALL Secrets: machineconfig Secrets (one per node) AND the talosconfig Secret " +
+		step1Desc = "Apply ALL Secrets into seam-tenant-" + clusterName + ": " +
+			"machineconfig Secrets (one per node) AND the talosconfig Secret " +
 			"(seam-mc-" + clusterName + "-talosconfig.yaml). " +
-			"The talosconfig Secret is required for Platform to generate the kubeconfig. " +
-			"Apply ALL before TalosCluster CR."
-		step2Desc = "Apply TalosCluster CR with mode=import. " +
-			"Apply AFTER all Secrets in step 1 are present in the cluster — " +
-			"Platform reads the talosconfig Secret during TalosCluster reconciliation " +
-			"to generate and store the cluster kubeconfig."
+			"For role=management this namespace is pre-created by the enable bundle. " +
+			"Apply ALL Secrets before the TalosCluster CR."
+		step2Desc = "Apply TalosCluster CR (mode=import) to seam-system. " +
+			"Platform creates seam-tenant-" + clusterName + " on admission (CP-INV-004). " +
+			"For role=tenant: apply TalosCluster CR first so Platform creates the namespace, " +
+			"then apply the talosconfig Secret. " +
+			"Platform reads the talosconfig Secret and generates the cluster kubeconfig."
 	}
 
 	seq := BootstrapSequence{
@@ -1280,16 +1253,10 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		return fmt.Errorf("compileImportTalosconfigSecret: create output dir: %w", err)
 	}
 
-	// Emit the seam-tenant namespace manifest so GitOps can create the namespace
-	// before applying the Secrets. For mode=import, Platform does not create
-	// seam-tenant-{name}; the compiler output must include it.
-	// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
-	if _, err := writeSeamTenantNamespaceManifest(in.Name, output); err != nil {
-		return err
-	}
-
 	// talosconfig Secret lives in seam-tenant-{cluster} per the namespace model.
-	// Governor ruling 2026-04-21: seam-tenant-{cluster} holds talosconfig Secret.
+	// Platform operator creates seam-tenant-{cluster} when the TalosCluster CR is
+	// admitted. Compiler no longer emits the namespace manifest. CP-INV-004.
+	// platform-schema.md §9.
 	tenantNS := "seam-tenant-" + in.Name
 	// TalosCluster CR namespace is seam-system (operator-facing CR, not tenant-scoped).
 	crNS := in.Namespace
