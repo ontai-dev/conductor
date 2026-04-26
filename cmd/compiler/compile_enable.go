@@ -1036,6 +1036,9 @@ func writeBootstrapPermissionSets(dir string) error {
 				rule([]string{"infrastructure.ontai.dev"}, []string{
 					"infrastructurepackreceipts", "infrastructurepackreceipts/status",
 				}, allVerbs),
+				rule([]string{"infrastructure.ontai.dev"}, []string{
+					"infrastructuretalosclusters/status",
+				}, []string{"get", "update", "patch"}),
 				rule([]string{"security.ontai.dev"}, []string{
 					"permissionsnapshots", "permissionsnapshots/status",
 				}, writeVerbs),
