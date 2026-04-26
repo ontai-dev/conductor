@@ -644,6 +644,34 @@ non-nil enables it (tenant).
 - Platform operator is exclusively responsible for stamping role=tenant on every Conductor
   Deployment it creates. See platform-schema.md §12 Conductor Deployment Contract.
 
+**Import-mode tenant onboarding (role=tenant gRPC handshake):**
+For import-mode clusters the tenant Conductor drives the gRPC handshake with the
+management Conductor immediately after leader election. Sequence:
+
+1. Tenant Conductor dials MGMT_ENDPOINT (env var set by Platform from
+   InfrastructureTalosCluster.spec.endpoint, management-side gRPC port).
+2. Management Conductor validates the tenant identity against the management
+   IdentityProvider chain.
+3. Management Conductor pushes the initial PermissionSnapshot: payload includes
+   management-policy, management-maximum (Layer 1), and cluster-maximum for this
+   cluster (Layer 2).
+4. Tenant Conductor verifies the guardian signature on the PermissionSnapshot
+   (INV-026: verification is mandatory; failure blocks all further operations).
+5. On successful verification, tenant Conductor installs management-policy and
+   management-maximum in ont-system. These are signed artifacts; tenant Conductor
+   never authors them locally.
+6. Tenant Conductor writes PermissionSnapshotReceipt in ont-system.
+7. PermissionSnapshotReceipt is acknowledged to management Conductor over the gRPC
+   channel. Management Conductor writes the acknowledged condition back to
+   InfrastructureTalosCluster status on the management cluster.
+
+The admission webhook on the tenant cluster transitions from audit mode to strict
+mode only after step 6 completes. Platform observes the acknowledged condition and
+advances InfrastructureTalosCluster.status.phase to Operational.
+
+See guardian-schema.md §20 for the complete import-mode onboarding sequence including
+Platform's two-site orchestration and conductor RBACProfile placement.
+
 ---
 
 ## 16. compiler component Subcommand
@@ -976,3 +1004,13 @@ new message types requires a Platform Governor directive before implementation.
   Guardian is a consumer/producer, not an owner. Sovereign tenants (role=management
   Guardian) have no Guardian-to-Guardian federation relationship; Conductor channel
   remains. Adding message envelope types requires a Governor directive.
+
+2026-04-26 - §15 Role Declaration Contract extended: import-mode tenant onboarding
+  gRPC handshake sequence documented. Tenant Conductor (role=tenant) dials MGMT_ENDPOINT
+  immediately after leader election; management Conductor validates tenant identity and
+  pushes initial PermissionSnapshot (management-policy, management-maximum, cluster-maximum);
+  tenant Conductor verifies guardian signature (INV-026); installs signed artifacts in
+  ont-system; writes PermissionSnapshotReceipt; acknowledges to management Conductor.
+  Management Conductor writes acknowledged condition to InfrastructureTalosCluster status.
+  Admission webhook transitions from audit to strict mode only after PermissionSnapshotReceipt
+  is written. Cross-referenced to guardian-schema.md §20 and platform-schema.md §12.
