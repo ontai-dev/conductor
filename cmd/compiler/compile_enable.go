@@ -936,6 +936,7 @@ func writeBootstrapPermissionSets(dir string) error {
 				}, allVerbs),
 				rule([]string{"infrastructure.ontai.dev"}, []string{"infrastructurerunnerconfigs"}, readVerbs),
 				rule([]string{""}, []string{"events"}, eventVerbs),
+				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
 				rule([]string{""}, []string{"configmaps", "secrets"}, allVerbs),
 				rule([]string{""}, []string{"namespaces"}, []string{"get", "list", "watch", "update", "patch"}),
 				rule([]string{""}, []string{"serviceaccounts"}, allVerbs),
@@ -963,6 +964,7 @@ func writeBootstrapPermissionSets(dir string) error {
 				rule([]string{"authorization.k8s.io"}, []string{"subjectaccessreviews"}, []string{"create"}),
 				rule([]string{"security.ontai.dev"}, []string{"rbacprofiles", "permissionsnapshots"}, readVerbs),
 				rule([]string{""}, []string{"events"}, eventVerbs),
+				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
 				rule([]string{""}, []string{"configmaps"}, readVerbs),
 				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
 			},
@@ -994,6 +996,8 @@ func writeBootstrapPermissionSets(dir string) error {
 				rule([]string{""}, []string{"namespaces"}, allVerbs),
 				// Secrets: read existing + create executor talosconfig copies in ont-system.
 				rule([]string{""}, []string{"secrets"}, []string{"get", "list", "watch", "create"}),
+				rule([]string{""}, []string{"serviceaccounts"}, allVerbs),
+				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
 				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
 			},
 		},
@@ -1019,6 +1023,8 @@ func writeBootstrapPermissionSets(dir string) error {
 					"permissionsets", "permissionsnapshots",
 				}, writeVerbs),
 				rule([]string{""}, []string{"events"}, eventVerbs),
+				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
+				rule([]string{""}, []string{"configmaps"}, allVerbs),
 				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
 			},
 		},
@@ -1048,6 +1054,7 @@ func writeBootstrapPermissionSets(dir string) error {
 				rule([]string{"security.ontai.dev"}, []string{"rbacprofiles"}, []string{"get", "list", "watch", "create", "update", "patch"}),
 				rule([]string{""}, []string{"secrets"}, readVerbs),
 				rule([]string{""}, []string{"events"}, eventVerbs),
+				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
 				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
 			},
 		},
@@ -2537,6 +2544,11 @@ func operatorClusterRules(operatorName string) []rbacv1.PolicyRule {
 	common := []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{""},
+			Resources: []string{"events"},
+			Verbs:     []string{"create", "patch"},
+		},
+		{
+			APIGroups: []string{"events.k8s.io"},
 			Resources: []string{"events"},
 			Verbs:     []string{"create", "patch"},
 		},
