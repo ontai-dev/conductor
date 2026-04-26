@@ -399,8 +399,8 @@ func TestEnable_BootstrapRBACPolicyName(t *testing.T) {
 }
 
 // TestEnable_BootstrapPermissionSetNames verifies that guardian-permissionsets.yaml
-// emits management-maximum (not seam-bootstrap-ceiling) and all five operator sets.
-// guardian-schema.md §6, §19.
+// emits ONLY management-maximum and no per-operator PermissionSets.
+// CS-INV-008: exactly one PermissionSet at Layer 1. guardian-schema.md §6, §19.
 func TestEnable_BootstrapPermissionSetNames(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
@@ -409,20 +409,21 @@ func TestEnable_BootstrapPermissionSetNames(t *testing.T) {
 
 	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-permissionsets.yaml")
 
-	for _, name := range []string{
-		"management-maximum",
+	if !strings.Contains(content, "name: management-maximum") {
+		t.Error("guardian-permissionsets.yaml missing management-maximum")
+	}
+	// Per-operator PermissionSets must not be emitted. CS-INV-008.
+	for _, banned := range []string{
 		"guardian-permissions",
 		"wrapper-permissions",
 		"platform-permissions",
 		"seam-core-permissions",
 		"conductor-permissions",
+		"seam-bootstrap-ceiling",
 	} {
-		if !strings.Contains(content, "name: "+name) {
-			t.Errorf("guardian-permissionsets.yaml missing PermissionSet %q", name)
+		if strings.Contains(content, "name: "+banned) {
+			t.Errorf("guardian-permissionsets.yaml must not contain per-operator PermissionSet %q (CS-INV-008)", banned)
 		}
-	}
-	if strings.Contains(content, "seam-bootstrap-ceiling") {
-		t.Error("guardian-permissionsets.yaml must not contain the old name seam-bootstrap-ceiling")
 	}
 }
 
@@ -439,11 +440,10 @@ func TestEnable_ManagementMaximumHasPolicyTypeLabel(t *testing.T) {
 	assertContainsStr(t, content, "ontai.dev/policy-type: management")
 }
 
-// TestEnable_OperatorPermissionSetsAreScoped verifies that no per-operator
-// PermissionSet (guardian/wrapper/platform/seam-core/conductor) grants wildcard
-// apiGroups or resources. Only management-maximum is allowed to be wildcard.
-// CS-INV-008 three-layer RBAC hierarchy. guardian-schema.md §6.
-func TestEnable_OperatorPermissionSetsAreScoped(t *testing.T) {
+// TestEnable_OnlyManagementMaximumPermissionSet verifies that guardian-permissionsets.yaml
+// contains exactly one PermissionSet document (management-maximum) and that it is the
+// wildcard Layer 1 ceiling. Per-operator PermissionSets must not be emitted. CS-INV-008.
+func TestEnable_OnlyManagementMaximumPermissionSet(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
@@ -451,41 +451,22 @@ func TestEnable_OperatorPermissionSetsAreScoped(t *testing.T) {
 
 	content := readPhaseFile(t, outDir, "01-guardian-bootstrap", "guardian-permissionsets.yaml")
 
-	// Split on document boundary so we can examine each PermissionSet independently.
-	docs := strings.Split(content, "\n---\n")
-	for _, doc := range docs {
-		if !strings.Contains(doc, "kind: PermissionSet") {
-			continue
-		}
-		if strings.Contains(doc, "name: management-maximum") {
-			// ceiling is intentionally wildcard
-			continue
-		}
-		// Per-operator PermissionSets must not declare apiGroups: ['*'].
-		// resources: ['*'] is permitted when scoped to a named apiGroup.
-		// Detect the YAML pattern: "apiGroups:" line immediately followed by "- '*'" line.
-		name := "(unknown)"
-		lines := strings.Split(doc, "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(strings.TrimSpace(line), "name: ") {
-				name = strings.TrimPrefix(strings.TrimSpace(line), "name: ")
-				break
-			}
-		}
-		for i, line := range lines {
-			if strings.TrimSpace(line) == "apiGroups:" && i+1 < len(lines) {
-				next := strings.TrimSpace(lines[i+1])
-				if next == "- '*'" {
-					t.Errorf("PermissionSet %q has unconstrained apiGroups: ['*'] -- per-operator sets must name specific apiGroups", name)
-				}
-			}
-		}
+	// Count PermissionSet documents.
+	count := strings.Count(content, "kind: PermissionSet")
+	if count != 1 {
+		t.Errorf("expected exactly 1 PermissionSet document, got %d (CS-INV-008)", count)
+	}
+
+	// The sole document must be management-maximum.
+	if !strings.Contains(content, "name: management-maximum") {
+		t.Error("expected management-maximum PermissionSet document")
 	}
 }
 
-// TestEnable_RBACProfilesRefManagementPolicy verifies that all emitted RBACProfile
-// CRs reference management-policy (not the old seam-platform-rbac-policy).
-func TestEnable_RBACProfilesRefManagementPolicy(t *testing.T) {
+// TestEnable_RBACProfilesRefManagementPolicyAndMaximum verifies that all emitted
+// RBACProfile CRs reference management-policy as rbacPolicyRef and management-maximum
+// as permissionSetRef. CS-INV-008: no per-operator PermissionSet references.
+func TestEnable_RBACProfilesRefManagementPolicyAndMaximum(t *testing.T) {
 	outDir := t.TempDir()
 	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
@@ -496,8 +477,21 @@ func TestEnable_RBACProfilesRefManagementPolicy(t *testing.T) {
 		readPhaseFile(t, outDir, "04-conductor", "conductor-rbacprofile.yaml")
 
 	assertContainsStr(t, content, "rbacPolicyRef: management-policy")
+	assertContainsStr(t, content, "permissionSetRef: management-maximum")
 	if strings.Contains(content, "seam-platform-rbac-policy") {
 		t.Error("RBACProfile files must not reference the old seam-platform-rbac-policy name")
+	}
+	// No per-operator PermissionSet references allowed. CS-INV-008.
+	for _, banned := range []string{
+		"guardian-permissions",
+		"wrapper-permissions",
+		"platform-permissions",
+		"seam-core-permissions",
+		"conductor-permissions",
+	} {
+		if strings.Contains(content, "permissionSetRef: "+banned) {
+			t.Errorf("RBACProfile must not reference per-operator PermissionSet %q (CS-INV-008)", banned)
+		}
 	}
 }
 
