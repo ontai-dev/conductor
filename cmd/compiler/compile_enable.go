@@ -2606,6 +2606,30 @@ func operatorClusterRules(operatorName string) []rbacv1.PolicyRule {
 				Resources: []string{"infrastructurerunnerconfigs"},
 				Verbs:     []string{"get"},
 			},
+			// infrastructure.ontai.dev — ClusterRBACPolicyReconciler (management role)
+			// watches InfrastructureTalosCluster and manages its finalizer.
+			// guardian-schema.md §18, CS-INV-008.
+			rbacv1.PolicyRule{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{
+					"infrastructuretalosclusters",
+					"infrastructuretalosclusters/status",
+					"infrastructuretalosclusters/finalizers",
+				},
+				Verbs: []string{"get", "list", "watch", "update", "patch"},
+			},
+			// infrastructure.ontai.dev — SeamMembershipReconciler (both roles)
+			// validates SeamMembership CRs and reconciles membership lifecycle.
+			// guardian-schema.md §15.
+			rbacv1.PolicyRule{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{
+					"seammemberships",
+					"seammemberships/status",
+					"seammemberships/finalizers",
+				},
+				Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
 		)
 	case "platform":
 		return append(common,
