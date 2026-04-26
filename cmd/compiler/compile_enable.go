@@ -877,9 +877,9 @@ func writeBootstrapRBACPolicy(dir string) error {
 }
 
 // writeBootstrapPermissionSets writes guardian-permissionsets.yaml to dir.
-// Emits management-maximum (the Layer 1 fleet ceiling) plus one scoped PermissionSet
-// per Seam operator. Permissions are least-privilege for each operator's declared domain.
-// guardian-schema.md §6, §19.
+// Emits ONLY management-maximum, the Layer 1 fleet ceiling (CS-INV-008).
+// Per-operator PermissionSets are not emitted. All Seam operator RBACProfiles
+// reference management-maximum directly. guardian-schema.md §6, §19.
 func writeBootstrapPermissionSets(dir string) error {
 	// rule builds a single permission rule map.
 	rule := func(apiGroups, resources, verbs []string) map[string]interface{} {
@@ -891,9 +891,6 @@ func writeBootstrapPermissionSets(dir string) error {
 	}
 
 	allVerbs := []string{"get", "list", "watch", "create", "update", "patch", "delete"}
-	readVerbs := []string{"get", "list", "watch"}
-	writeVerbs := []string{"get", "list", "watch", "update", "patch"}
-	eventVerbs := []string{"create", "patch"}
 
 	type permSet struct {
 		name        string
@@ -904,8 +901,8 @@ func writeBootstrapPermissionSets(dir string) error {
 
 	sets := []permSet{
 		{
-			// management-maximum: Layer 1 fleet ceiling. Referenced by management-policy.
-			// Wildcard ceiling -- actual operator sets are scoped below.
+			// management-maximum: Layer 1 fleet ceiling. Referenced by management-policy
+			// and by all Seam operator RBACProfile permissionDeclarations. CS-INV-008.
 			name: "management-maximum",
 			labels: map[string]string{
 				"ontai.dev/managed-by":          "compiler",
@@ -917,155 +914,14 @@ func writeBootstrapPermissionSets(dir string) error {
 				rule([]string{"*"}, []string{"*"}, allVerbs),
 			},
 		},
-		{
-			// guardian-permissions: security.ontai.dev plane owner; manages RBAC resources cluster-wide.
-			name: "guardian-permissions",
-			labels: map[string]string{
-				"ontai.dev/managed-by":          "compiler",
-				"ontai.dev/permission-set-type": "bootstrap",
-			},
-			permissions: []map[string]interface{}{
-				rule([]string{"security.ontai.dev"}, []string{"*"}, allVerbs),
-				// bind and escalate are granted via guardian's bootstrap ClusterRole (guardian-rbac.yaml),
-			// not through PermissionSet -- the security.ontai.dev PermissionSet schema does not allow them.
-			rule([]string{"rbac.authorization.k8s.io"}, []string{
-					"clusterroles", "clusterrolebindings", "roles", "rolebindings",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"seammemberships", "seammemberships/status", "seammemberships/finalizers",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{"infrastructurerunnerconfigs"}, readVerbs),
-				rule([]string{""}, []string{"events"}, eventVerbs),
-				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
-				rule([]string{""}, []string{"configmaps", "secrets"}, allVerbs),
-				rule([]string{""}, []string{"namespaces"}, []string{"get", "list", "watch", "update", "patch"}),
-				rule([]string{""}, []string{"serviceaccounts"}, allVerbs),
-				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
-			},
-		},
-		{
-			// wrapper-permissions: pack compile and delivery plane.
-			name: "wrapper-permissions",
-			labels: map[string]string{
-				"ontai.dev/managed-by":          "compiler",
-				"ontai.dev/permission-set-type": "bootstrap",
-			},
-			permissions: []map[string]interface{}{
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructureclusterpacks", "infrastructureclusterpacks/status", "infrastructureclusterpacks/finalizers",
-					"infrastructurepackexecutions", "infrastructurepackexecutions/status", "infrastructurepackexecutions/finalizers",
-					"infrastructurepackinstances", "infrastructurepackinstances/status", "infrastructurepackinstances/finalizers",
-					"infrastructurepackoperationresults",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructurerunnerconfigs", "infrastructuretalosclusters",
-				}, readVerbs),
-				rule([]string{"batch"}, []string{"jobs", "jobs/status"}, allVerbs),
-				rule([]string{"authorization.k8s.io"}, []string{"subjectaccessreviews"}, []string{"create"}),
-				rule([]string{"security.ontai.dev"}, []string{"rbacprofiles", "permissionsnapshots"}, readVerbs),
-				rule([]string{""}, []string{"events"}, eventVerbs),
-				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
-				rule([]string{""}, []string{"configmaps"}, readVerbs),
-				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
-			},
-		},
-		{
-			// platform-permissions: cluster and tenant lifecycle; CAPI integration.
-			// Includes guardian resource access to register clusters in rbacpolicies/rbacprofiles
-			// and to copy talosconfig secrets for executor Job access.
-			name: "platform-permissions",
-			labels: map[string]string{
-				"ontai.dev/managed-by":          "compiler",
-				"ontai.dev/permission-set-type": "bootstrap",
-			},
-			permissions: []map[string]interface{}{
-				rule([]string{"platform.ontai.dev"}, []string{"*"}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructuretalosclusters", "infrastructuretalosclusters/status", "infrastructuretalosclusters/finalizers",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{"infrastructurerunnerconfigs"}, []string{"get", "list", "watch", "create", "delete"}),
-				rule([]string{"batch"}, []string{"jobs", "jobs/status"}, allVerbs),
-				rule([]string{"cluster.x-k8s.io"}, []string{"*"}, allVerbs),
-				rule([]string{"controlplane.cluster.x-k8s.io"}, []string{"*"}, allVerbs),
-				rule([]string{"infrastructure.cluster.x-k8s.io"}, []string{"*"}, allVerbs),
-				// Guardian resource access: register clusters in rbacpolicies/rbacprofiles.
-				rule([]string{"security.ontai.dev"}, []string{"rbacpolicies", "rbacprofiles"},
-					[]string{"get", "list", "watch", "patch"}),
-				rule([]string{""}, []string{"events"}, eventVerbs),
-				rule([]string{""}, []string{"configmaps"}, allVerbs),
-				rule([]string{""}, []string{"namespaces"}, allVerbs),
-				// Secrets: read existing + create executor talosconfig copies in ont-system.
-				rule([]string{""}, []string{"secrets"}, []string{"get", "list", "watch", "create"}),
-				rule([]string{""}, []string{"serviceaccounts"}, allVerbs),
-				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
-				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
-			},
-		},
-		{
-			// seam-core-permissions: lineage index owner; cross-operator CRD custodian.
-			name: "seam-core-permissions",
-			labels: map[string]string{
-				"ontai.dev/managed-by":          "compiler",
-				"ontai.dev/permission-set-type": "bootstrap",
-			},
-			permissions: []map[string]interface{}{
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructurelineageindices", "infrastructurelineageindices/status",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructurerunnerconfigs", "infrastructureclusterpacks",
-					"infrastructurepackexecutions", "infrastructurepackinstances",
-					"infrastructurepackreceipts", "infrastructurepackbuilds",
-					"infrastructuretalosclusters", "driftsignals", "seammemberships",
-				}, writeVerbs),
-				rule([]string{"security.ontai.dev"}, []string{
-					"rbacpolicies", "rbacprofiles", "identitybindings", "identityproviders",
-					"permissionsets", "permissionsnapshots",
-				}, writeVerbs),
-				rule([]string{""}, []string{"events"}, eventVerbs),
-				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
-				rule([]string{""}, []string{"configmaps"}, allVerbs),
-				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
-			},
-		},
-		{
-			// conductor-permissions: runtime intelligence; manages runner lifecycle and permission snapshots.
-			name: "conductor-permissions",
-			labels: map[string]string{
-				"ontai.dev/managed-by":          "compiler",
-				"ontai.dev/permission-set-type": "bootstrap",
-			},
-			permissions: []map[string]interface{}{
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructurerunnerconfigs", "infrastructurepackinstances", "infrastructureclusterpacks",
-				}, writeVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructurepackreceipts", "infrastructurepackreceipts/status",
-				}, allVerbs),
-				rule([]string{"infrastructure.ontai.dev"}, []string{
-					"infrastructuretalosclusters/status",
-				}, []string{"get", "update", "patch"}),
-				rule([]string{"security.ontai.dev"}, []string{
-					"permissionsnapshots", "permissionsnapshots/status",
-				}, writeVerbs),
-				rule([]string{"security.ontai.dev"}, []string{
-					"permissionsnapshotreceipts", "permissionsets", "rbacpolicies",
-				}, readVerbs),
-				rule([]string{"security.ontai.dev"}, []string{"rbacprofiles"}, []string{"get", "list", "watch", "create", "update", "patch"}),
-				rule([]string{""}, []string{"secrets"}, readVerbs),
-				rule([]string{""}, []string{"events"}, eventVerbs),
-				rule([]string{"events.k8s.io"}, []string{"events"}, eventVerbs),
-				rule([]string{"coordination.k8s.io"}, []string{"leases"}, allVerbs),
-			},
-		},
 	}
 
 	var buf bytes.Buffer
 	buf.WriteString("# Bootstrap PermissionSet CRs\n")
 	buf.WriteString("# Generated by: compiler enable (phase 1 guardian-bootstrap)\n")
 	buf.WriteString("# management-maximum is the Layer 1 fleet ceiling (guardian-schema.md §19 Layer 1).\n")
-	buf.WriteString("# One PermissionSet per Seam operator. All sets grant full access during the bootstrap window.\n")
-	buf.WriteString("# Tighten permissions post-bootstrap to least-privilege. guardian-schema.md §6.\n")
+	buf.WriteString("# CS-INV-008: exactly one PermissionSet at Layer 1. All Seam operator RBACProfiles\n")
+	buf.WriteString("# reference management-maximum directly. No per-operator PermissionSets are emitted.\n")
 
 	for _, s := range sets {
 		spec := map[string]interface{}{
@@ -3122,9 +2978,12 @@ func buildOperatorRBACProfile(op operatorSpec) map[string]interface{} {
 			"principalRef":  "system:serviceaccount:" + op.Namespace + ":" + op.ServiceAccount,
 			"rbacPolicyRef": "management-policy",
 			"targetClusters": buildTargetClusters(op.AdditionalTargetClusters),
+			// All Seam operator RBACProfiles reference management-maximum (Layer 1 ceiling).
+			// CS-INV-008: no per-operator PermissionSets exist at Layer 1.
+			// guardian-schema.md §19.
 			"permissionDeclarations": []map[string]interface{}{
 				{
-					"permissionSetRef": op.Name + "-permissions",
+					"permissionSetRef": "management-maximum",
 					"scope":            "cluster",
 				},
 			},
