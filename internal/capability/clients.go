@@ -95,10 +95,17 @@ type ExecuteClients struct {
 	// Used by all capabilities that read or write standard Kubernetes resources.
 	KubeClient kubernetes.Interface
 
-	// DynamicClient is the dynamic Kubernetes client for CRD access.
+	// DynamicClient is the dynamic Kubernetes client for the management cluster.
 	// Used by capabilities that read Seam CRD instances (PermissionSnapshot,
 	// TalosCluster, UpgradePolicy, NodeOperation, NodeMaintenance, etc.).
 	DynamicClient dynamic.Interface
+
+	// TenantDynamicClient is the dynamic Kubernetes client for the target tenant
+	// cluster. Non-nil only for pack-deploy, loaded from the mounted kubeconfig
+	// Secret. When nil, pack-deploy falls back to DynamicClient (management cluster).
+	// conductor-schema.md §6: all capabilities reach target clusters via mounted
+	// kubeconfig and talosconfig Secrets.
+	TenantDynamicClient dynamic.Interface
 
 	// TalosClient is the Talos machine API client for the target cluster.
 	// Used by Platform capabilities that require Talos node operations.

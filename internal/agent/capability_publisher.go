@@ -193,6 +193,52 @@ func (p *CapabilityPublisher) fetchRunnerConfigUID(ctx context.Context, clusterR
 	return string(rc.GetUID()), nil
 }
 
+// PublishAllWithRetry publishes the capability manifest to every RunnerConfig in
+// the publisher's namespace. The management conductor manages all clusters;
+// every RunnerConfig must receive capabilities so the PackExecution ConductorReady
+// gate clears for any target cluster. conductor-schema.md §10 step 3.
+//
+// On start it publishes immediately, then re-checks on each capabilityWatchInterval
+// tick to catch RunnerConfigs added after leader election. Only RunnerConfigs with
+// an empty or absent capabilities list are updated; already-populated ones are skipped.
+func (p *CapabilityPublisher) PublishAllWithRetry(ctx context.Context, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) {
+	log := slog.Default().With("component", "capability-publisher-all", "namespace", p.namespace)
+	go func() {
+		p.publishToAllRunnerConfigs(ctx, agentVersion, agentLeader, capabilities)
+		ticker := time.NewTicker(capabilityWatchInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("capability-publisher-all cancelled", "reason", ctx.Err())
+				return
+			case <-ticker.C:
+				p.publishToAllRunnerConfigs(ctx, agentVersion, agentLeader, capabilities)
+			}
+		}
+	}()
+}
+
+// publishToAllRunnerConfigs lists every RunnerConfig in p.namespace and patches
+// status.capabilities on any that have an empty or absent capabilities list.
+func (p *CapabilityPublisher) publishToAllRunnerConfigs(ctx context.Context, agentVersion, agentLeader string, capabilities []runnerlib.CapabilityEntry) {
+	log := slog.Default().With("component", "capability-publisher-all", "namespace", p.namespace)
+	list, err := p.client.Resource(runnerConfigGVR).Namespace(p.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Warn("list RunnerConfigs for bulk capability publish failed", "error", err)
+		return
+	}
+	log.Info("bulk capability publish scan", "runnerConfigCount", len(list.Items))
+	for i := range list.Items {
+		rc := &list.Items[i]
+		if err := p.Publish(ctx, rc.GetName(), agentVersion, agentLeader, capabilities); err != nil {
+			log.Warn("bulk capability publish failed", "runnerConfig", rc.GetName(), "error", err)
+		} else {
+			log.Info("bulk capability publish succeeded", "runnerConfig", rc.GetName())
+		}
+	}
+}
+
 // BuildManifest constructs the []CapabilityEntry slice from the registered
 // execute-mode capabilities. All capabilities are declared with ExecutorMode
 // and the given version string. Production builds stamp the real version via ldflags.

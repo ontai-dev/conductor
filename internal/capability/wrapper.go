@@ -226,7 +226,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	// Many Helm charts (e.g., ingress-nginx) render resources into a namespace that
 	// is not itself declared as a Namespace manifest. wrapper-schema.md §4.
 	preflightStart := time.Now().UTC()
-	nsCreated, preflightErr := ensureNamespaces(ctx, params.DynamicClient, allManifests)
+	nsCreated, preflightErr := ensureNamespaces(ctx, tenantDynClient(params), allManifests)
 	preflightEnd := time.Now().UTC()
 	if preflightErr != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
@@ -253,7 +253,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	if len(executionStages) == 0 {
 		applied := 0
 		for _, m := range allManifests {
-			if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+			if err := applyParsedManifest(ctx, tenantDynClient(params), m); err != nil {
 				return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 					fmt.Sprintf("apply %s %s/%s: %v", m.kind, m.namespace, m.name, err)), nil
 			}
@@ -268,7 +268,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			Message:     fmt.Sprintf("%d manifests applied", applied),
 		}
 		readyStart := time.Now().UTC()
-		if waitErr := waitForStageReady(ctx, params.DynamicClient, allManifests); waitErr != nil {
+		if waitErr := waitForStageReady(ctx, tenantDynClient(params), allManifests); waitErr != nil {
 			return runnerlib.OperationResultSpec{
 				Capability:  runnerlib.CapabilityPackDeploy,
 				Status:      runnerlib.ResultFailed,
@@ -337,7 +337,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		stageMfsts := byStage[stageName] // empty slice when no manifests for this stage
 
 		// Apply this stage's manifests concurrently via server-side apply.
-		applied, applyErr := applyStageManifests(ctx, params.DynamicClient, stageMfsts)
+		applied, applyErr := applyStageManifests(ctx, tenantDynClient(params), stageMfsts)
 		if applyErr != nil {
 			stageSteps = append(stageSteps, runnerlib.StepResult{
 				Name:        stageName,
@@ -362,7 +362,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		}
 
 		// Wait for all readiness-sensitive resources in this stage before proceeding.
-		if waitErr := waitForStageReady(ctx, params.DynamicClient, stageMfsts); waitErr != nil {
+		if waitErr := waitForStageReady(ctx, tenantDynClient(params), stageMfsts); waitErr != nil {
 			stageSteps = append(stageSteps, runnerlib.StepResult{
 				Name:        stageName,
 				Status:      runnerlib.ResultFailed,
@@ -539,7 +539,7 @@ func (h *packDeployHandler) executeSplitPath(
 		if !strings.EqualFold(m.kind, "Namespace") {
 			continue
 		}
-		if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+		if err := applyParsedManifest(ctx, tenantDynClient(params), m); err != nil {
 			nsStep := runnerlib.StepResult{
 				Name:        "apply-namespaces",
 				Status:      runnerlib.ResultFailed,
@@ -670,7 +670,7 @@ func (h *packDeployHandler) executeSplitPath(
 		}
 		csApplied := 0
 		for _, m := range clusterScopedManifests {
-			if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+			if err := applyParsedManifest(ctx, tenantDynClient(params), m); err != nil {
 				applyCSStep = runnerlib.StepResult{
 					Name:        "apply-cluster-scoped",
 					Status:      runnerlib.ResultFailed,
@@ -708,7 +708,7 @@ func (h *packDeployHandler) executeSplitPath(
 	applyStart := time.Now().UTC()
 	applied := 0
 	for _, m := range workloadManifests {
-		if err := applyParsedManifest(ctx, params.DynamicClient, m); err != nil {
+		if err := applyParsedManifest(ctx, tenantDynClient(params), m); err != nil {
 			steps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep}
 			if clusterScopedDigest != "" {
 				steps = append(steps, applyCSStep)
@@ -739,7 +739,7 @@ func (h *packDeployHandler) executeSplitPath(
 
 	// Step 8 — Wait for workload Deployments, StatefulSets, and DaemonSets to become ready.
 	readyStart := time.Now().UTC()
-	if waitErr := waitForStageReady(ctx, params.DynamicClient, workloadManifests); waitErr != nil {
+	if waitErr := waitForStageReady(ctx, tenantDynClient(params), workloadManifests); waitErr != nil {
 		preSteps := []runnerlib.StepResult{pullRBACStep, pullWorkloadStep, applyNSStep, intakeStep, waitStep}
 		if clusterScopedDigest != "" {
 			preSteps = append(preSteps, applyCSStep)
@@ -824,6 +824,16 @@ func (h *packDeployHandler) executeSplitPath(
 // ---------------------------------------------------------------------------
 // Namespace pre-creation
 // ---------------------------------------------------------------------------
+
+// tenantDynClient returns TenantDynamicClient when non-nil, falling back to
+// DynamicClient. All pack-deploy manifest operations target the tenant cluster;
+// only RunnerConfig/PackExecution/ClusterPack reads use the management client.
+func tenantDynClient(params ExecuteParams) dynamic.Interface {
+	if params.TenantDynamicClient != nil {
+		return params.TenantDynamicClient
+	}
+	return params.DynamicClient
+}
 
 // ensureNamespaces scans manifests for namespace-scoped resources and
 // pre-creates any referenced namespace that is not already represented as

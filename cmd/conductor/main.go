@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -172,13 +173,29 @@ func runExecute() {
 		guardianHTTPClient,
 	)
 
+	// TenantDynamicClient: loaded from the mounted kubeconfig Secret for pack-deploy.
+	// Pack-deploy Jobs always mount seam-mc-{clusterRef}-kubeconfig at this path.
+	// Other capabilities (day-2 Talos ops) do not mount a kubeconfig, so this stays nil.
+	// conductor-schema.md §6: all capabilities reach target clusters via mounted kubeconfig.
+	var tenantDynamicClient dynamic.Interface
+	tenantKubeconfigPath := "/var/run/secrets/kubeconfig/value"
+	if v := os.Getenv("KUBECONFIG"); v != "" {
+		tenantKubeconfigPath = v
+	}
+	if tenantCfg, tcErr := clientcmd.BuildConfigFromFlags("", tenantKubeconfigPath); tcErr == nil {
+		if tdc, tdcErr := dynamic.NewForConfig(tenantCfg); tdcErr == nil {
+			tenantDynamicClient = tdc
+		}
+	}
+
 	clients := capability.ExecuteClients{
-		KubeClient:    kubeClient,
-		DynamicClient: dynamicClient,
-		TalosClient:   talosClient,
-		StorageClient: storageClient,
-		OCIClient:     ociClient,
-		GuardianClient: guardianClient,
+		KubeClient:          kubeClient,
+		DynamicClient:       dynamicClient,
+		TenantDynamicClient: tenantDynamicClient,
+		TalosClient:         talosClient,
+		StorageClient:       storageClient,
+		OCIClient:           ociClient,
+		GuardianClient:      guardianClient,
 	}
 
 	ctrlClient, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: seamScheme})
@@ -306,7 +323,7 @@ func buildStepParameters() map[string]string {
 	if v := os.Getenv("OPERATION_RESULT_CR"); v != "" {
 		params["operationResultCR"] = v
 	}
-	kubeconfigPath := "/var/run/secrets/kubeconfig/kubeconfig"
+	kubeconfigPath := "/var/run/secrets/kubeconfig/value"
 	if v := os.Getenv("KUBECONFIG"); v != "" {
 		kubeconfigPath = v
 	}

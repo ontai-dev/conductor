@@ -369,9 +369,13 @@ func onLeaderStart(
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
 	// publisher is nil for role=tenant — RunnerConfig does not exist on tenant clusters.
+	// PublishWithRetry covers the management cluster's own RunnerConfig (clusterRef).
+	// PublishAllWithRetry covers all other RunnerConfigs in the namespace so the
+	// PackExecution ConductorReady gate clears for every target cluster.
 	// conductor-schema.md §10 step 3.
 	if publisher != nil {
 		publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
+		publisher.PublishAllWithRetry(leaderCtx, agentVersion, "", manifest)
 		fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
 			clusterRef, len(manifest))
 	}
