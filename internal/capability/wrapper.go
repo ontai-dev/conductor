@@ -48,6 +48,15 @@ var clusterPackGVR = schema.GroupVersionResource{
 	Resource: "infrastructureclusterpacks",
 }
 
+// packReceiptGVR is the GroupVersionResource for PackReceipt.
+// Written to ont-system on the tenant cluster after successful pack apply.
+// Sole local desired-state reference on tenant clusters. conductor-schema.md.
+var packReceiptGVR = schema.GroupVersionResource{
+	Group:    "infrastructure.ontai.dev",
+	Version:  "v1alpha1",
+	Resource: "infrastructurepackreceipts",
+}
+
 // Readiness-check GVRs. Used by isResourceReady to poll resource status.
 var (
 	deploymentGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
@@ -112,7 +121,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("list ClusterPack in %s: %v", peTenantNS, err)), nil
 	}
 
-	var ociRef, registryBaseURL, expectedChecksum, rbacDigest, workloadDigest, clusterScopedDigest string
+	var ociRef, registryBaseURL, expectedChecksum, rbacDigest, workloadDigest, clusterScopedDigest, packSignature string
 	var executionStages []string // stage names in declared order; empty → single-pass fallback
 	for _, item := range cpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
@@ -136,6 +145,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		rbacDigest, _, _ = unstructuredString(item.Object, "spec", "rbacDigest")
 		workloadDigest, _, _ = unstructuredString(item.Object, "spec", "workloadDigest")
 		clusterScopedDigest, _, _ = unstructuredString(item.Object, "spec", "clusterScopedDigest")
+		packSignature, _, _ = unstructuredString(item.Object, "status", "packSignature")
 
 		// Read spec.executionOrder — ordered list of stage objects with a "name" field.
 		// When present and non-empty, staged execution is used. wrapper-schema.md §2.2.
@@ -168,7 +178,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	if rbacDigest != "" {
 		// Pass the base registry URL (without digest suffix) so executeSplitPath
 		// can construct correct layer refs: baseURL@{rbac,clusterScoped,workload}Digest.
-		return h.executeSplitPath(ctx, params, now, clusterPackName, registryBaseURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, executionStages)
+		return h.executeSplitPath(ctx, params, now, clusterPackName, registryBaseURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature, executionStages)
 	}
 
 	// Step 1 — Fetch manifests from OCI registry.
@@ -294,6 +304,10 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 				},
 			}, nil
 		}
+		if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
+		}
 		return runnerlib.OperationResultSpec{
 			Capability:  runnerlib.CapabilityPackDeploy,
 			Status:      runnerlib.ResultSucceeded,
@@ -394,6 +408,10 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		})
 	}
 
+	if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
+	}
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityPackDeploy,
 		Status:      runnerlib.ResultSucceeded,
@@ -429,7 +447,7 @@ func (h *packDeployHandler) executeSplitPath(
 	ctx context.Context,
 	params ExecuteParams,
 	now time.Time,
-	componentName, registryURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum string,
+	componentName, registryURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature string,
 	executionStages []string,
 ) (runnerlib.OperationResultSpec, error) {
 	if params.GuardianClient == nil {
@@ -810,6 +828,11 @@ func (h *packDeployHandler) executeSplitPath(
 	}
 	finalSteps = append(finalSteps, applyStep, readyStep)
 
+	if err := writePackReceipt(ctx, tenantDynClient(params), componentName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("write PackReceipt for %s: %v", componentName, err)), nil
+	}
+
 	return runnerlib.OperationResultSpec{
 		Capability:        runnerlib.CapabilityPackDeploy,
 		Status:            runnerlib.ResultSucceeded,
@@ -833,6 +856,40 @@ func tenantDynClient(params ExecuteParams) dynamic.Interface {
 		return params.TenantDynamicClient
 	}
 	return params.DynamicClient
+}
+
+// writePackReceipt SSA-patches an InfrastructurePackReceipt into ont-system on
+// the tenant cluster. The receipt is the sole local desired-state reference on
+// tenant clusters and enables conductor role=tenant drift detection.
+// Decision D (revised 2026-04-30), conductor-schema.md.
+func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clusterPackRef, targetCluster, packSignature, rbacDigest, workloadDigest string) error {
+	receiptJSON, err := json.Marshal(map[string]interface{}{
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructurePackReceipt",
+		"metadata": map[string]interface{}{
+			"name":      clusterPackRef,
+			"namespace": "ont-system",
+		},
+		"spec": map[string]interface{}{
+			"clusterPackRef":    clusterPackRef,
+			"targetClusterRef":  targetCluster,
+			"packSignature":     packSignature,
+			"signatureVerified": false,
+			"rbacDigest":        rbacDigest,
+			"workloadDigest":    workloadDigest,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal PackReceipt: %w", err)
+	}
+	_, err = tenantClient.Resource(packReceiptGVR).Namespace("ont-system").Patch(
+		ctx,
+		clusterPackRef,
+		types.ApplyPatchType,
+		receiptJSON,
+		metav1.PatchOptions{FieldManager: "conductor-pack-deploy"},
+	)
+	return err
 }
 
 // ensureNamespaces scans manifests for namespace-scoped resources and
