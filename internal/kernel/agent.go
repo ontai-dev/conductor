@@ -337,7 +337,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, tenantSweep)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, tenantSweep, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -357,6 +357,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 func onLeaderStart(
 	leaderCtx context.Context,
 	clusterRef string,
+	namespace string,
 	manifest []runnerlib.CapabilityEntry,
 	publisher *agent.CapabilityPublisher,
 	reconciler *agent.ReceiptReconciler,
@@ -364,6 +365,7 @@ func onLeaderStart(
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
 	tenantSweep *agent.TenantBootstrapSweep,
+	dynamicClient dynamic.Interface,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
 	// publisher is nil for role=tenant — RunnerConfig does not exist on tenant clusters.
@@ -425,6 +427,18 @@ func onLeaderStart(
 	if tenantSweep != nil {
 		const sweepInterval = 5 * time.Minute
 		go tenantSweep.RunPeriodic(leaderCtx, sweepInterval)
+
+		// Mark the InfrastructureTalosCluster copy in ont-system as Ready=True.
+		// Conductor role=tenant sets this condition once leadership is established,
+		// signalling to the management cluster that the tenant conductor is operational.
+		// Retried in background so a transient API error does not block the leader loop.
+		go func() {
+			if err := agent.SetTalosClusterReady(leaderCtx, dynamicClient, namespace, clusterRef); err != nil {
+				fmt.Printf("conductor agent: cluster=%q set TalosCluster Ready: %v\n", clusterRef, err)
+			} else {
+				fmt.Printf("conductor agent: cluster=%q TalosCluster Ready=True set\n", clusterRef)
+			}
+		}()
 	}
 
 	// Block until leadership is lost.

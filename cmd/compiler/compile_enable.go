@@ -330,6 +330,9 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
+	if clusterRole == "" {
+		clusterRole = "management"
+	}
 
 	gdn := guardianOp(version, registry)
 	pwOps := platformWrapperOps(version, registry, dsnsIP)
