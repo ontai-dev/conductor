@@ -348,10 +348,10 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 		}
 	}
 
-	if err := writePhase0InfrastructureDependencies(output); err != nil {
+	if err := writePhase0InfrastructureDependencies(output, clusterRole); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
 	}
-	if err := writePhase00aNamespaces(output, clusterName); err != nil {
+	if err := writePhase00aNamespaces(output, clusterName, clusterRole); err != nil {
 		return fmt.Errorf("phase 00a namespaces: %w", err)
 	}
 	if withCAPI {
@@ -359,20 +359,28 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 			return fmt.Errorf("phase 00b capi-prerequisites: %w", err)
 		}
 	}
-	if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
-		return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
+	if clusterRole == "management" {
+		if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
+			return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
+		}
+		if err := writePhase2GuardianDeploy(output, gdn); err != nil {
+			return fmt.Errorf("phase 2 guardian-deploy: %w", err)
+		}
+		if err := writePhase3PlatformWrapper(output, pwOps); err != nil {
+			return fmt.Errorf("phase 3 platform-wrapper: %w", err)
+		}
 	}
-	if err := writePhase2GuardianDeploy(output, gdn); err != nil {
-		return fmt.Errorf("phase 2 guardian-deploy: %w", err)
-	}
-	if err := writePhase3PlatformWrapper(output, pwOps); err != nil {
-		return fmt.Errorf("phase 3 platform-wrapper: %w", err)
-	}
-	if err := writePhase4Conductor(output, cdt); err != nil {
+	if err := writePhase4Conductor(output, cdt, clusterRole); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
-	if err := writePhase5PostBootstrap(output, allOperators(version, registry, clusterName, dsnsIP), dsnsIP, clusterName); err != nil {
-		return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+	if clusterRole == "management" {
+		if err := writePhase5PostBootstrap(output, allOperators(version, registry, clusterName, dsnsIP), dsnsIP, clusterName, clusterRole); err != nil {
+			return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+		}
+	} else {
+		if err := writePhase5PostBootstrap(output, []operatorSpec{cdt}, dsnsIP, clusterName, clusterRole); err != nil {
+			return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+		}
 	}
 
 	return nil
@@ -389,29 +397,68 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 // exist and be healthy before Guardian can start.
 //
 // conductor-schema.md §9.
-func writePhase0InfrastructureDependencies(output string) error {
+func writePhase0InfrastructureDependencies(output, clusterRole string) error {
 	dir := filepath.Join(output, "00-infrastructure-dependencies")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	files := []string{"prerequisites.yaml"}
+	var files []string
+	var readinessGate string
 
-	meta := phaseMeta{
-		Phase: "infrastructure-dependencies",
-		Order: 0,
-		ReadinessGate: "All prerequisites listed in prerequisites.yaml must be satisfied " +
+	if clusterRole == "tenant" {
+		files = []string{"prerequisites.yaml", "seam-core-crds.yaml"}
+		readinessGate = "All prerequisites listed in prerequisites.yaml must be satisfied " +
+			"by the operator before applying phase 4 (04-conductor). " +
+			"Verify: default StorageClass present. " +
+			"seam-core-crds.yaml installs the infrastructure.ontai.dev CRD group required by Conductor."
+	} else {
+		files = []string{"prerequisites.yaml"}
+		readinessGate = "All prerequisites listed in prerequisites.yaml must be satisfied " +
 			"by the operator before applying phase 1 (01-guardian-bootstrap). " +
 			"Verify: CNPG operator running in cnpg-system, guardian-db Cluster Ready " +
 			"in seam-system, guardian-db-credentials Secret present in seam-system, " +
-			"Kueue ClusterQueue and LocalQueue CRDs registered, default StorageClass present.",
-		ApplyOrder: files,
+			"Kueue ClusterQueue and LocalQueue CRDs registered, default StorageClass present."
+	}
+
+	meta := phaseMeta{
+		Phase:         "infrastructure-dependencies",
+		Order:         0,
+		ReadinessGate: readinessGate,
+		ApplyOrder:    files,
 	}
 	if err := writePhaseMeta(dir, meta); err != nil {
 		return err
 	}
 
-	return writePrerequisitesConfigMap(dir)
+	if err := writePrerequisitesConfigMap(dir); err != nil {
+		return err
+	}
+
+	if clusterRole == "tenant" {
+		if err := writeSeamCoreCRDsFile(dir); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeSeamCoreCRDsFile writes seam-core-crds.yaml containing the infrastructure.ontai.dev
+// CRD group. Used in tenant cluster enable bundles where phase 3 (platform-wrapper) is
+// omitted but Conductor still requires the seam-core CRDs to be present.
+func writeSeamCoreCRDsFile(dir string) error {
+	var allBuf bytes.Buffer
+	if err := writeCRDBundleToBuffer(&allBuf); err != nil {
+		return fmt.Errorf("read CRD bundle for seam-core CRDs: %w", err)
+	}
+	infraCRDs := filterCRDsByGroup(allBuf.String(), "infrastructure.ontai.dev")
+	var buf bytes.Buffer
+	buf.WriteString("# Seam Core CRD Definitions (infrastructure.ontai.dev)\n")
+	buf.WriteString("# SC-INV-003: seam-core CRDs must be installed before all operators.\n")
+	buf.WriteString("# Source: seam-core/config/crd/\n")
+	buf.WriteString(infraCRDs)
+	return os.WriteFile(filepath.Join(dir, "seam-core-crds.yaml"), buf.Bytes(), 0644)
 }
 
 // writePrerequisitesConfigMap writes prerequisites.yaml — a ConfigMap in seam-system
@@ -491,7 +538,7 @@ func writePrerequisitesConfigMap(dir string) error {
 // — the pipeline applies phases in directory name order.
 //
 // conductor-schema.md §9, CONTEXT.md §4.
-func writePhase00aNamespaces(output, clusterName string) error {
+func writePhase00aNamespaces(output, clusterName, clusterRole string) error {
 	dir := filepath.Join(output, "00a-namespaces")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -500,7 +547,14 @@ func writePhase00aNamespaces(output, clusterName string) error {
 	if err := writeNamespacesPhaseMetaYAML(dir); err != nil {
 		return err
 	}
-	return writeNamespacesManifest(dir, clusterName)
+
+	// Tenant clusters do not get a seam-tenant-{name} namespace — that namespace
+	// lives on the management cluster only (CP-INV-004). Pass "" to suppress it.
+	nameArg := clusterName
+	if clusterRole == "tenant" {
+		nameArg = ""
+	}
+	return writeNamespacesManifest(dir, nameArg)
 }
 
 // writeNamespacesPhaseMetaYAML writes the phase-meta.yaml for the 00a-namespaces phase
@@ -1543,19 +1597,32 @@ func writePlatformWrapperCRDs(dir string) error {
 
 // --- Phase 4: conductor ---
 
-func writePhase4Conductor(output string, cdt operatorSpec) error {
+func writePhase4Conductor(output string, cdt operatorSpec, clusterRole string) error {
 	dir := filepath.Join(output, "04-conductor")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	files := []string{
-		"conductor-crds.yaml",
-		"conductor-rbac.yaml",
-		"conductor-rbacprofile.yaml",
-		"conductor-signing-key.yaml",
-		"conductor-deployment.yaml",
-		"conductor-metrics-service.yaml",
+	// conductor-rbacprofile.yaml is omitted for tenant clusters: RBACProfile is a
+	// Guardian resource and Guardian is a management-cluster-only component (INV-003).
+	var files []string
+	if clusterRole == "tenant" {
+		files = []string{
+			"conductor-crds.yaml",
+			"conductor-rbac.yaml",
+			"conductor-signing-key.yaml",
+			"conductor-deployment.yaml",
+			"conductor-metrics-service.yaml",
+		}
+	} else {
+		files = []string{
+			"conductor-crds.yaml",
+			"conductor-rbac.yaml",
+			"conductor-rbacprofile.yaml",
+			"conductor-signing-key.yaml",
+			"conductor-deployment.yaml",
+			"conductor-metrics-service.yaml",
+		}
 	}
 
 	meta := phaseMeta{
@@ -1584,8 +1651,12 @@ func writePhase4Conductor(output string, cdt operatorSpec) error {
 	}
 
 	// conductor-rbacprofile.yaml — Conductor RBACProfile CR.
-	if err := writeOperatorRBACProfilesFile(dir, "conductor-rbacprofile.yaml", []operatorSpec{cdt}); err != nil {
-		return err
+	// Omitted for tenant clusters: Guardian (which provisions RBACProfiles) is
+	// management-cluster-only (INV-003, INV-004).
+	if clusterRole != "tenant" {
+		if err := writeOperatorRBACProfilesFile(dir, "conductor-rbacprofile.yaml", []operatorSpec{cdt}); err != nil {
+			return err
+		}
 	}
 
 	// conductor-signing-key.yaml — Ed25519 key pair Secret in ont-system.
@@ -1626,7 +1697,7 @@ func writeConductorCRDs(dir string) error {
 
 // --- Phase 5: post-bootstrap ---
 
-func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, clusterName string) error {
+func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, clusterName, clusterRole string) error {
 	dir := filepath.Join(output, "05-post-bootstrap")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1638,7 +1709,9 @@ func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, c
 		"dsns-loadbalancer.yaml",
 		"leaderelection.yaml",
 	}
-	if clusterName != "" {
+	// pack-deploy-queue.yaml and wrapper-runner.yaml require Kueue and seam-tenant-{name}
+	// namespaces, which exist only on the management cluster (INV-003).
+	if clusterName != "" && clusterRole != "tenant" {
 		files = append(files, "pack-deploy-queue.yaml", "wrapper-runner.yaml")
 	}
 
@@ -1673,7 +1746,8 @@ func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, c
 		return err
 	}
 
-	if clusterName != "" {
+	// Kueue and seam-tenant-{name} resources are management-cluster-only (INV-003).
+	if clusterName != "" && clusterRole != "tenant" {
 		// pack-deploy-queue.yaml — Kueue LocalQueue in seam-tenant-{clusterName}.
 		// wrapper-schema.md §9 pack delivery chain.
 		if err := writePackDeployQueueYAML(dir, clusterName); err != nil {

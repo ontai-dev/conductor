@@ -94,7 +94,13 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	names := reg.RegisteredNames()
 	manifest := agent.BuildManifest(names, agentVersion)
 
-	publisher := agent.NewCapabilityPublisher(dynamicClient, ns)
+	// Capability publisher is management-cluster-only. RunnerConfig does not exist on
+	// tenant clusters -- role=tenant conductor skips capability publication entirely.
+	// conductor-schema.md §10 step 3. Decision H.
+	var publisher *agent.CapabilityPublisher
+	if role == RoleManagement {
+		publisher = agent.NewCapabilityPublisher(dynamicClient, ns)
+	}
 
 	// Construct the receipt reconciler. When SIGNING_PUBLIC_KEY_PATH is set,
 	// use the mounted Ed25519 public key for INV-026 signature enforcement.
@@ -360,12 +366,13 @@ func onLeaderStart(
 	tenantSweep *agent.TenantBootstrapSweep,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
-	// If the RunnerConfig does not yet exist (Platform creates it after Conductor
-	// starts), the initial attempt fails and a goroutine retries every 30s until
-	// it succeeds. conductor-schema.md §10 step 3.
-	publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
-	fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
-		clusterRef, len(manifest))
+	// publisher is nil for role=tenant — RunnerConfig does not exist on tenant clusters.
+	// conductor-schema.md §10 step 3.
+	if publisher != nil {
+		publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
+		fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
+			clusterRef, len(manifest))
+	}
 
 	const reconcileInterval = 30 * time.Second
 	const signingInterval = 30 * time.Second
