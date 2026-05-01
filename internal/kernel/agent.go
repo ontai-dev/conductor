@@ -160,12 +160,14 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef)
 	}
 
-	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance).
-	// When MGMT_KUBECONFIG_PATH is set, this Conductor is on a target cluster and
-	// must pull artifacts from the management cluster, verify Ed25519 signatures
-	// (INV-026), and update local state. conductor-schema.md §10, Gap 28.
+	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance)
+	// and the PackReceipt drift loop. When MGMT_KUBECONFIG_PATH is set, this
+	// Conductor is on a target cluster and must pull artifacts from the management
+	// cluster, verify Ed25519 signatures (INV-026), and update local state.
+	// conductor-schema.md §10, Gap 28.
 	var snapshotPullLoop *agent.SnapshotPullLoop
 	var packInstancePullLoop *agent.PackInstancePullLoop
+	var packReceiptDriftLoop *agent.PackReceiptDriftLoop
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
 		if err != nil {
@@ -214,6 +216,35 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			)
 		}
 		fmt.Printf("conductor agent: cluster=%q packinstance pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// PackReceipt drift loop — verifies packSignature, detects missing resources,
+		// emits DriftSignals to management cluster. Role=tenant only. conductor-schema.md §7.
+		if pubKeyPath != "" {
+			packReceiptDriftLoop, err = agent.NewPackReceiptDriftLoopWithKey(
+				dynamicClient, mgmtDynamicClient,
+				execCtx.ClusterRef, ns, pubKeyPath,
+			)
+			if err != nil {
+				return fmt.Errorf("conductor agent: build pack receipt drift loop with signing key: %w", err)
+			}
+		} else {
+			packReceiptDriftLoop = agent.NewPackReceiptDriftLoop(
+				dynamicClient, mgmtDynamicClient,
+				execCtx.ClusterRef, ns,
+			)
+		}
+		fmt.Printf("conductor agent: cluster=%q pack receipt drift loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+	}
+
+	// DriftSignal handler — role=management only. Watches DriftSignals in seam-tenant-*
+	// namespaces, retriggers pack-deploy by deleting PackExecution, enforces circuit
+	// breaker at escalationThreshold. conductor-schema.md §7.9, Decision H.
+	var driftSignalHandler *agent.DriftSignalHandler
+	if role == RoleManagement {
+		driftSignalHandler = agent.NewDriftSignalHandler(dynamicClient)
+		fmt.Printf("conductor agent: cluster=%q drift signal handler enabled (management role)\n",
 			execCtx.ClusterRef)
 	}
 
@@ -337,7 +368,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, tenantSweep, dynamicClient)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, driftSignalHandler, tenantSweep, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -364,6 +395,8 @@ func onLeaderStart(
 	signingLoop *agent.SigningLoop,
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
+	packReceiptDriftLoop *agent.PackReceiptDriftLoop,
+	driftSignalHandler *agent.DriftSignalHandler,
 	tenantSweep *agent.TenantBootstrapSweep,
 	dynamicClient dynamic.Interface,
 ) {
@@ -420,6 +453,20 @@ func onLeaderStart(
 	// Gap 28, conductor-schema.md §10.
 	if packInstancePullLoop != nil {
 		go packInstancePullLoop.Run(leaderCtx, signingInterval)
+	}
+
+	// Start PackReceipt drift loop (target clusters only).
+	// Verifies packSignature, checks deployed resource inventory, emits DriftSignals
+	// to management cluster on drift detection. conductor-schema.md §7.9, Decision H.
+	if packReceiptDriftLoop != nil {
+		go packReceiptDriftLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start DriftSignal handler (management cluster only).
+	// Watches DriftSignals in seam-tenant-* namespaces, retriggers PackExecution,
+	// enforces circuit breaker at escalationThreshold. conductor-schema.md §7.9.
+	if driftSignalHandler != nil {
+		go driftSignalHandler.Run(leaderCtx, reconcileInterval)
 	}
 
 	// Start tenant bootstrap sweep (tenant clusters only).

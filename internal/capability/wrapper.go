@@ -304,7 +304,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 				},
 			}, nil
 		}
-		if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+		if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 		}
@@ -408,7 +408,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		})
 	}
 
-	if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+	if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 	}
@@ -828,7 +828,7 @@ func (h *packDeployHandler) executeSplitPath(
 	}
 	finalSteps = append(finalSteps, applyStep, readyStep)
 
-	if err := writePackReceipt(ctx, tenantDynClient(params), componentName, params.ClusterRef, packSignature, rbacDigest, workloadDigest); err != nil {
+	if err := writePackReceipt(ctx, tenantDynClient(params), componentName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, deployedResources); err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("write PackReceipt for %s: %v", componentName, err)), nil
 	}
@@ -862,7 +862,32 @@ func tenantDynClient(params ExecuteParams) dynamic.Interface {
 // the tenant cluster. The receipt is the sole local desired-state reference on
 // tenant clusters and enables conductor role=tenant drift detection.
 // Decision D (revised 2026-04-30), conductor-schema.md.
-func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clusterPackRef, targetCluster, packSignature, rbacDigest, workloadDigest string) error {
+func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clusterPackRef, targetCluster, packSignature, rbacDigest, workloadDigest string, resources []runnerlib.DeployedResource) error {
+	deployedItems := make([]map[string]interface{}, 0, len(resources))
+	for _, r := range resources {
+		item := map[string]interface{}{
+			"apiVersion": r.APIVersion,
+			"kind":       r.Kind,
+			"name":       r.Name,
+		}
+		if r.Namespace != "" {
+			item["namespace"] = r.Namespace
+		}
+		deployedItems = append(deployedItems, item)
+	}
+
+	spec := map[string]interface{}{
+		"clusterPackRef":    clusterPackRef,
+		"targetClusterRef":  targetCluster,
+		"packSignature":     packSignature,
+		"signatureVerified": false,
+		"rbacDigest":        rbacDigest,
+		"workloadDigest":    workloadDigest,
+	}
+	if len(deployedItems) > 0 {
+		spec["deployedResources"] = deployedItems
+	}
+
 	receiptJSON, err := json.Marshal(map[string]interface{}{
 		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
 		"kind":       "InfrastructurePackReceipt",
@@ -870,14 +895,7 @@ func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clust
 			"name":      clusterPackRef,
 			"namespace": "ont-system",
 		},
-		"spec": map[string]interface{}{
-			"clusterPackRef":    clusterPackRef,
-			"targetClusterRef":  targetCluster,
-			"packSignature":     packSignature,
-			"signatureVerified": false,
-			"rbacDigest":        rbacDigest,
-			"workloadDigest":    workloadDigest,
-		},
+		"spec": spec,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal PackReceipt: %w", err)
@@ -890,6 +908,21 @@ func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clust
 		metav1.PatchOptions{FieldManager: "conductor-pack-deploy"},
 	)
 	return err
+}
+
+// manifestsToDeployedResources converts parsed manifests to the DeployedResource
+// type used by PackReceipt for drift detection inventory.
+func manifestsToDeployedResources(manifests []parsedManifest) []runnerlib.DeployedResource {
+	out := make([]runnerlib.DeployedResource, 0, len(manifests))
+	for _, m := range manifests {
+		out = append(out, runnerlib.DeployedResource{
+			APIVersion: m.apiVersion,
+			Kind:       m.kind,
+			Namespace:  m.namespace,
+			Name:       m.name,
+		})
+	}
+	return out
 }
 
 // ensureNamespaces scans manifests for namespace-scoped resources and
