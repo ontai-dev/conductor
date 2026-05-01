@@ -5,7 +5,6 @@ package persistence
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -150,14 +149,12 @@ func (w *kubeOperationResultWriter) WriteResult(
 	}
 
 	if prev != nil {
-		specJSON, _ := json.Marshal(prev.Spec)
 		slog.InfoContext(ctx, "operationresult writer: superseding previous revision",
 			"predecessor", prev.Name,
 			"namespace", namespace,
 			"supersededRevision", prev.Spec.Revision,
 			"newRevision", newRevision,
 			"packExecutionRef", packExecutionRef,
-			"spec", string(specJSON),
 		)
 		labelPatch := ctrlclient.MergeFrom(prev.DeepCopy())
 		if prev.Labels == nil {

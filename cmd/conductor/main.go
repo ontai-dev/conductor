@@ -239,6 +239,7 @@ func runExecute() {
 		slog.String("cluster", execCtx.ClusterRef),
 		slog.String("capability", execCtx.Capability),
 	)
+	slog.SetDefault(execLogger)
 	execLogger.Info("starting")
 	if err := kernel.RunExecute(execCtx, executor, statusWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
