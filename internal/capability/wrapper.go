@@ -900,12 +900,13 @@ func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clust
 	if err != nil {
 		return fmt.Errorf("marshal PackReceipt: %w", err)
 	}
+	force := true
 	_, err = tenantClient.Resource(packReceiptGVR).Namespace("ont-system").Patch(
 		ctx,
 		clusterPackRef,
 		types.ApplyPatchType,
 		receiptJSON,
-		metav1.PatchOptions{FieldManager: "conductor-pack-deploy"},
+		metav1.PatchOptions{FieldManager: "conductor-pack-deploy", Force: &force},
 	)
 	return err
 }
