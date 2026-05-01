@@ -172,6 +172,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	var snapshotPullLoop *agent.SnapshotPullLoop
 	var packInstancePullLoop *agent.PackInstancePullLoop
 	var packReceiptDriftLoop *agent.PackReceiptDriftLoop
+	var rbacProfilePullLoop *agent.RBACProfilePullLoop
 	var mgmtDynamicClient dynamic.Interface
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
@@ -232,6 +233,18 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, ns,
 		)
 		fmt.Printf("conductor agent: cluster=%q pack receipt drift loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// RBACProfile pull loop — GET conductor-tenant RBACProfile from seam-tenant-{clusterRef}
+		// on the management cluster and SSA-patch into ont-system on this cluster.
+		// Delivers the Conductor RBAC identity declaration to the target cluster.
+		// Decision C, CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION.
+		mgmtTenantNS := "seam-tenant-" + execCtx.ClusterRef
+		rbacProfilePullLoop = agent.NewRBACProfilePullLoop(
+			mgmtDynamicClient, dynamicClient,
+			execCtx.ClusterRef, mgmtTenantNS, ns,
+		)
+		fmt.Printf("conductor agent: cluster=%q rbacprofile pull loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
 	}
 
@@ -358,7 +371,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, driftSignalHandler, dynamicClient)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, driftSignalHandler, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -386,6 +399,7 @@ func onLeaderStart(
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
 	packReceiptDriftLoop *agent.PackReceiptDriftLoop,
+	rbacProfilePullLoop *agent.RBACProfilePullLoop,
 	driftSignalHandler *agent.DriftSignalHandler,
 	dynamicClient dynamic.Interface,
 ) {
@@ -452,6 +466,14 @@ func onLeaderStart(
 	// to management cluster on drift detection. conductor-schema.md §7.9, Decision H.
 	if packReceiptDriftLoop != nil {
 		go packReceiptDriftLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start RBACProfile pull loop (target clusters only).
+	// Pulls conductor-tenant RBACProfile from management seam-tenant-{cluster} and
+	// SSA-patches into ont-system on this cluster. Decision C,
+	// CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION.
+	if rbacProfilePullLoop != nil {
+		go rbacProfilePullLoop.Run(leaderCtx, reconcileInterval)
 	}
 
 	// Start DriftSignal handler (management cluster only).
