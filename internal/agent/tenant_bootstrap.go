@@ -272,7 +272,7 @@ func (s *TenantBootstrapSweep) sweepNamespace(ctx context.Context, ns string) er
 		if role.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		fmt.Printf("tenant bootstrap sweep: observed unowned Role %s/%s\n", ns, role.Name)
+		// Unowned Roles are audited but not annotated by the sweep. No action.
 	}
 
 	rbs, err := s.KubeClient.RbacV1().RoleBindings(ns).List(ctx, metav1.ListOptions{})
@@ -283,7 +283,7 @@ func (s *TenantBootstrapSweep) sweepNamespace(ctx context.Context, ns string) er
 		if rb.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		fmt.Printf("tenant bootstrap sweep: observed unowned RoleBinding %s/%s\n", ns, rb.Name)
+		// Unowned RoleBindings are audited but not annotated by the sweep. No action.
 	}
 
 	sas, err := s.KubeClient.CoreV1().ServiceAccounts(ns).List(ctx, metav1.ListOptions{})
@@ -318,7 +318,7 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 		if cr.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		fmt.Printf("tenant bootstrap sweep: observed unowned ClusterRole %s\n", cr.Name)
+		// Unowned ClusterRoles are audited but not annotated by the sweep. No action.
 	}
 
 	crbs, err := s.KubeClient.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
@@ -332,7 +332,7 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 		if crb.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		fmt.Printf("tenant bootstrap sweep: observed unowned ClusterRoleBinding %s\n", crb.Name)
+		// Unowned ClusterRoleBindings are audited but not annotated by the sweep. No action.
 	}
 
 	return nil

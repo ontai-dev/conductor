@@ -102,18 +102,22 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		publisher = agent.NewCapabilityPublisher(dynamicClient, ns)
 	}
 
-	// Construct the receipt reconciler. When SIGNING_PUBLIC_KEY_PATH is set,
-	// use the mounted Ed25519 public key for INV-026 signature enforcement.
-	// When absent, operate in bootstrap window mode (INV-020).
+	// Construct the receipt reconciler (management cluster only). On tenant clusters
+	// the PackInstancePullLoop and SnapshotPullLoop own their respective receipt
+	// lifecycles; running the reconciler there produces spurious "unknown field"
+	// API server warnings because the reconciler uses annotation-based signature
+	// fields that predate the pull-loop status field conventions.
 	var reconciler *agent.ReceiptReconciler
-	if keyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); keyPath != "" {
-		var err error
-		reconciler, err = agent.NewReceiptReconcilerWithKey(dynamicClient, ns, keyPath)
-		if err != nil {
-			return fmt.Errorf("conductor agent: build receipt reconciler with signing key: %w", err)
+	if role == RoleManagement {
+		if keyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); keyPath != "" {
+			var err error
+			reconciler, err = agent.NewReceiptReconcilerWithKey(dynamicClient, ns, keyPath)
+			if err != nil {
+				return fmt.Errorf("conductor agent: build receipt reconciler with signing key: %w", err)
+			}
+		} else {
+			reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
 		}
-	} else {
-		reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
 	}
 
 	// Construct the signing loop (management cluster only). When
@@ -411,23 +415,26 @@ func onLeaderStart(
 	const reconcileInterval = 30 * time.Second
 	const signingInterval = 30 * time.Second
 
-	// Start receipt reconciliation loop as a goroutine.
+	// Start receipt reconciliation loop as a goroutine (management cluster only).
+	// reconciler is nil for tenant clusters — see construction gate above.
 	// conductor-schema.md §10 step 4, conductor-design.md §2.10.
-	go func() {
-		ticker := time.NewTicker(reconcileInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				if err := reconciler.Reconcile(leaderCtx); err != nil {
-					fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
-						clusterRef, err)
+	if reconciler != nil {
+		go func() {
+			ticker := time.NewTicker(reconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-leaderCtx.Done():
+					return
+				case <-ticker.C:
+					if err := reconciler.Reconcile(leaderCtx); err != nil {
+						fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
+							clusterRef, err)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// Start signing loop (management cluster only).
 	// conductor-schema.md §10 steps 9–10. INV-026.
