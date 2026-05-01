@@ -178,7 +178,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	if rbacDigest != "" {
 		// Pass the base registry URL (without digest suffix) so executeSplitPath
 		// can construct correct layer refs: baseURL@{rbac,clusterScoped,workload}Digest.
-		return h.executeSplitPath(ctx, params, now, clusterPackName, registryBaseURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature, executionStages)
+		return h.executeSplitPath(ctx, params, now, clusterPackName, clusterPackVersion, registryBaseURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature, executionStages)
 	}
 
 	// Step 1 — Fetch manifests from OCI registry.
@@ -309,11 +309,13 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 				fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 		}
 		return runnerlib.OperationResultSpec{
-			Capability:  runnerlib.CapabilityPackDeploy,
-			Status:      runnerlib.ResultSucceeded,
-			StartedAt:   now,
-			CompletedAt: time.Now().UTC(),
-			Artifacts:   artifacts,
+			Capability:         runnerlib.CapabilityPackDeploy,
+			Status:             runnerlib.ResultSucceeded,
+			StartedAt:          now,
+			CompletedAt:        time.Now().UTC(),
+			Artifacts:          artifacts,
+			ClusterPackRef:     clusterPackName,
+			ClusterPackVersion: clusterPackVersion,
 			Steps: []runnerlib.StepResult{
 				pullStep,
 				preflightStep,
@@ -413,12 +415,14 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 			fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 	}
 	return runnerlib.OperationResultSpec{
-		Capability:  runnerlib.CapabilityPackDeploy,
-		Status:      runnerlib.ResultSucceeded,
-		StartedAt:   now,
-		CompletedAt: time.Now().UTC(),
-		Artifacts:   artifacts,
-		Steps:       stageSteps,
+		Capability:         runnerlib.CapabilityPackDeploy,
+		Status:             runnerlib.ResultSucceeded,
+		StartedAt:          now,
+		CompletedAt:        time.Now().UTC(),
+		Artifacts:          artifacts,
+		Steps:              stageSteps,
+		ClusterPackRef:     clusterPackName,
+		ClusterPackVersion: clusterPackVersion,
 	}, nil
 }
 
@@ -447,7 +451,7 @@ func (h *packDeployHandler) executeSplitPath(
 	ctx context.Context,
 	params ExecuteParams,
 	now time.Time,
-	componentName, registryURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature string,
+	componentName, clusterPackVersion, registryURL, workloadDigest, rbacDigest, clusterScopedDigest, expectedChecksum, packSignature string,
 	executionStages []string,
 ) (runnerlib.OperationResultSpec, error) {
 	if params.GuardianClient == nil {
@@ -834,13 +838,17 @@ func (h *packDeployHandler) executeSplitPath(
 	}
 
 	return runnerlib.OperationResultSpec{
-		Capability:        runnerlib.CapabilityPackDeploy,
-		Status:            runnerlib.ResultSucceeded,
-		StartedAt:         now,
-		CompletedAt:       time.Now().UTC(),
-		Artifacts:         artifacts,
-		Steps:             finalSteps,
-		DeployedResources: deployedResources,
+		Capability:         runnerlib.CapabilityPackDeploy,
+		Status:             runnerlib.ResultSucceeded,
+		StartedAt:          now,
+		CompletedAt:        time.Now().UTC(),
+		Artifacts:          artifacts,
+		Steps:              finalSteps,
+		DeployedResources:  deployedResources,
+		ClusterPackRef:     componentName,
+		ClusterPackVersion: clusterPackVersion,
+		RBACDigest:         rbacDigest,
+		WorkloadDigest:     workloadDigest,
 	}, nil
 }
 

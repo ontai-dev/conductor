@@ -22,6 +22,12 @@ import (
 // this label for list queries.
 const labelPackExecution = "ontai.dev/pack-execution"
 
+// labelClusterPack is the label key used to group PackOperationResult CRs by
+// the ClusterPack they belong to. Used by the wrapper rollback handler to find
+// the current POR for a given ClusterPack without knowing the PackExecution ref.
+// seam-core-schema.md §7.8.
+const labelClusterPack = "ontai.dev/cluster-pack"
+
 // OperationResultWriter writes an OperationResultSpec to a named
 // PackOperationResult CR. This is the output channel between Conductor
 // execute-mode Jobs and the wrapper operator.
@@ -96,6 +102,15 @@ func (w *kubeOperationResultWriter) WriteResult(
 	spec.Revision = newRevision
 	spec.PreviousRevisionRef = prevRef
 
+	// Copy rollback anchor fields from predecessor before it is deleted.
+	// This embeds the N-1 state in the N POR so one-step rollback works without
+	// retaining superseded POR objects. seam-core-schema.md §7.8.
+	if prev != nil {
+		spec.PreviousClusterPackVersion = prev.Spec.ClusterPackVersion
+		spec.PreviousRBACDigest = prev.Spec.RBACDigest
+		spec.PreviousWorkloadDigest = prev.Spec.WorkloadDigest
+	}
+
 	// Set ownerReference to the PackExecution so Kubernetes GC deletes this POR
 	// when the PE is deleted, preventing stale PORs from surviving a redeploy.
 	// If the PE is already gone (late-arriving result), skip the ownerRef.
@@ -112,11 +127,16 @@ func (w *kubeOperationResultWriter) WriteResult(
 		}}
 	}
 
+	labels := map[string]string{labelPackExecution: packExecutionRef}
+	if result.ClusterPackRef != "" {
+		labels[labelClusterPack] = result.ClusterPackRef
+	}
+
 	por := &seamv1alpha1.PackOperationResult{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       namespace,
 			Name:            newName,
-			Labels:          map[string]string{labelPackExecution: packExecutionRef},
+			Labels:          labels,
 			OwnerReferences: ownerRefs,
 		},
 		Spec: spec,
@@ -152,11 +172,15 @@ func buildPackOperationResultSpec(
 	packExecutionRef, clusterRef string,
 ) seamv1alpha1.PackOperationResultSpec {
 	spec := seamv1alpha1.PackOperationResultSpec{
-		PackExecutionRef: packExecutionRef,
-		TargetClusterRef: clusterRef,
-		Capability:       result.Capability,
-		Phase:            result.Phase,
-		Status:           seamv1alpha1.PackResultStatus(result.Status),
+		PackExecutionRef:   packExecutionRef,
+		ClusterPackRef:     result.ClusterPackRef,
+		TargetClusterRef:   clusterRef,
+		Capability:         result.Capability,
+		Phase:              result.Phase,
+		Status:             seamv1alpha1.PackResultStatus(result.Status),
+		ClusterPackVersion: result.ClusterPackVersion,
+		RBACDigest:         result.RBACDigest,
+		WorkloadDigest:     result.WorkloadDigest,
 	}
 
 	if !result.StartedAt.IsZero() {

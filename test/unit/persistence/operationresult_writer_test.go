@@ -164,6 +164,101 @@ func TestOperationResultWriter_PredecessorDumpLogged(t *testing.T) {
 	}
 }
 
+// TestOperationResultWriter_ClusterPackLabelSet verifies that the ontai.dev/cluster-pack
+// label is set on the POR when ClusterPackRef is populated in the result.
+func TestOperationResultWriter_ClusterPackLabelSet(t *testing.T) {
+	scheme := buildTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	writer := persistence.NewKubeOperationResultWriter(fakeClient, "ccs-dev")
+
+	result := runnerlib.OperationResultSpec{
+		Capability:     "pack-deploy",
+		Status:         runnerlib.ResultSucceeded,
+		ClusterPackRef: "nginx-ccs-dev",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "nginx-ccs-dev-ccs-dev", result); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+
+	por := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-ccs-dev", Name: "pack-deploy-result-nginx-ccs-dev-ccs-dev-r1"},
+		por); err != nil {
+		t.Fatalf("POR not found: %v", err)
+	}
+	if got := por.Labels["ontai.dev/cluster-pack"]; got != "nginx-ccs-dev" {
+		t.Errorf("label ontai.dev/cluster-pack=%q, want nginx-ccs-dev", got)
+	}
+	if por.Spec.ClusterPackRef != "nginx-ccs-dev" {
+		t.Errorf("ClusterPackRef=%q, want nginx-ccs-dev", por.Spec.ClusterPackRef)
+	}
+}
+
+// TestOperationResultWriter_PreviousStateEmbedded verifies that the second POR write
+// copies the predecessor's ClusterPackVersion/RBACDigest/WorkloadDigest into the new
+// POR's Previous* fields before deleting the predecessor. This is the rollback anchor.
+// seam-core-schema.md §7.8, wrapper-schema.md §6.2.
+func TestOperationResultWriter_PreviousStateEmbedded(t *testing.T) {
+	scheme := buildTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	writer := persistence.NewKubeOperationResultWriter(fakeClient, "ccs-dev")
+
+	// First deploy: version v1 with known digests.
+	first := runnerlib.OperationResultSpec{
+		Capability:         "pack-deploy",
+		Status:             runnerlib.ResultSucceeded,
+		ClusterPackRef:     "nginx-ccs-dev",
+		ClusterPackVersion: "v4.9.0-r1",
+		RBACDigest:         "sha256:aaaa",
+		WorkloadDigest:     "sha256:bbbb",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "pe-rollback", first); err != nil {
+		t.Fatalf("first WriteResult: %v", err)
+	}
+
+	// Second deploy: version v2 supersedes v1.
+	second := runnerlib.OperationResultSpec{
+		Capability:         "pack-deploy",
+		Status:             runnerlib.ResultSucceeded,
+		ClusterPackRef:     "nginx-ccs-dev",
+		ClusterPackVersion: "v4.10.0-r1",
+		RBACDigest:         "sha256:cccc",
+		WorkloadDigest:     "sha256:dddd",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "pe-rollback", second); err != nil {
+		t.Fatalf("second WriteResult: %v", err)
+	}
+
+	r2 := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-ccs-dev", Name: "pack-deploy-result-pe-rollback-r2"},
+		r2); err != nil {
+		t.Fatalf("revision 2 POR not found: %v", err)
+	}
+
+	// Current revision fields must reflect the second deploy.
+	if r2.Spec.ClusterPackVersion != "v4.10.0-r1" {
+		t.Errorf("ClusterPackVersion=%q, want v4.10.0-r1", r2.Spec.ClusterPackVersion)
+	}
+	if r2.Spec.RBACDigest != "sha256:cccc" {
+		t.Errorf("RBACDigest=%q, want sha256:cccc", r2.Spec.RBACDigest)
+	}
+	if r2.Spec.WorkloadDigest != "sha256:dddd" {
+		t.Errorf("WorkloadDigest=%q, want sha256:dddd", r2.Spec.WorkloadDigest)
+	}
+
+	// Previous fields must reflect the first deploy (rollback anchors).
+	if r2.Spec.PreviousClusterPackVersion != "v4.9.0-r1" {
+		t.Errorf("PreviousClusterPackVersion=%q, want v4.9.0-r1", r2.Spec.PreviousClusterPackVersion)
+	}
+	if r2.Spec.PreviousRBACDigest != "sha256:aaaa" {
+		t.Errorf("PreviousRBACDigest=%q, want sha256:aaaa", r2.Spec.PreviousRBACDigest)
+	}
+	if r2.Spec.PreviousWorkloadDigest != "sha256:bbbb" {
+		t.Errorf("PreviousWorkloadDigest=%q, want sha256:bbbb", r2.Spec.PreviousWorkloadDigest)
+	}
+}
+
 // TestNoopOperationResultWriter_WriteResultReturnsNil verifies the noop writer.
 func TestNoopOperationResultWriter_WriteResultReturnsNil(t *testing.T) {
 	var w persistence.NoopOperationResultWriter
