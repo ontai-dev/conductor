@@ -30,25 +30,26 @@ type packDeliveryMetadata struct {
 }
 
 // extractPackMetadataFromArtifact extracts chart provenance fields from a
-// PackInstance artifact JSON blob. The artifact is the full PackInstance CR
-// as produced by the management cluster. Chart fields are populated after T-07
-// adds them to PackInstanceSpec. Returns zero-value metadata on parse failure
-// (non-fatal: PackReceipt is still created without chart fields). T-10.
+// PackInstance artifact JSON blob. The signing loop serializes the PackInstance
+// spec directly (flat map), so fields are at the top level of the JSON object.
+// Older artifacts or full-CR blobs wrap them under a "spec" key. Both forms are
+// supported. Returns zero-value metadata on parse failure. T-10.
 func extractPackMetadataFromArtifact(artifactJSON []byte) (clusterPackRef string, meta packDeliveryMetadata) {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(artifactJSON, &obj); err != nil {
 		return "", packDeliveryMetadata{}
 	}
-	spec, _ := obj["spec"].(map[string]interface{})
-	if spec == nil {
-		return "", packDeliveryMetadata{}
+	// Try spec-wrapped form first (full PackInstance CR); fall back to flat form.
+	fields, _ := obj["spec"].(map[string]interface{})
+	if fields == nil {
+		fields = obj
 	}
-	clusterPackRef, _ = spec["clusterPackRef"].(string)
+	clusterPackRef, _ = fields["clusterPackRef"].(string)
 	return clusterPackRef, packDeliveryMetadata{
-		ChartVersion: stringField(spec, "chartVersion"),
-		ChartURL:     stringField(spec, "chartURL"),
-		ChartName:    stringField(spec, "chartName"),
-		HelmVersion:  stringField(spec, "helmVersion"),
+		ChartVersion: stringField(fields, "chartVersion"),
+		ChartURL:     stringField(fields, "chartURL"),
+		ChartName:    stringField(fields, "chartName"),
+		HelmVersion:  stringField(fields, "helmVersion"),
 	}
 }
 
@@ -211,6 +212,24 @@ func (l *PackInstancePullLoop) pullOnce(ctx context.Context) {
 		// Extract chart metadata from the PackInstance artifact and look up
 		// OCI digest anchors from the referenced ClusterPack. T-10.
 		clusterPackRef, meta := extractPackMetadataFromArtifact(artifactJSON)
+
+		// Stale Secret cleanup: if the referenced ClusterPack no longer exists, this
+		// signing Secret is orphaned. Delete it so the pull loop stops re-processing
+		// it on every cycle. The PackReceiptDriftLoop handles tenant-side teardown.
+		if clusterPackRef != "" {
+			_, cpErr := l.mgmtClient.Resource(clusterPackGVR).Namespace(secretNS).Get(
+				ctx, clusterPackRef, metav1.GetOptions{},
+			)
+			if k8serrors.IsNotFound(cpErr) {
+				_ = l.mgmtClient.Resource(secretGVR).Namespace(secretNS).Delete(
+					ctx, secretName, metav1.DeleteOptions{},
+				)
+				fmt.Printf("packinstance pull loop: cluster=%q deleted orphaned Secret %s (ClusterPack %s gone)\n",
+					l.clusterName, secretName, clusterPackRef)
+				continue
+			}
+		}
+
 		meta.RBACDigest, meta.WorkloadDigest = l.readClusterPackDigests(ctx, secretNS, clusterPackRef)
 
 		// Create or update the local PackReceipt.

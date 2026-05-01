@@ -121,6 +121,29 @@ func (l *PackReceiptDriftLoop) runOnce(ctx context.Context) {
 		spec, _, _ := unstructuredNestedMap(item.Object, "spec")
 		receiptName := item.GetName()
 
+		// Orphan check: if the referenced ClusterPack no longer exists on the management
+		// cluster, tear down all deployed resources and delete this PackReceipt. The
+		// conductor owns cleanup of its cluster's resources when the governance record is
+		// revoked. Decision H, conductor-schema.md §7.9.
+		clusterPackRef, _ := spec["clusterPackRef"].(string)
+		if clusterPackRef != "" {
+			_, cpErr := l.mgmtClient.Resource(clusterPackMgmtGVR).Namespace(l.mgmtTenantNS).Get(
+				ctx, clusterPackRef, metav1.GetOptions{},
+			)
+			if k8serrors.IsNotFound(cpErr) {
+				fmt.Printf("drift loop: cluster=%q receipt=%q ClusterPack %q deleted — orphan teardown\n",
+					l.clusterName, receiptName, clusterPackRef)
+				l.teardownOrphanedReceipt(ctx, spec, receiptName)
+				continue
+			}
+			if cpErr != nil {
+				// Transient connectivity error — do not tear down; retry next cycle.
+				fmt.Printf("drift loop: cluster=%q receipt=%q get ClusterPack %q: %v\n",
+					l.clusterName, receiptName, clusterPackRef, cpErr)
+				continue
+			}
+		}
+
 		sigVerified, _ := spec["signatureVerified"].(bool)
 		if !sigVerified {
 			if err := l.verifyAndPatch(ctx, item.Object, spec, receiptName); err != nil {
@@ -147,6 +170,94 @@ func (l *PackReceiptDriftLoop) runOnce(ctx context.Context) {
 		if !l.checkDrift(ctx, spec, receiptName) {
 			l.resolveSignalIfHealthy(ctx, receiptName)
 		}
+	}
+}
+
+// teardownOrphanedReceipt is called when the ClusterPack referenced by a PackReceipt
+// no longer exists on the management cluster. It deletes:
+//  1. All cluster-scoped resources listed in spec.deployedResources.
+//  2. All namespaces that housed namespace-scoped deployedResources (cascade-deletes
+//     everything inside them without needing to enumerate each resource individually).
+//  3. The PackReceipt itself.
+//  4. Any associated DriftSignal on the management cluster.
+//
+// Decision H, conductor-schema.md §7.9.
+func (l *PackReceiptDriftLoop) teardownOrphanedReceipt(ctx context.Context, spec map[string]interface{}, receiptName string) {
+	rawItems, _ := spec["deployedResources"].([]interface{})
+
+	// Collect unique pack-owned namespaces (non-empty namespace field) and
+	// cluster-scoped resources (empty namespace field) from deployed resources.
+	packNamespaces := map[string]struct{}{}
+	type clusterScopedResource struct {
+		apiVersion, kind, name string
+	}
+	var clusterScoped []clusterScopedResource
+
+	for _, raw := range rawItems {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ns, _ := item["namespace"].(string)
+		apiVersion, _ := item["apiVersion"].(string)
+		kind, _ := item["kind"].(string)
+		name, _ := item["name"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			continue
+		}
+		if ns != "" {
+			packNamespaces[ns] = struct{}{}
+		} else {
+			clusterScoped = append(clusterScoped, clusterScopedResource{apiVersion, kind, name})
+		}
+	}
+
+	// Delete cluster-scoped resources (ClusterRole, ClusterRoleBinding, IngressClass, etc.).
+	for _, r := range clusterScoped {
+		gvr, err := gvrFromAPIVersionKind(r.apiVersion, r.kind)
+		if err != nil {
+			fmt.Printf("drift loop: cluster=%q orphan teardown: GVR for %s/%s: %v\n",
+				l.clusterName, r.apiVersion, r.kind, err)
+			continue
+		}
+		if delErr := l.localClient.Resource(gvr).Delete(ctx, r.name, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			fmt.Printf("drift loop: cluster=%q orphan teardown: delete %s %s: %v\n",
+				l.clusterName, r.kind, r.name, delErr)
+		} else {
+			fmt.Printf("drift loop: cluster=%q orphan teardown: deleted %s %s\n",
+				l.clusterName, r.kind, r.name)
+		}
+	}
+
+	// Delete each pack-owned namespace. This cascade-deletes all namespace-scoped
+	// resources (Deployments, Services, ConfigMaps, etc.) without enumerating them.
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	for ns := range packNamespaces {
+		if delErr := l.localClient.Resource(nsGVR).Delete(ctx, ns, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			fmt.Printf("drift loop: cluster=%q orphan teardown: delete namespace %s: %v\n",
+				l.clusterName, ns, delErr)
+		} else {
+			fmt.Printf("drift loop: cluster=%q orphan teardown: deleted namespace %s\n",
+				l.clusterName, ns)
+		}
+	}
+
+	if delErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Delete(
+		ctx, receiptName, metav1.DeleteOptions{},
+	); delErr != nil && !k8serrors.IsNotFound(delErr) {
+		fmt.Printf("drift loop: cluster=%q orphan teardown: delete PackReceipt %s: %v\n",
+			l.clusterName, receiptName, delErr)
+	} else {
+		fmt.Printf("drift loop: cluster=%q orphan teardown: deleted PackReceipt %s\n",
+			l.clusterName, receiptName)
+	}
+
+	signalName := "drift-" + receiptName
+	if delErr := l.mgmtClient.Resource(driftSignalGVR).Namespace(l.mgmtTenantNS).Delete(
+		ctx, signalName, metav1.DeleteOptions{},
+	); delErr != nil && !k8serrors.IsNotFound(delErr) {
+		fmt.Printf("drift loop: cluster=%q orphan teardown: delete DriftSignal %s: %v\n",
+			l.clusterName, signalName, delErr)
 	}
 }
 

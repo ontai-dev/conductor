@@ -95,8 +95,9 @@ func setupDriftLoopScheme() *runtime.Scheme {
 func TestPackReceiptDriftLoop_BootstrapWindow_AcceptsWithoutKey(t *testing.T) {
 	scheme := setupDriftLoopScheme()
 	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", false, nil)
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -211,8 +212,9 @@ func TestPackReceiptDriftLoop_DriftDetected_EmitsDriftSignal(t *testing.T) {
 	}
 	// Receipt already verified, resource NOT present in local cluster.
 	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -251,8 +253,9 @@ func TestPackReceiptDriftLoop_NoDrift_NoSignal(t *testing.T) {
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
 	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt, deploy)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -296,8 +299,9 @@ func TestPackReceiptDriftLoop_EscalationThreshold_StopsEmitting(t *testing.T) {
 			},
 		},
 	}
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -342,9 +346,10 @@ func TestPackReceiptDriftLoop_DriftPersistsQueued_IncrementsCounter(t *testing.T
 			},
 		},
 	}
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	// Deployment is NOT present — drift persists.
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -404,8 +409,9 @@ func TestPackReceiptDriftLoop_DriftResolved_ConfirmsSignal(t *testing.T) {
 			},
 		},
 	}
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt, deploy)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, existing, cp)
 
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
@@ -419,6 +425,91 @@ func TestPackReceiptDriftLoop_DriftResolved_ConfirmsSignal(t *testing.T) {
 	spec, _, _ := unstructuredNestedMap(updated.Object, "spec")
 	if state, _ := spec["state"].(string); state != "confirmed" {
 		t.Errorf("expected state=confirmed after drift resolved, got %q", state)
+	}
+}
+
+// TestPackReceiptDriftLoop_OrphanReceipt_TearsDownResources verifies that when the
+// ClusterPack referenced by a PackReceipt no longer exists on the management cluster,
+// the drift loop deletes all deployedResources from the local cluster (including
+// namespaces that housed namespace-scoped resources), deletes the PackReceipt,
+// and deletes any associated DriftSignal. Decision H.
+func TestPackReceiptDriftLoop_OrphanReceipt_TearsDownResources(t *testing.T) {
+	scheme := setupDriftLoopScheme()
+	// Register Namespace and ClusterRole kinds in the scheme so the fake client can store them.
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"}, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "NamespaceList"}, &unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"}, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleList"}, &unstructured.UnstructuredList{})
+
+	// Namespace object exists on local cluster.
+	ns := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1", "kind": "Namespace",
+			"metadata": map[string]interface{}{"name": "ingress-nginx", "resourceVersion": "1"},
+		},
+	}
+	// ClusterRole is cluster-scoped.
+	cr := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+			"metadata": map[string]interface{}{"name": "ingress-nginx", "resourceVersion": "1"},
+		},
+	}
+	resources := []map[string]interface{}{
+		// Namespace-scoped resource — should trigger namespace deletion.
+		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
+		// Cluster-scoped resource — should be deleted individually.
+		{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "name": "ingress-nginx"},
+	}
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+
+	// Pre-existing DriftSignal that should also be deleted.
+	signal := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1", "kind": "DriftSignal",
+			"metadata": map[string]interface{}{
+				"name": "drift-nginx-ccs-dev", "namespace": "seam-tenant-ccs-dev",
+				"resourceVersion": "1",
+			},
+			"spec": map[string]interface{}{"state": "pending"},
+		},
+	}
+
+	// mgmtClient has NO ClusterPack — simulates deletion.
+	localClient := fake.NewSimpleDynamicClient(scheme, receipt, ns, cr)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, signal)
+
+	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
+	loop.runOnce(context.Background())
+
+	// PackReceipt must be deleted from local cluster.
+	_, getErr := localClient.Resource(packReceiptGVR).Namespace("ont-system").Get(
+		context.Background(), "nginx-ccs-dev", metav1.GetOptions{},
+	)
+	if !k8serrors.IsNotFound(getErr) {
+		t.Errorf("expected PackReceipt to be deleted, got: %v", getErr)
+	}
+
+	// The namespace must be deleted (cascade deletes namespace-scoped resources).
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	_, nsErr := localClient.Resource(nsGVR).Get(context.Background(), "ingress-nginx", metav1.GetOptions{})
+	if !k8serrors.IsNotFound(nsErr) {
+		t.Errorf("expected namespace ingress-nginx to be deleted, got: %v", nsErr)
+	}
+
+	// The cluster-scoped ClusterRole must be deleted individually.
+	crGVR := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}
+	_, crErr := localClient.Resource(crGVR).Get(context.Background(), "ingress-nginx", metav1.GetOptions{})
+	if !k8serrors.IsNotFound(crErr) {
+		t.Errorf("expected ClusterRole ingress-nginx to be deleted, got: %v", crErr)
+	}
+
+	// DriftSignal must be deleted from management cluster.
+	_, signalErr := mgmtClient.Resource(driftSignalGVR).Namespace("seam-tenant-ccs-dev").Get(
+		context.Background(), "drift-nginx-ccs-dev", metav1.GetOptions{},
+	)
+	if !k8serrors.IsNotFound(signalErr) {
+		t.Errorf("expected DriftSignal to be deleted, got: %v", signalErr)
 	}
 }
 
