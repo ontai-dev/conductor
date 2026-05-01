@@ -21,13 +21,18 @@ import (
 // fields that are written into PackReceipt.spec when a PackInstance is acknowledged.
 // All fields are optional: absent for kustomize and raw category packs (chart
 // fields) or for pre-split ClusterPack artifacts (digest fields). T-10.
+//
+// DeployedResources carries the resource inventory from the PackInstance artifact.
+// Written to PackReceipt.spec.deployedResources to enable version-upgrade orphan
+// cleanup (CLUSTERPACK-BL-VERSION-CLEANUP).
 type packDeliveryMetadata struct {
-	RBACDigest     string
-	WorkloadDigest string
-	ChartVersion   string
-	ChartURL       string
-	ChartName      string
-	HelmVersion    string
+	RBACDigest        string
+	WorkloadDigest    string
+	ChartVersion      string
+	ChartURL          string
+	ChartName         string
+	HelmVersion       string
+	DeployedResources []map[string]interface{} // from PackInstance spec.deployedResources
 }
 
 // extractPackMetadataFromArtifact extracts chart provenance fields from a
@@ -46,11 +51,24 @@ func extractPackMetadataFromArtifact(artifactJSON []byte) (clusterPackRef string
 		fields = obj
 	}
 	clusterPackRef, _ = fields["clusterPackRef"].(string)
+
+	// Extract deployedResources for version-upgrade orphan cleanup.
+	// CLUSTERPACK-BL-VERSION-CLEANUP.
+	var deployedResources []map[string]interface{}
+	if rawDR, ok := fields["deployedResources"].([]interface{}); ok {
+		for _, raw := range rawDR {
+			if m, ok := raw.(map[string]interface{}); ok {
+				deployedResources = append(deployedResources, m)
+			}
+		}
+	}
+
 	return clusterPackRef, packDeliveryMetadata{
-		ChartVersion: stringField(fields, "chartVersion"),
-		ChartURL:     stringField(fields, "chartURL"),
-		ChartName:    stringField(fields, "chartName"),
-		HelmVersion:  stringField(fields, "helmVersion"),
+		ChartVersion:      stringField(fields, "chartVersion"),
+		ChartURL:          stringField(fields, "chartURL"),
+		ChartName:         stringField(fields, "chartName"),
+		HelmVersion:       stringField(fields, "helmVersion"),
+		DeployedResources: deployedResources,
 	}
 }
 
@@ -293,6 +311,15 @@ func buildReceiptSpecPayload(packInstanceName, signatureRef, clusterPackRef, tar
 	if meta.HelmVersion != "" {
 		payload["helmVersion"] = meta.HelmVersion
 	}
+	if len(meta.DeployedResources) > 0 {
+		// Convert []map[string]interface{} to []interface{} so that unstructured
+		// deep copy (which only handles []interface{}) does not panic on Update.
+		drs := make([]interface{}, len(meta.DeployedResources))
+		for i, r := range meta.DeployedResources {
+			drs[i] = r
+		}
+		payload["deployedResources"] = drs
+	}
 	return payload
 }
 
@@ -364,6 +391,24 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		if existingVerified == verified && existingSig == sigB64 {
 			return // status unchanged — skip the subresource patch. Gap 28 idempotency.
 		}
+
+		// Signature changed — new version arrived. Delete resources present in the
+		// previous PackReceipt that are absent from the new deployedResources list
+		// before writing the updated spec. CLUSTERPACK-BL-VERSION-CLEANUP.
+		if len(meta.DeployedResources) > 0 {
+			existingSpec, _, _ := unstructuredNestedMap(existing.Object, "spec")
+			l.deleteOrphanedResources(ctx, existingSpec, meta.DeployedResources)
+		}
+
+		// Update spec with the new deliveredResources inventory.
+		existing.Object["spec"] = specPayload
+		if _, updateErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Update(
+			ctx, existing, metav1.UpdateOptions{},
+		); updateErr != nil {
+			fmt.Printf("packinstance pull loop: cluster=%q update PackReceipt %q spec: %v\n",
+				l.clusterName, receiptName, updateErr)
+		}
+
 		fmt.Printf("packinstance pull loop: cluster=%q updated PackReceipt %q verified=%v\n",
 			l.clusterName, receiptName, verified)
 	}
@@ -378,4 +423,71 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		fmt.Printf("packinstance pull loop: cluster=%q patch PackReceipt %q status: %v\n",
 			l.clusterName, receiptName, pErr)
 	}
+}
+
+// deleteOrphanedResources deletes resources that were present in the previous
+// PackReceipt spec.deployedResources but are absent from the incoming newDRs list.
+// Called on version upgrade when a new PackInstance signature arrives.
+// CLUSTERPACK-BL-VERSION-CLEANUP.
+func (l *PackInstancePullLoop) deleteOrphanedResources(ctx context.Context, oldSpec map[string]interface{}, newDRs []map[string]interface{}) {
+	newSet := make(map[string]struct{}, len(newDRs))
+	for _, r := range newDRs {
+		if k := deployedResourceKey(r); k != "" {
+			newSet[k] = struct{}{}
+		}
+	}
+
+	rawOld, _ := oldSpec["deployedResources"].([]interface{})
+	for _, raw := range rawOld {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		k := deployedResourceKey(item)
+		if k == "" {
+			continue
+		}
+		if _, stillPresent := newSet[k]; stillPresent {
+			continue
+		}
+
+		apiVersion, _ := item["apiVersion"].(string)
+		kind, _ := item["kind"].(string)
+		name, _ := item["name"].(string)
+		ns, _ := item["namespace"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			continue
+		}
+
+		gvr, err := gvrFromAPIVersionKind(apiVersion, kind)
+		if err != nil {
+			fmt.Printf("packinstance pull loop: cluster=%q orphan cleanup: unknown GVR for %s/%s: %v\n",
+				l.clusterName, apiVersion, kind, err)
+			continue
+		}
+
+		var delErr error
+		if ns == "" {
+			delErr = l.localClient.Resource(gvr).Delete(ctx, name, metav1.DeleteOptions{})
+		} else {
+			delErr = l.localClient.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		}
+		if delErr != nil && !k8serrors.IsNotFound(delErr) {
+			fmt.Printf("packinstance pull loop: cluster=%q orphan cleanup: delete %s/%s %s/%s: %v\n",
+				l.clusterName, apiVersion, kind, ns, name, delErr)
+		}
+	}
+}
+
+// deployedResourceKey returns a canonical key for a deployed resource map entry.
+// Returns "" for entries missing required identity fields (apiVersion, kind, name).
+func deployedResourceKey(m map[string]interface{}) string {
+	apiVersion, _ := m["apiVersion"].(string)
+	kind, _ := m["kind"].(string)
+	name, _ := m["name"].(string)
+	ns, _ := m["namespace"].(string)
+	if apiVersion == "" || kind == "" || name == "" {
+		return ""
+	}
+	return apiVersion + "\x00" + kind + "\x00" + ns + "\x00" + name
 }
