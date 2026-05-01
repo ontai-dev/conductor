@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -210,9 +212,14 @@ func (l *SigningLoop) signPackInstances(ctx context.Context) {
 	}
 }
 
-// signPermissionSnapshots signs any PermissionSnapshot CRs that are missing
-// the management-signature annotation, then ensures status.signed=true on all
-// snapshots that carry the annotation. INV-026.
+// signPermissionSnapshots signs PermissionSnapshot CRs whose spec content has
+// changed since the last signing cycle, then ensures status.signed=true.
+//
+// Re-sign condition: the signature annotation is absent OR the stored spec hash
+// (managementSpecHashAnnotation) does not match sha256(json.Marshal(currentSpec)).
+// Guardian may legitimately update spec fields (e.g. freshAt) after the initial
+// sign; the content-hash guard detects those updates and triggers re-signing so
+// the tenant pull loop does not see a stale-signature verification failure. INV-026.
 func (l *SigningLoop) signPermissionSnapshots(ctx context.Context) {
 	list, err := l.client.Resource(permissionSnapshotGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -220,18 +227,25 @@ func (l *SigningLoop) signPermissionSnapshots(ctx context.Context) {
 	}
 
 	for _, item := range list.Items {
+		spec, _, _ := unstructuredNestedMap(item.Object, "spec")
+
+		// Marshal once; used for both signing and hashing.
+		message, err := json.Marshal(spec)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(message)
+		currentHash := hex.EncodeToString(sum[:])
+
 		annotations := item.GetAnnotations()
-		sigB64 := ""
+		var sigB64, storedHash string
 		if annotations != nil {
 			sigB64 = annotations[managementSignatureAnnotation]
+			storedHash = annotations[managementSpecHashAnnotation]
 		}
 
-		if sigB64 == "" {
-			spec, _, _ := unstructuredNestedMap(item.Object, "spec")
-			message, err := json.Marshal(spec)
-			if err != nil {
-				continue
-			}
+		// Re-sign when the signature is absent or the spec has changed.
+		if sigB64 == "" || storedHash != currentHash {
 			sig := ed25519.Sign(l.privKey, message)
 			sigB64 = base64.StdEncoding.EncodeToString(sig)
 
@@ -239,6 +253,7 @@ func (l *SigningLoop) signPermissionSnapshots(ctx context.Context) {
 				"metadata": map[string]interface{}{
 					"annotations": map[string]interface{}{
 						managementSignatureAnnotation: sigB64,
+						managementSpecHashAnnotation:  currentHash,
 					},
 				},
 			}
@@ -382,6 +397,19 @@ func (l *SigningLoop) storeSignedArtifactSecret(ctx context.Context, packInstanc
 		// Log-only — next cycle retries.
 		_ = err
 	}
+}
+
+// specContentHash returns the lowercase hex-encoded SHA-256 digest of
+// json.Marshal(spec). json.Marshal sorts map keys, so the output is
+// deterministic for the same logical spec content. Used to detect whether the
+// signed content has drifted from the current spec without re-signing.
+func specContentHash(spec map[string]interface{}) (string, error) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // signGVR lists all CRs of the given GVR and patches the given annotationKey
