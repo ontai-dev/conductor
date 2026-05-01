@@ -311,22 +311,13 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, mgmtFedAddr)
 	}
 
-	// Phase 3 — Tenant bootstrap sweep + RBAC enforcement gate (tenant clusters only).
-	// The gate starts in audit mode. TenantBootstrapSweep annotates all existing RBAC
-	// (audit phase) and creates component profiles, then sets the gate to strict.
-	// After that point the webhook rejects RBAC resources without ownership annotation.
-	// guardian-schema.md §3 Step 2, §6. CS-INV-001.
+	// Phase 3 — RBAC enforcement gate (tenant clusters only).
+	// Conductor starts in audit mode and stays there; Guardian role=tenant owns all
+	// security.ontai.dev provisioning and enforcement on the tenant cluster.
+	// guardian-schema.md §3, §6. CS-INV-001.
 	var enforcementGate *webhook.EnforcementGate
-	var tenantSweep *agent.TenantBootstrapSweep
 	if role == RoleTenant {
 		enforcementGate = webhook.NewEnforcementGate()
-		tenantSweep = &agent.TenantBootstrapSweep{
-			KubeClient:        client,
-			DynamicClient:     dynamicClient,
-			MgmtDynamicClient: mgmtDynamicClient,
-			ClusterName:       execCtx.ClusterRef,
-			Gate:              enforcementGate,
-		}
 	}
 
 	if WebhookEnabled(role) {
@@ -367,7 +358,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, driftSignalHandler, tenantSweep, dynamicClient)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, driftSignalHandler, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -396,7 +387,6 @@ func onLeaderStart(
 	packInstancePullLoop *agent.PackInstancePullLoop,
 	packReceiptDriftLoop *agent.PackReceiptDriftLoop,
 	driftSignalHandler *agent.DriftSignalHandler,
-	tenantSweep *agent.TenantBootstrapSweep,
 	dynamicClient dynamic.Interface,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
@@ -471,20 +461,10 @@ func onLeaderStart(
 		go driftSignalHandler.Run(leaderCtx, reconcileInterval)
 	}
 
-	// Start tenant bootstrap sweep (tenant clusters only).
-	// Phase 1 (audit): annotates all pre-existing RBAC with ownership annotations.
-	// Phase 2 (profile creation): creates component profiles in component namespaces.
-	// After both phases: sets enforcement gate to strict — webhook begins rejecting
-	// RBAC without ontai.dev/rbac-owner=guardian. Re-runs periodically to pick up
-	// newly deployed components. guardian-schema.md §3 Step 2, §6.
-	if tenantSweep != nil {
-		const sweepInterval = 5 * time.Minute
-		go tenantSweep.RunPeriodic(leaderCtx, sweepInterval)
-
-		// Mark the InfrastructureTalosCluster copy in ont-system as Ready=True.
-		// Conductor role=tenant sets this condition once leadership is established,
-		// signalling to the management cluster that the tenant conductor is operational.
-		// Retried in background so a transient API error does not block the leader loop.
+	// Mark InfrastructureTalosCluster Ready=True (tenant clusters only).
+	// snapshotPullLoop non-nil indicates role=tenant. Conductor signals readiness
+	// to management once leadership is established. guardian-schema.md §3.
+	if snapshotPullLoop != nil {
 		go func() {
 			if err := agent.SetTalosClusterReady(leaderCtx, dynamicClient, namespace, clusterRef); err != nil {
 				fmt.Printf("conductor agent: cluster=%q set TalosCluster Ready: %v\n", clusterRef, err)

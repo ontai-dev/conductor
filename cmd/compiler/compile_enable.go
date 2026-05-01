@@ -44,7 +44,9 @@
 //	    phase-meta.yaml
 //	    leaderelection.yaml     — Leader election Lease resources for all operators
 //
-// All output is deterministic: no timestamps, no random values.
+// Key generation: the management cluster signing key pair is generated fresh when
+// --signing-private-key is absent (non-deterministic). When --signing-private-key is
+// provided the output is deterministic for the same input key.
 // Conductor Deployment carries CONDUCTOR_ROLE=management per §15.
 //
 // conductor-schema.md §9 Step 3, §15 Role Declaration Contract.
@@ -287,6 +289,8 @@ func runEnableSubcommand(args []string) {
 	clusterRole := fs.String("cluster-role", "management", "Conductor role for this cluster (management or tenant). Defaults to management.")
 	dsnsIP := fs.String("dsns-ip", "", "DSNS LoadBalancer IP (lbipam.cilium.io/ips annotation on dsns-loadbalancer Service). Required for production deployments.")
 	mgmtSigningPublicKey := fs.String("management-signing-public-key", "", "Path to the management cluster's Ed25519 public key PEM file. Required when --cluster-role=tenant. INV-026.")
+	signingPrivateKey := fs.String("signing-private-key", "", "Path to an existing PKCS8 PEM Ed25519 private key for management cluster signing. Optional — generates a new key pair if absent. Must not be set when --cluster-role=tenant (INV-026). Use for rotation: provide the new private key, re-run tenant enables with the derived public key.")
+	outputPublicKey := fs.String("output-public-key", "", "Path to write the Ed25519 public key PEM derived from the management signing key (generated or loaded). Pass this file as --management-signing-public-key on subsequent tenant cluster enable runs.")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, enableHelp)
@@ -306,8 +310,16 @@ func runEnableSubcommand(args []string) {
 		fmt.Fprintln(os.Stderr, "compiler enable: --management-signing-public-key is required when --cluster-role=tenant (INV-026)")
 		os.Exit(1)
 	}
+	if *clusterRole == "tenant" && *signingPrivateKey != "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --signing-private-key must not be set for --cluster-role=tenant — tenant clusters hold only the management public key (INV-026)")
+		os.Exit(1)
+	}
+	if *clusterRole == "tenant" && *outputPublicKey != "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --output-public-key is only valid for --cluster-role=management")
+		os.Exit(1)
+	}
 
-	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole, *mgmtSigningPublicKey); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole, *mgmtSigningPublicKey, *signingPrivateKey, *outputPublicKey); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -331,7 +343,7 @@ func runEnableSubcommand(args []string) {
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole, mgmtSigningPublicKey string) error {
+func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey string) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
@@ -378,7 +390,7 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 			return fmt.Errorf("phase 3 platform-wrapper: %w", err)
 		}
 	}
-	if err := writePhase4Conductor(output, cdt, clusterRole, mgmtSigningPublicKey); err != nil {
+	if err := writePhase4Conductor(output, cdt, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
 	if clusterRole == "management" {
@@ -1605,7 +1617,7 @@ func writePlatformWrapperCRDs(dir string) error {
 
 // --- Phase 4: conductor ---
 
-func writePhase4Conductor(output string, cdt operatorSpec, clusterRole, mgmtSigningPublicKey string) error {
+func writePhase4Conductor(output string, cdt operatorSpec, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey string) error {
 	dir := filepath.Join(output, "04-conductor")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1676,7 +1688,7 @@ func writePhase4Conductor(output string, cdt operatorSpec, clusterRole, mgmtSign
 			return err
 		}
 	} else {
-		if err := writeConductorSigningKeySecret(dir); err != nil {
+		if err := writeConductorSigningKeySecret(dir, signingPrivateKey, outputPublicKey); err != nil {
 			return err
 		}
 	}
@@ -2921,15 +2933,49 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 	return os.WriteFile(filepath.Join(dir, "wrapper-runner.yaml"), buf.Bytes(), 0644)
 }
 
-// writeConductorSigningKeySecret generates a fresh Ed25519 signing key pair and
-// writes it as a Kubernetes Secret named conductor-signing-key in ont-system.
+// writeConductorSigningKeySecret generates (or loads) an Ed25519 signing key pair
+// and writes it as a Kubernetes Secret named conductor-signing-key in ont-system.
 // The Secret carries private.pem (PKCS8 PEM) and public.pem (PKIX PEM).
 // Emitted in phase 04 BEFORE conductor-deployment.yaml so the volume mount resolves.
+//
+// signingPrivateKeyPath: if non-empty, load an existing PKCS8 PEM private key from
+// this file instead of generating a new pair. Use for key rotation: provide the new
+// private key, then re-run tenant enables with the derived public key.
+//
+// outputPublicKeyPath: if non-empty, write the public key PEM to this file after
+// generation or load. Pass this file as --management-signing-public-key on all
+// tenant cluster enable runs. An empty value skips the output write.
+//
 // INV-026, conductor-schema.md §15 (signing key lifecycle).
-func writeConductorSigningKeySecret(dir string) error {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate Ed25519 signing key: %w", err)
+func writeConductorSigningKeySecret(dir, signingPrivateKeyPath, outputPublicKeyPath string) error {
+	var publicKey ed25519.PublicKey
+	var privateKey ed25519.PrivateKey
+
+	if signingPrivateKeyPath != "" {
+		keyPEM, err := os.ReadFile(signingPrivateKeyPath)
+		if err != nil {
+			return fmt.Errorf("read signing private key %s: %w", signingPrivateKeyPath, err)
+		}
+		block, _ := pem.Decode(keyPEM)
+		if block == nil {
+			return fmt.Errorf("signing private key %s: no PEM block found", signingPrivateKeyPath)
+		}
+		rawKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse PKCS8 private key %s: %w", signingPrivateKeyPath, err)
+		}
+		var ok bool
+		privateKey, ok = rawKey.(ed25519.PrivateKey)
+		if !ok {
+			return fmt.Errorf("signing private key %s is not an Ed25519 key (got %T)", signingPrivateKeyPath, rawKey)
+		}
+		publicKey = privateKey.Public().(ed25519.PublicKey)
+	} else {
+		var err error
+		publicKey, privateKey, err = ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generate Ed25519 signing key: %w", err)
+		}
 	}
 
 	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
@@ -2944,6 +2990,14 @@ func writeConductorSigningKeySecret(dir string) error {
 	}
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 
+	if outputPublicKeyPath != "" {
+		if err := os.WriteFile(outputPublicKeyPath, publicPEM, 0644); err != nil {
+			return fmt.Errorf("write public key to %s: %w", outputPublicKeyPath, err)
+		}
+		fmt.Printf("compiler enable: management public key written to %s\n", outputPublicKeyPath)
+		fmt.Printf("compiler enable: use --management-signing-public-key=%s for each tenant cluster enable\n", outputPublicKeyPath)
+	}
+
 	secret := corev1.Secret{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -2955,9 +3009,10 @@ func writeConductorSigningKeySecret(dir string) error {
 				"ontai.dev/managed-by":        "compiler",
 			},
 			Annotations: map[string]string{
-				// Human review: rotate this Secret via a new compiler enable run.
-				// The Conductor Deployment must be restarted after rotation.
-				"ontai.dev/rotate-via": "compiler enable",
+				// Rotate: compiler enable --signing-private-key=<new-key> --output-public-key=<pub-out>
+				// then re-run tenant enables with --management-signing-public-key=<pub-out>.
+				// Restart the Conductor Deployment on all clusters after rotation.
+				"ontai.dev/rotate-via": "compiler enable --signing-private-key=<path> --output-public-key=<path>",
 			},
 		},
 		StringData: map[string]string{

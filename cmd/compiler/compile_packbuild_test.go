@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,5 +207,169 @@ registryUrl: registry.example.com/packs/foo
 	}
 	if !strings.Contains(err.Error(), "digest") {
 		t.Errorf("error %q does not mention 'digest'", err.Error())
+	}
+}
+
+// WS-RAW — RawSource packbuild unit tests.
+
+// TestRawCompilePackBuild_SplitsAndEmitsClusterPack verifies that rawCompilePackBuild
+// reads YAML from a directory, splits into layers, pushes to OCI, and emits a
+// ClusterPack CR with rbacDigest and workloadDigest populated.
+func TestRawCompilePackBuild_SplitsAndEmitsClusterPack(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const sampleYAML = `---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-sa
+  namespace: test-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: test-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: test
+        image: 10.20.0.1:5000/test:dev
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "manifests.yaml"), []byte(sampleYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	outDir := t.TempDir()
+	in := PackBuildInput{
+		Name:           "test-raw-pack",
+		Version:        "v0.1.0-r1",
+		RegistryURL:    ociHost + "/packs/test-raw-pack",
+		Namespace:      "seam-tenant-ccs-mgmt",
+		TargetClusters: []string{"ccs-mgmt"},
+		BasePackName:   "test-raw-pack",
+		RawSource:      &RawSource{Path: srcDir},
+	}
+
+	if err := rawCompilePackBuild(context.Background(), in, "", outDir); err != nil {
+		t.Fatalf("rawCompilePackBuild: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "test-raw-pack.yaml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"infrastructure.ontai.dev/v1alpha1",
+		"InfrastructureClusterPack",
+		"rbacDigest",
+		"workloadDigest",
+		"v0.1.0-r1",
+		"seam-tenant-ccs-mgmt",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("output YAML missing %q", want)
+		}
+	}
+}
+
+// TestRawCompilePackBuild_EmptyDirectoryFails verifies that a directory with no
+// YAML files returns a descriptive error.
+func TestRawCompilePackBuild_EmptyDirectoryFails(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	in := PackBuildInput{
+		Name:        "empty-pack",
+		Version:     "v0.1.0-r1",
+		RegistryURL: ociHost + "/packs/empty-pack",
+		Namespace:   "seam-system",
+		RawSource:   &RawSource{Path: t.TempDir()},
+	}
+
+	err := rawCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for empty directory; got nil")
+	}
+	if !strings.Contains(err.Error(), "no YAML files") {
+		t.Errorf("error %q does not mention 'no YAML files'", err.Error())
+	}
+}
+
+// TestRawCompilePackBuild_MissingPathFails verifies that an empty rawSource.path
+// returns a descriptive error.
+func TestRawCompilePackBuild_MissingPathFails(t *testing.T) {
+	in := PackBuildInput{
+		Name:        "path-missing-pack",
+		Version:     "v0.1.0-r1",
+		RegistryURL: "localhost:5000/packs/path-missing",
+		Namespace:   "seam-system",
+		RawSource:   &RawSource{Path: ""},
+	}
+
+	err := rawCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for missing path; got nil")
+	}
+	if !strings.Contains(err.Error(), "path") {
+		t.Errorf("error %q does not mention 'path'", err.Error())
+	}
+}
+
+// TestPackBuild_RawSourceDispatchesToRawCompile verifies that compilePackBuild
+// dispatches to rawCompilePackBuild when rawSource is set in the input file.
+func TestPackBuild_RawSourceDispatchesToRawCompile(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const cmYAML = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "cm.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	inputContent := fmt.Sprintf(`
+name: dispatch-raw-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/dispatch-raw-pack
+rawSource:
+  path: %s
+`, ociHost, srcDir)
+	inputPath := writePackBuildInput(t, inputContent)
+
+	outDir := t.TempDir()
+	if err := compilePackBuild(inputPath, outDir); err != nil {
+		t.Fatalf("compilePackBuild with rawSource: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "dispatch-raw-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR; not found")
 	}
 }

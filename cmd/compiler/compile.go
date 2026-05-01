@@ -564,6 +564,14 @@ type PackBuildInput struct {
 	// conductor-schema.md §9, wrapper-schema.md §4, INV-001.
 	// +optional
 	HelmSource *HelmSource `yaml:"helmSource,omitempty"`
+
+	// RawSource defines a directory of raw YAML manifest files for automated packbuild.
+	// When present, the compiler reads all .yaml/.yml files from the directory,
+	// splits them into RBAC, cluster-scoped, and workload OCI layers, and pushes
+	// them to the registry. Mutually exclusive with HelmSource.
+	// conductor-schema.md §9, wrapper-schema.md §4.
+	// +optional
+	RawSource *RawSource `yaml:"rawSource,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -608,6 +616,13 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.HelmSource != nil {
 		if in.RegistryURL == "" {
 			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when helmSource is set", path)
+		}
+		return in, nil
+	}
+	// rawSource path: registryUrl required, digests computed by compiler.
+	if in.RawSource != nil {
+		if in.RegistryURL == "" {
+			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when rawSource is set", path)
 		}
 		return in, nil
 	}
@@ -1214,8 +1229,8 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string, mo
 
 // compilePackBuild implements the packbuild subcommand.
 // Reads a PackBuildInput spec and emits a ClusterPack CR YAML.
-// When helmSource is present, dispatches to helmCompilePackBuild which
-// fetches, renders, and pushes the chart before emitting the CR.
+// When helmSource is present, dispatches to helmCompilePackBuild.
+// When rawSource is present, dispatches to rawCompilePackBuild.
 // conductor-schema.md §6 (pack-compile), wrapper-schema.md §3.
 func compilePackBuild(input, output string) error {
 	in, err := readPackBuildInput(input)
@@ -1226,6 +1241,11 @@ func compilePackBuild(input, output string) error {
 	if in.HelmSource != nil {
 		inputDir := filepath.Dir(input)
 		return helmCompilePackBuild(context.Background(), in, inputDir, output)
+	}
+
+	if in.RawSource != nil {
+		inputDir := filepath.Dir(input)
+		return rawCompilePackBuild(context.Background(), in, inputDir, output)
 	}
 
 	ns := in.Namespace

@@ -304,7 +304,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 				},
 			}, nil
 		}
-		if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
+		if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
 			return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 		}
@@ -410,7 +410,7 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 		})
 	}
 
-	if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
+	if err := writePackReceipt(ctx, tenantDynClient(params), clusterPackName, params.ClusterRef, rbacDigest, workloadDigest, manifestsToDeployedResources(allManifests)); err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("write PackReceipt for %s: %v", clusterPackName, err)), nil
 	}
@@ -892,7 +892,7 @@ func (h *packDeployHandler) executeSplitPath(
 	}
 	finalSteps = append(finalSteps, applyStep, readyStep)
 
-	if err := writePackReceipt(ctx, tenantDynClient(params), componentName, params.ClusterRef, packSignature, rbacDigest, workloadDigest, deployedResources); err != nil {
+	if err := writePackReceipt(ctx, tenantDynClient(params), componentName, params.ClusterRef, rbacDigest, workloadDigest, deployedResources); err != nil {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
 			fmt.Sprintf("write PackReceipt for %s: %v", componentName, err)), nil
 	}
@@ -929,8 +929,9 @@ func tenantDynClient(params ExecuteParams) dynamic.Interface {
 // writePackReceipt SSA-patches an InfrastructurePackReceipt into ont-system on
 // the tenant cluster. The receipt is the sole local desired-state reference on
 // tenant clusters and enables conductor role=tenant drift detection.
-// Decision D (revised 2026-04-30), conductor-schema.md.
-func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clusterPackRef, targetCluster, packSignature, rbacDigest, workloadDigest string, resources []runnerlib.DeployedResource) error {
+// Signature verification is owned by the conductor agent packinstance pull loop
+// and written to status -- never to spec. Decision D (revised 2026-04-30), conductor-schema.md.
+func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clusterPackRef, targetCluster, rbacDigest, workloadDigest string, resources []runnerlib.DeployedResource) error {
 	deployedItems := make([]map[string]interface{}, 0, len(resources))
 	for _, r := range resources {
 		item := map[string]interface{}{
@@ -945,12 +946,10 @@ func writePackReceipt(ctx context.Context, tenantClient dynamic.Interface, clust
 	}
 
 	spec := map[string]interface{}{
-		"clusterPackRef":    clusterPackRef,
-		"targetClusterRef":  targetCluster,
-		"packSignature":     packSignature,
-		"signatureVerified": false,
-		"rbacDigest":        rbacDigest,
-		"workloadDigest":    workloadDigest,
+		"clusterPackRef":   clusterPackRef,
+		"targetClusterRef": targetCluster,
+		"rbacDigest":       rbacDigest,
+		"workloadDigest":   workloadDigest,
 	}
 	if len(deployedItems) > 0 {
 		spec["deployedResources"] = deployedItems

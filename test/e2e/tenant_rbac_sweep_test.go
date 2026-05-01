@@ -7,9 +7,9 @@ package e2e_test
 //   - Guardian's admission webhook is operational in Enforcing mode.
 //
 // Pre-conditions for tenant sweep tests (TENANT_KUBECONFIG additionally required):
-//   - Conductor role=tenant is running in ont-system on the tenant cluster.
-//   - The tenant Conductor has been rebuilt with the TenantBootstrapSweep changes
-//     and redeployed (image rebuild required before this test is live).
+//   - Guardian role=tenant is running in ont-system on the tenant cluster.
+//   - Guardian role=tenant has completed its bootstrap annotation sweep.
+//   - Guardian role=tenant TenantProfileRunnable has created component RBACProfiles.
 //
 // What this test verifies (conductor-schema.md §15, guardian-schema.md §5,
 // CS-INV-001):
@@ -21,14 +21,14 @@ package e2e_test
 //   - New RBAC resource in kube-system is admitted unconditionally.
 //   - ClusterRole with system: prefix is admitted unconditionally.
 //
-// Tenant cluster (Conductor role=tenant enforcement):
-//   - Conductor swept all RBAC resources in non-system namespaces.
+// Tenant cluster (Guardian role=tenant enforcement, INV-004):
+//   - Guardian swept all RBAC resources in non-system namespaces.
 //   - kube-system resources carry no ontai.dev/rbac-owner annotation.
 //   - New RBAC resource without annotation is rejected (gate is strict).
 //   - New RBAC resource in kube-system is admitted unconditionally.
 //   - New ClusterRole with system: prefix is admitted unconditionally.
-//   - cert-manager RBACProfile exists in cert-manager ns (if cert-manager deployed).
-//   - kueue RBACProfile exists in kueue-system ns (if kueue deployed).
+//   - cert-manager RBACProfile exists in ont-system (TenantProfileRunnable, CS-INV-008).
+//   - kueue RBACProfile exists in ont-system (TenantProfileRunnable, CS-INV-008).
 
 import (
 	"context"
@@ -53,9 +53,6 @@ const (
 )
 
 var (
-	tenantPermissionSetGVR = schema.GroupVersionResource{
-		Group: "security.ontai.dev", Version: "v1alpha1", Resource: "permissionsets",
-	}
 	tenantRBACProfileGVR = schema.GroupVersionResource{
 		Group: "security.ontai.dev", Version: "v1alpha1", Resource: "rbacprofiles",
 	}
@@ -112,69 +109,76 @@ var _ = Describe("Management cluster: Guardian bootstrap sweep and enforcement",
 // Tenant cluster: Conductor role=tenant sweep and enforcement
 // ============================================================
 
-var _ = Describe("Tenant cluster: Conductor role=tenant bootstrap sweep and enforcement", func() {
+var _ = Describe("Tenant cluster: Guardian role=tenant bootstrap sweep and enforcement", func() {
 	BeforeEach(func() {
 		if tenantClient == nil {
-			Skip("requires TENANT_KUBECONFIG and rebuilt Conductor role=tenant image with TenantBootstrapSweep (CONDUCTOR-TENANT-SWEEP-E2E)")
+			Skip("requires TENANT_KUBECONFIG set and TENANT_CLUSTER_NAME=ccs-dev")
 		}
 	})
 
-	It("non-system namespace Roles carry ontai.dev/rbac-owner=guardian after Conductor sweep", func() {
+	It("non-system namespace Roles carry ontai.dev/rbac-owner=guardian after Guardian sweep", func() {
 		validateAnnotationPresentOnAnyNonSystemNS(context.Background(), tenantClient,
 			sweepPollTimeout, sweepPollInterval)
 	})
 
-	It("kube-system Roles are NOT annotated by Conductor sweep", func() {
+	It("kube-system Roles are NOT annotated by Guardian sweep", func() {
 		validateAnnotationAbsent(context.Background(), tenantClient, "kube-system")
 	})
 
-	It("kube-public ServiceAccounts are NOT annotated by Conductor sweep", func() {
+	It("kube-public resources are NOT annotated by Guardian sweep", func() {
 		validateAnnotationAbsent(context.Background(), tenantClient, "kube-public")
 	})
 
-	It("kube-node-lease namespace resources are NOT annotated by Conductor sweep", func() {
+	It("kube-node-lease namespace resources are NOT annotated by Guardian sweep", func() {
 		validateAnnotationAbsent(context.Background(), tenantClient, "kube-node-lease")
 	})
 
-	It("system: prefixed ClusterRoles are NOT annotated by Conductor sweep", func() {
+	It("system: prefixed ClusterRoles are NOT annotated by Guardian sweep", func() {
 		validateSystemClusterRoleNotAnnotated(context.Background(), tenantClient)
 	})
 
-	It("Conductor webhook rejects new unannotated Role in app namespace (strict mode active)", func() {
-		Skip("requires Conductor role=tenant image rebuilt with enforcement gate and CONDUCTOR-TENANT-SWEEP-E2E closed")
+	It("Guardian webhook rejects new unannotated Role in app namespace (strict mode active)", func() {
+		Skip("requires Guardian role=tenant webhook enforcement mode active — blocked until CNPG-backed audit is reachable on ccs-dev (GUARDIAN-TENANT-WEBHOOK-E2E)")
 	})
 
-	It("Conductor webhook admits new Role in kube-system unconditionally", func() {
-		Skip("requires Conductor role=tenant image rebuilt with enforcement gate and CONDUCTOR-TENANT-SWEEP-E2E closed")
+	It("Guardian webhook admits new Role in kube-system unconditionally", func() {
+		Skip("requires Guardian role=tenant webhook enforcement mode active — blocked until CNPG-backed audit is reachable on ccs-dev (GUARDIAN-TENANT-WEBHOOK-E2E)")
 	})
 
-	It("Conductor webhook admits system: prefixed ClusterRole in strict mode", func() {
-		Skip("requires Conductor role=tenant image rebuilt with enforcement gate and CONDUCTOR-TENANT-SWEEP-E2E closed")
+	It("Guardian webhook admits system: prefixed ClusterRole in strict mode", func() {
+		Skip("requires Guardian role=tenant webhook enforcement mode active — blocked until CNPG-backed audit is reachable on ccs-dev (GUARDIAN-TENANT-WEBHOOK-E2E)")
 	})
 
-	It("cert-manager RBACProfile created by Conductor in cert-manager namespace", func() {
+	// TenantProfileRunnable creates RBACProfiles in ont-system (Namespace), not the component
+	// namespace. CS-INV-008: no per-component PermissionSet or RBACPolicy is created.
+	It("cert-manager RBACProfile created by TenantProfileRunnable in ont-system", func() {
 		if !namespaceExists(context.Background(), tenantClient, "cert-manager") {
-			Skip("requires cert-manager deployed to tenant cluster and CONDUCTOR-TENANT-SWEEP-E2E closed")
+			Skip("requires cert-manager deployed to tenant cluster")
 		}
-		validateProfileExists(context.Background(), tenantClient, "cert-manager", "rbac-cert-manager")
+		validateProfileExists(context.Background(), tenantClient, "ont-system", "cert-manager")
 	})
 
-	It("kueue RBACProfile created by Conductor in kueue-system namespace", func() {
+	It("kueue RBACProfile created by TenantProfileRunnable in ont-system", func() {
 		if !namespaceExists(context.Background(), tenantClient, "kueue-system") {
-			Skip("requires kueue deployed to tenant cluster and CONDUCTOR-TENANT-SWEEP-E2E closed")
+			Skip("requires kueue deployed to tenant cluster")
 		}
-		validateProfileExists(context.Background(), tenantClient, "kueue-system", "rbac-kueue")
+		validateProfileExists(context.Background(), tenantClient, "ont-system", "kueue")
 	})
 
-	It("PermissionSet baseline has wildcard apiGroups/resources and 7 verbs", func() {
+	It("TenantProfileRunnable sweep is idempotent: re-running does not duplicate profiles", func() {
 		if !namespaceExists(context.Background(), tenantClient, "cert-manager") {
-			Skip("requires cert-manager deployed to tenant cluster and CONDUCTOR-TENANT-SWEEP-E2E closed")
+			Skip("requires cert-manager deployed to tenant cluster")
 		}
-		validatePermissionSetSpec(context.Background(), tenantClient, "cert-manager", "cert-manager-baseline")
-	})
-
-	It("Conductor sweep is idempotent: re-running does not duplicate profiles", func() {
-		Skip("requires Conductor role=tenant image rebuilt with TenantBootstrapSweep periodic loop and CONDUCTOR-TENANT-SWEEP-E2E closed")
+		// Count profiles in ont-system before and after a restart would be needed for
+		// true idempotency verification. Instead, confirm count is exactly 1.
+		list, err := tenantClient.Dynamic.Resource(tenantRBACProfileGVR).
+			Namespace("ont-system").
+			List(context.Background(), metav1.ListOptions{
+				LabelSelector: "ontai.dev/component=cert-manager",
+			})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(list.Items).To(HaveLen(1),
+			"TenantProfileRunnable must create exactly one cert-manager RBACProfile in ont-system (idempotent)")
 	})
 })
 
@@ -281,31 +285,6 @@ func validateProfileExists(ctx context.Context, cl *e2ehelpers.ClusterClient, ns
 	Expect(err).NotTo(HaveOccurred(),
 		"RBACProfile %s/%s not found on cluster %s", ns, profileName, cl.Name)
 	Expect(profile.GetName()).To(Equal(profileName))
-}
-
-// validatePermissionSetSpec verifies the baseline PermissionSet has the expected
-// wildcard permissions and all seven standard verbs.
-func validatePermissionSetSpec(ctx context.Context, cl *e2ehelpers.ClusterClient, ns, psName string) {
-	By(fmt.Sprintf("verifying PermissionSet %s/%s spec on cluster %s", ns, psName, cl.Name))
-	ps, err := cl.Dynamic.Resource(tenantPermissionSetGVR).Namespace(ns).Get(
-		ctx, psName, metav1.GetOptions{},
-	)
-	Expect(err).NotTo(HaveOccurred(),
-		"PermissionSet %s/%s not found on cluster %s", ns, psName, cl.Name)
-
-	spec, ok := ps.Object["spec"].(map[string]interface{})
-	Expect(ok).To(BeTrue(), "PermissionSet spec absent")
-
-	perms, ok := spec["permissions"].([]interface{})
-	Expect(ok).To(BeTrue(), "PermissionSet spec.permissions absent")
-	Expect(perms).NotTo(BeEmpty())
-
-	rule, ok := perms[0].(map[string]interface{})
-	Expect(ok).To(BeTrue(), "permissions[0] wrong type")
-
-	verbs, ok := rule["verbs"].([]interface{})
-	Expect(ok).To(BeTrue(), "permissions[0].verbs absent")
-	Expect(verbs).To(HaveLen(7), "expected 7 standard verbs in baseline PermissionSet")
 }
 
 // validateWebhookAdmitsRoleInKubeSystem attempts to create a Role in kube-system
