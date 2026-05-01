@@ -68,6 +68,7 @@ func (w *kubeTalosClusterResultWriter) AppendOperationRecord(
 		tcor.Spec.Operations = make(map[string]seamv1alpha1.TalosClusterOperationRecord)
 	}
 	tcor.Spec.Operations[jobRef] = record
+	tcor.Spec.OperationCount = int64(len(tcor.Spec.Operations))
 	if err := w.client.Patch(ctx, tcor, patch); err != nil {
 		return fmt.Errorf("tcor writer: patch TCOR %s/%s: %w", tenantNS, clusterRef, err)
 	}

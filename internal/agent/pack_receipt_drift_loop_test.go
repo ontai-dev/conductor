@@ -2,10 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"testing"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -17,12 +13,13 @@ import (
 )
 
 // fakePackReceipt builds a fake InfrastructurePackReceipt unstructured object.
-func fakePackReceipt(name, clusterPackRef, packSig string, sigVerified bool, resources []map[string]interface{}) *unstructured.Unstructured {
+// verified is nil for executor-created receipts (status.verified absent),
+// pointer-to-true for receipts confirmed by the packinstance pull loop,
+// pointer-to-false for receipts whose signature verification failed.
+func fakePackReceipt(name, clusterPackRef string, verified *bool, resources []map[string]interface{}) *unstructured.Unstructured {
 	spec := map[string]interface{}{
-		"clusterPackRef":    clusterPackRef,
-		"targetClusterRef":  "ccs-dev",
-		"packSignature":     packSig,
-		"signatureVerified": sigVerified,
+		"clusterPackRef":   clusterPackRef,
+		"targetClusterRef": "ccs-dev",
 	}
 	if len(resources) > 0 {
 		items := make([]interface{}, len(resources))
@@ -31,21 +28,25 @@ func fakePackReceipt(name, clusterPackRef, packSig string, sigVerified bool, res
 		}
 		spec["deployedResources"] = items
 	}
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
-			"kind":       "InfrastructurePackReceipt",
-			"metadata": map[string]interface{}{
-				"name":            name,
-				"namespace":       "ont-system",
-				"resourceVersion": "1",
-			},
-			"spec": spec,
+	obj := map[string]interface{}{
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructurePackReceipt",
+		"metadata": map[string]interface{}{
+			"name":            name,
+			"namespace":       "ont-system",
+			"resourceVersion": "1",
 		},
+		"spec": spec,
 	}
+	if verified != nil {
+		obj["status"] = map[string]interface{}{
+			"verified": *verified,
+		}
+	}
+	return &unstructured.Unstructured{Object: obj}
 }
 
-// fakeClusterPack builds a fake InfrastructureClusterPack for signature message reconstruction.
+// fakeClusterPack builds a fake InfrastructureClusterPack for the management cluster.
 func fakeClusterPack(name, ns string, specPayload map[string]interface{}) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -89,12 +90,18 @@ func setupDriftLoopScheme() *runtime.Scheme {
 	return s
 }
 
-// TestPackReceiptDriftLoop_BootstrapWindow_AcceptsWithoutKey verifies that in
-// bootstrap window mode (pubKey nil) all receipts are accepted without signature
-// verification and signatureVerified is patched to true. INV-020.
-func TestPackReceiptDriftLoop_BootstrapWindow_AcceptsWithoutKey(t *testing.T) {
+// TestPackReceiptDriftLoop_VerifiedAbsent_ProceedsToDriftCheck verifies that an
+// executor-created receipt (no status.verified field) is trusted and proceeds to
+// drift checking. INV-020: executor-created receipts pre-date the packinstance pull
+// loop and are always accepted. Decision H.
+func TestPackReceiptDriftLoop_VerifiedAbsent_ProceedsToDriftCheck(t *testing.T) {
 	scheme := setupDriftLoopScheme()
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", false, nil)
+	resources := []map[string]interface{}{
+		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
+	}
+	// verified=nil → status.verified absent → executor-created receipt.
+	// Resource missing from cluster → DriftSignal must be emitted.
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", nil, resources)
 	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
 	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
@@ -102,103 +109,44 @@ func TestPackReceiptDriftLoop_BootstrapWindow_AcceptsWithoutKey(t *testing.T) {
 	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
 
-	updated, err := localClient.Resource(packReceiptGVR).Namespace("ont-system").Get(
-		context.Background(), "nginx-ccs-dev", metav1.GetOptions{},
+	signals, err := mgmtClient.Resource(driftSignalGVR).Namespace("seam-tenant-ccs-dev").List(
+		context.Background(), metav1.ListOptions{},
 	)
 	if err != nil {
-		t.Fatalf("get updated receipt: %v", err)
+		t.Fatalf("list DriftSignals: %v", err)
 	}
-	spec, _, _ := unstructuredNestedMap(updated.Object, "spec")
-	if verified, _ := spec["signatureVerified"].(bool); !verified {
-		t.Error("expected signatureVerified=true in bootstrap window mode")
+	if len(signals.Items) != 1 {
+		t.Fatalf("expected 1 DriftSignal for executor-created receipt, got %d", len(signals.Items))
 	}
 }
 
-// TestPackReceiptDriftLoop_SignatureVerified_ValidKey verifies that a correctly
-// signed PackReceipt passes verification and gets signatureVerified=true. INV-026.
-func TestPackReceiptDriftLoop_SignatureVerified_ValidKey(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-
-	cpSpec := map[string]interface{}{
-		"componentName": "nginx-ingress",
-		"version":       "v4.9.0-r1",
-	}
-	message, _ := json.Marshal(cpSpec)
-	sig := ed25519.Sign(priv, message)
-	packSig := base64.StdEncoding.EncodeToString(sig)
-
+// TestPackReceiptDriftLoop_VerifiedFalse_SkipsDriftCheck verifies that when the
+// packinstance pull loop has written status.verified=false (Ed25519 verification
+// failed), the drift loop skips drift checking for that receipt. INV-026.
+func TestPackReceiptDriftLoop_VerifiedFalse_SkipsDriftCheck(t *testing.T) {
 	scheme := setupDriftLoopScheme()
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", packSig, false, nil)
-	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", cpSpec)
-
+	resources := []map[string]interface{}{
+		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
+	}
+	boolFalse := false
+	// status.verified=false → packinstance pull loop set verification failed.
+	// Resource missing, but drift loop must skip → no DriftSignal emitted.
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolFalse, resources)
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
 	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
 
-	loop := &PackReceiptDriftLoop{
-		localClient:   localClient,
-		mgmtClient:    mgmtClient,
-		pubKey:        pub,
-		clusterName:   "ccs-dev",
-		namespace:     "ont-system",
-		mgmtTenantNS:  "seam-tenant-ccs-dev",
-	}
+	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
 	loop.runOnce(context.Background())
 
-	updated, err := localClient.Resource(packReceiptGVR).Namespace("ont-system").Get(
-		context.Background(), "nginx-ccs-dev", metav1.GetOptions{},
+	signals, err := mgmtClient.Resource(driftSignalGVR).Namespace("seam-tenant-ccs-dev").List(
+		context.Background(), metav1.ListOptions{},
 	)
 	if err != nil {
-		t.Fatalf("get updated receipt: %v", err)
+		t.Fatalf("list DriftSignals: %v", err)
 	}
-	spec, _, _ := unstructuredNestedMap(updated.Object, "spec")
-	if verified, _ := spec["signatureVerified"].(bool); !verified {
-		t.Error("expected signatureVerified=true after valid signature")
-	}
-}
-
-// TestPackReceiptDriftLoop_SignatureVerified_InvalidKey verifies that an incorrectly
-// signed PackReceipt does not get signatureVerified=true. INV-026.
-func TestPackReceiptDriftLoop_SignatureVerified_InvalidKey(t *testing.T) {
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key pair 1: %v", err)
-	}
-	_, wrongPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key pair 2: %v", err)
-	}
-
-	cpSpec := map[string]interface{}{"componentName": "nginx-ingress"}
-	message, _ := json.Marshal(cpSpec)
-	sig := ed25519.Sign(wrongPriv, message) // signed with wrong key
-	packSig := base64.StdEncoding.EncodeToString(sig)
-
-	scheme := setupDriftLoopScheme()
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", packSig, false, nil)
-	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", cpSpec)
-
-	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
-	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
-
-	loop := &PackReceiptDriftLoop{
-		localClient:   localClient,
-		mgmtClient:    mgmtClient,
-		pubKey:        pub,
-		clusterName:   "ccs-dev",
-		namespace:     "ont-system",
-		mgmtTenantNS:  "seam-tenant-ccs-dev",
-	}
-	loop.runOnce(context.Background())
-
-	updated, _ := localClient.Resource(packReceiptGVR).Namespace("ont-system").Get(
-		context.Background(), "nginx-ccs-dev", metav1.GetOptions{},
-	)
-	spec, _, _ := unstructuredNestedMap(updated.Object, "spec")
-	if verified, _ := spec["signatureVerified"].(bool); verified {
-		t.Error("expected signatureVerified=false after invalid signature")
+	if len(signals.Items) != 0 {
+		t.Errorf("expected 0 DriftSignals when status.verified=false, got %d", len(signals.Items))
 	}
 }
 
@@ -210,8 +158,9 @@ func TestPackReceiptDriftLoop_DriftDetected_EmitsDriftSignal(t *testing.T) {
 	resources := []map[string]interface{}{
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
-	// Receipt already verified, resource NOT present in local cluster.
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	boolTrue := true
+	// status.verified=true → packinstance pull loop confirmed signature. Resource missing → emit signal.
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
 	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt)
 	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
@@ -252,7 +201,8 @@ func TestPackReceiptDriftLoop_NoDrift_NoSignal(t *testing.T) {
 	resources := []map[string]interface{}{
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	boolTrue := true
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
 	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
 	localClient := fake.NewSimpleDynamicClient(scheme, receipt, deploy)
 	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
@@ -278,7 +228,8 @@ func TestPackReceiptDriftLoop_EscalationThreshold_StopsEmitting(t *testing.T) {
 	resources := []map[string]interface{}{
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	boolTrue := true
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
 
 	// Pre-existing DriftSignal at threshold.
 	existing := &unstructured.Unstructured{
@@ -325,7 +276,8 @@ func TestPackReceiptDriftLoop_DriftPersistsQueued_IncrementsCounter(t *testing.T
 	resources := []map[string]interface{}{
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	boolTrue := true
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
 
 	// Pre-existing DriftSignal in queued state, counter=0.
 	existing := &unstructured.Unstructured{
@@ -388,7 +340,8 @@ func TestPackReceiptDriftLoop_DriftResolved_ConfirmsSignal(t *testing.T) {
 	resources := []map[string]interface{}{
 		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
 	}
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	boolTrue := true
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
 
 	// Pre-existing DriftSignal in queued state (management retrigger issued).
 	existing := &unstructured.Unstructured{
@@ -466,7 +419,8 @@ func TestPackReceiptDriftLoop_OrphanReceipt_TearsDownResources(t *testing.T) {
 		// Cluster-scoped resource — should be deleted individually.
 		{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "name": "ingress-nginx"},
 	}
-	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", "", true, resources)
+	// Orphan path runs before the verified gate; verified=nil is fine here.
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", nil, resources)
 
 	// Pre-existing DriftSignal that should also be deleted.
 	signal := &unstructured.Unstructured{
@@ -562,9 +516,4 @@ func TestGVRFromAPIVersionKind_NamedGroup(t *testing.T) {
 	if gvr.Resource != "deployments" {
 		t.Errorf("expected deployments, got %q", gvr.Resource)
 	}
-}
-
-// fakeNotFound returns a k8s NotFound error matching what the drift loop expects.
-func fakeNotFound(name string) error {
-	return k8serrors.NewNotFound(schema.GroupResource{Resource: "deployments"}, name)
 }

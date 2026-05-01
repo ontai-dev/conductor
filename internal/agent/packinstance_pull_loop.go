@@ -13,6 +13,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -233,7 +234,7 @@ func (l *PackInstancePullLoop) pullOnce(ctx context.Context) {
 		meta.RBACDigest, meta.WorkloadDigest = l.readClusterPackDigests(ctx, secretNS, clusterPackRef)
 
 		// Create or update the local PackReceipt.
-		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, verified, failureReason, meta)
+		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, clusterPackRef, verified, failureReason, meta)
 	}
 }
 
@@ -265,12 +266,14 @@ func (l *PackInstancePullLoop) verifyArtifact(artifactJSON []byte, sigB64 string
 }
 
 // buildReceiptSpecPayload constructs the spec payload map for a PackReceipt CR.
-// Empty metadata fields are omitted so that kustomize and raw category packs do
-// not emit spurious zero-value fields in the CR. T-10.
-func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDeliveryMetadata) map[string]interface{} {
+// clusterPackRef and targetClusterRef are required by the CRD schema; empty
+// strings produce a validation error on create. T-10.
+func buildReceiptSpecPayload(packInstanceName, signatureRef, clusterPackRef, targetClusterRef string, meta packDeliveryMetadata) map[string]interface{} {
 	payload := map[string]interface{}{
-		"packInstanceRef": packInstanceName,
-		"signatureRef":    signatureRef,
+		"packInstanceRef":  packInstanceName,
+		"signatureRef":     signatureRef,
+		"clusterPackRef":   clusterPackRef,
+		"targetClusterRef": targetClusterRef,
 	}
 	if meta.RBACDigest != "" {
 		payload["rbacDigest"] = meta.RBACDigest
@@ -304,14 +307,14 @@ func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDel
 // Gap 28, conductor-schema.md §10, T-10.
 func (l *PackInstancePullLoop) upsertPackReceipt(
 	ctx context.Context,
-	packInstanceName, sigB64, signatureRef string,
+	packInstanceName, sigB64, signatureRef, clusterPackRef string,
 	verified bool,
 	failureReason string,
 	meta packDeliveryMetadata,
 ) {
 	receiptName := packInstanceName
 
-	specPayload := buildReceiptSpecPayload(packInstanceName, signatureRef, meta)
+	specPayload := buildReceiptSpecPayload(packInstanceName, signatureRef, clusterPackRef, l.clusterName, meta)
 	statusPayload := map[string]interface{}{
 		"verified":  verified,
 		"signature": sigB64,
@@ -320,6 +323,9 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		statusPayload["verificationFailedReason"] = failureReason
 	}
 
+	// Build receipt without status — the CRD has +kubebuilder:subresource:status,
+	// so the API server strips the status field during create/update on the main
+	// resource. Status must be written separately via the status subresource.
 	receipt := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
@@ -328,8 +334,7 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 				"name":      receiptName,
 				"namespace": l.namespace,
 			},
-			"spec":   specPayload,
-			"status": statusPayload,
+			"spec": specPayload,
 		},
 	}
 
@@ -338,43 +343,39 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		ctx, receiptName, metav1.GetOptions{},
 	)
 	if k8serrors.IsNotFound(err) {
-		// Does not exist — create it.
 		if _, err := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Create(
 			ctx, receipt, metav1.CreateOptions{},
 		); err != nil {
 			fmt.Printf("packinstance pull loop: cluster=%q create PackReceipt %q: %v\n",
 				l.clusterName, receiptName, err)
-		} else {
-			fmt.Printf("packinstance pull loop: cluster=%q created PackReceipt %q verified=%v\n",
-				l.clusterName, receiptName, verified)
+			return
 		}
-		return
-	}
-	if err != nil {
-		// Real Get error — log and skip; next cycle retries.
+		fmt.Printf("packinstance pull loop: cluster=%q created PackReceipt %q verified=%v\n",
+			l.clusterName, receiptName, verified)
+	} else if err != nil {
 		fmt.Printf("packinstance pull loop: cluster=%q get PackReceipt %q: %v\n",
 			l.clusterName, receiptName, err)
 		return
-	}
-
-	// Exists — check idempotency: compare verified status and signature.
-	existingStatus, _, _ := unstructuredNestedMap(existing.Object, "status")
-	existingVerified, _ := existingStatus["verified"].(bool)
-	existingSig, _ := existingStatus["signature"].(string)
-	if existingVerified == verified && existingSig == sigB64 {
-		// Content unchanged — skip update. Gap 28 idempotency.
-		return
-	}
-
-	// Content differs — update the PackReceipt.
-	receipt.SetResourceVersion(existing.GetResourceVersion())
-	if _, err := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Update(
-		ctx, receipt, metav1.UpdateOptions{},
-	); err != nil {
-		fmt.Printf("packinstance pull loop: cluster=%q update PackReceipt %q: %v\n",
-			l.clusterName, receiptName, err)
 	} else {
+		// Exists — check status idempotency before patching.
+		existingStatus, _, _ := unstructuredNestedMap(existing.Object, "status")
+		existingVerified, _ := existingStatus["verified"].(bool)
+		existingSig, _ := existingStatus["signature"].(string)
+		if existingVerified == verified && existingSig == sigB64 {
+			return // status unchanged — skip the subresource patch. Gap 28 idempotency.
+		}
 		fmt.Printf("packinstance pull loop: cluster=%q updated PackReceipt %q verified=%v\n",
 			l.clusterName, receiptName, verified)
+	}
+
+	// Write status via the status subresource. Separate from the spec write because
+	// +kubebuilder:subresource:status causes the API server to ignore status in the
+	// main resource body. conductor-schema.md §10, INV-026.
+	statusPatch, _ := json.Marshal(map[string]interface{}{"status": statusPayload})
+	if _, pErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Patch(
+		ctx, receiptName, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status",
+	); pErr != nil {
+		fmt.Printf("packinstance pull loop: cluster=%q patch PackReceipt %q status: %v\n",
+			l.clusterName, receiptName, pErr)
 	}
 }

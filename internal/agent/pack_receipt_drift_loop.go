@@ -2,11 +2,8 @@ package agent
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -42,28 +39,28 @@ const escalationThreshold int32 = 3
 
 // PackReceiptDriftLoop runs on conductor role=tenant. On each cycle it:
 //  1. Lists InfrastructurePackReceipts in ont-system on the local (tenant) cluster.
-//  2. For each receipt with signatureVerified=false: reads the ClusterPack from the
-//     management cluster, reconstructs the signed message, and verifies packSignature
-//     using the Ed25519 public key. On success, patches signatureVerified=true.
-//  3. For each verified receipt: checks that every deployedResource still exists on
-//     the local cluster. On any missing resource, writes a DriftSignal to
-//     seam-tenant-{clusterName} on the management cluster.
+//  2. For each receipt with status.verified=false (set by the packinstance pull loop
+//     after Ed25519 verification failure): logs a warning and skips drift checking.
+//  3. For each receipt with status.verified=true or absent (executor-created receipts):
+//     checks that every deployedResource still exists on the local cluster.
+//     On any missing resource, writes a DriftSignal to seam-tenant-{clusterName}
+//     on the management cluster.
 //  4. DriftSignal escalation: increments EscalationCounter on each re-emit cycle.
 //     At escalationThreshold the loop stops emitting for that receipt.
 //
-// INV-026 governs signature verification. Decision H governs drift signalling.
-// conductor-schema.md §7.9.
+// Signature verification is handled exclusively by the packinstance pull loop (INV-026).
+// The drift loop reads status.verified to gate drift checking. Decision H, conductor-schema.md §7.9.
 type PackReceiptDriftLoop struct {
-	localClient dynamic.Interface  // tenant cluster client
-	mgmtClient  dynamic.Interface  // management cluster client
-	pubKey      ed25519.PublicKey  // nil in bootstrap window (INV-020)
-	clusterName string             // this cluster's name, used for DriftSignal namespace
-	namespace   string             // local namespace for PackReceipt CRs (ont-system)
+	localClient  dynamic.Interface // tenant cluster client
+	mgmtClient   dynamic.Interface // management cluster client
+	clusterName  string            // this cluster's name, used for DriftSignal namespace
+	namespace    string            // local namespace for PackReceipt CRs (ont-system)
 	mgmtTenantNS string            // seam-tenant-{clusterName} on management cluster
 }
 
-// NewPackReceiptDriftLoop constructs a PackReceiptDriftLoop in bootstrap window mode.
-// Signature verification is skipped when pubKey is nil (INV-020).
+// NewPackReceiptDriftLoop constructs a PackReceiptDriftLoop. Signature verification
+// is delegated to the packinstance pull loop (INV-026); the drift loop reads
+// status.verified to gate drift checking.
 func NewPackReceiptDriftLoop(localClient, mgmtClient dynamic.Interface, clusterName, namespace string) *PackReceiptDriftLoop {
 	return &PackReceiptDriftLoop{
 		localClient:  localClient,
@@ -72,23 +69,6 @@ func NewPackReceiptDriftLoop(localClient, mgmtClient dynamic.Interface, clusterN
 		namespace:    namespace,
 		mgmtTenantNS: "seam-tenant-" + clusterName,
 	}
-}
-
-// NewPackReceiptDriftLoopWithKey constructs a PackReceiptDriftLoop that enforces
-// INV-026 Ed25519 signature verification using the public key at the given path.
-func NewPackReceiptDriftLoopWithKey(localClient, mgmtClient dynamic.Interface, clusterName, namespace, publicKeyPath string) (*PackReceiptDriftLoop, error) {
-	pubKey, err := loadPublicKey(publicKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("NewPackReceiptDriftLoopWithKey: %w", err)
-	}
-	return &PackReceiptDriftLoop{
-		localClient:  localClient,
-		mgmtClient:   mgmtClient,
-		pubKey:       pubKey,
-		clusterName:  clusterName,
-		namespace:    namespace,
-		mgmtTenantNS: "seam-tenant-" + clusterName,
-	}, nil
 }
 
 // Run runs the drift loop until ctx is cancelled. Fires once immediately then repeats.
@@ -144,27 +124,17 @@ func (l *PackReceiptDriftLoop) runOnce(ctx context.Context) {
 			}
 		}
 
-		sigVerified, _ := spec["signatureVerified"].(bool)
-		if !sigVerified {
-			if err := l.verifyAndPatch(ctx, item.Object, spec, receiptName); err != nil {
-				fmt.Printf("drift loop: cluster=%q receipt=%q signature verify: %v\n",
-					l.clusterName, receiptName, err)
+		// Gate drift checking on signature verification result written by the
+		// packinstance pull loop. status.verified=false means the management cluster
+		// signature check failed — skip drift until the packinstance pull loop resolves it.
+		// status.verified absent (executor-created receipts) → trusted; proceed to drift check.
+		status, _, _ := unstructuredNestedMap(item.Object, "status")
+		if verifiedRaw, hasVerified := status["verified"]; hasVerified {
+			if verified, _ := verifiedRaw.(bool); !verified {
+				fmt.Printf("drift loop: cluster=%q receipt=%q signature not verified — skipping drift check\n",
+					l.clusterName, receiptName)
 				continue
 			}
-			// Re-read after patch to get updated signatureVerified state.
-			updated, getErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Get(
-				ctx, receiptName, metav1.GetOptions{},
-			)
-			if getErr != nil {
-				continue
-			}
-			spec, _, _ = unstructuredNestedMap(updated.Object, "spec")
-			sigVerified, _ = spec["signatureVerified"].(bool)
-		}
-
-		if !sigVerified {
-			// Signature did not verify — do not check drift until resolved.
-			continue
 		}
 
 		if !l.checkDrift(ctx, spec, receiptName) {
@@ -259,76 +229,6 @@ func (l *PackReceiptDriftLoop) teardownOrphanedReceipt(ctx context.Context, spec
 		fmt.Printf("drift loop: cluster=%q orphan teardown: delete DriftSignal %s: %v\n",
 			l.clusterName, signalName, delErr)
 	}
-}
-
-// verifyAndPatch verifies the packSignature on a PackReceipt and patches
-// signatureVerified=true on success. In bootstrap window mode (pubKey nil)
-// all receipts are accepted. INV-026, INV-020.
-func (l *PackReceiptDriftLoop) verifyAndPatch(ctx context.Context, obj map[string]interface{}, spec map[string]interface{}, receiptName string) error {
-	packSig, _ := spec["packSignature"].(string)
-	clusterPackRef, _ := spec["clusterPackRef"].(string)
-
-	if l.pubKey == nil {
-		// Bootstrap window — accept without verification. INV-020.
-		return l.patchSignatureVerified(ctx, receiptName, true)
-	}
-
-	if packSig == "" {
-		// Signed receipts required in normal operation. INV-026.
-		fmt.Printf("drift loop: cluster=%q receipt=%q missing packSignature (INV-026)\n",
-			l.clusterName, receiptName)
-		return nil
-	}
-
-	// Reconstruct the signed message: json.Marshal(ClusterPack.spec) from management cluster.
-	clusterPackObj, err := l.mgmtClient.Resource(clusterPackMgmtGVR).Namespace(l.mgmtTenantNS).Get(
-		ctx, clusterPackRef, metav1.GetOptions{},
-	)
-	if err != nil {
-		return fmt.Errorf("read ClusterPack %s/%s for sig verification: %w",
-			l.mgmtTenantNS, clusterPackRef, err)
-	}
-	cpSpec, _, _ := unstructuredNestedMap(clusterPackObj.Object, "spec")
-	message, err := json.Marshal(cpSpec)
-	if err != nil {
-		return fmt.Errorf("marshal ClusterPack spec for sig verification: %w", err)
-	}
-
-	sigBytes, err := base64.StdEncoding.DecodeString(packSig)
-	if err != nil {
-		return fmt.Errorf("decode packSignature base64: %w", err)
-	}
-
-	if !ed25519.Verify(l.pubKey, message, sigBytes) {
-		fmt.Printf("drift loop: cluster=%q receipt=%q packSignature verification FAILED (INV-026)\n",
-			l.clusterName, receiptName)
-		return nil
-	}
-
-	fmt.Printf("drift loop: cluster=%q receipt=%q packSignature verified\n",
-		l.clusterName, receiptName)
-	return l.patchSignatureVerified(ctx, receiptName, true)
-}
-
-// patchSignatureVerified merge-patches signatureVerified on the PackReceipt spec.
-func (l *PackReceiptDriftLoop) patchSignatureVerified(ctx context.Context, receiptName string, verified bool) error {
-	patch := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"signatureVerified": verified,
-		},
-	}
-	data, err := json.Marshal(patch)
-	if err != nil {
-		return fmt.Errorf("marshal signatureVerified patch: %w", err)
-	}
-	_, err = l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Patch(
-		ctx,
-		receiptName,
-		types.MergePatchType,
-		data,
-		metav1.PatchOptions{},
-	)
-	return err
 }
 
 // checkDrift reads the deployedResources inventory from the PackReceipt and verifies
@@ -610,16 +510,6 @@ func groupFromAPIVersion(apiVersion string) string {
 // deduplication for the federation delivery model. conductor-schema.md §7.9.
 func newCorrelationID() string {
 	return fmt.Sprintf("drift-%d", time.Now().UnixNano())
-}
-
-// loadPublicKey reads and parses a PKIX PEM-encoded Ed25519 public key from path.
-// Shared with ReceiptReconciler via the same parseEd25519PublicKey helper.
-func loadPublicKey(path string) (ed25519.PublicKey, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read public key %s: %w", path, err)
-	}
-	return parseEd25519PublicKey(b)
 }
 
 // unstructuredFromRaw constructs an unstructured.Unstructured from raw JSON bytes.

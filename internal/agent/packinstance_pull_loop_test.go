@@ -105,15 +105,17 @@ func TestUpsertPackReceiptSpecPayload_HelmFields(t *testing.T) {
 		HelmVersion:    "v3.14.0",
 	}
 
-	specPayload := buildReceiptSpecPayload("cert-manager-ccs-mgmt", "sec-ref", meta)
+	specPayload := buildReceiptSpecPayload("cert-manager-ccs-mgmt", "sec-ref", "cert-manager", "ccs-mgmt", meta)
 
 	checks := map[string]string{
-		"rbacDigest":     meta.RBACDigest,
-		"workloadDigest": meta.WorkloadDigest,
-		"chartVersion":   meta.ChartVersion,
-		"chartURL":       meta.ChartURL,
-		"chartName":      meta.ChartName,
-		"helmVersion":    meta.HelmVersion,
+		"clusterPackRef":   "cert-manager",
+		"targetClusterRef": "ccs-mgmt",
+		"rbacDigest":       meta.RBACDigest,
+		"workloadDigest":   meta.WorkloadDigest,
+		"chartVersion":     meta.ChartVersion,
+		"chartURL":         meta.ChartURL,
+		"chartName":        meta.ChartName,
+		"helmVersion":      meta.HelmVersion,
 	}
 	for field, want := range checks {
 		got, _ := specPayload[field].(string)
@@ -128,7 +130,7 @@ func TestUpsertPackReceiptSpecPayload_HelmFields(t *testing.T) {
 func TestUpsertPackReceiptSpecPayload_EmptyFieldsOmitted(t *testing.T) {
 	meta := packDeliveryMetadata{} // all zero-value
 
-	specPayload := buildReceiptSpecPayload("raw-pack-ccs-mgmt", "sec-ref", meta)
+	specPayload := buildReceiptSpecPayload("raw-pack-ccs-mgmt", "sec-ref", "raw-pack", "ccs-mgmt", meta)
 
 	for _, field := range []string{"rbacDigest", "workloadDigest", "chartVersion", "chartURL", "chartName", "helmVersion"} {
 		if _, ok := specPayload[field]; ok {

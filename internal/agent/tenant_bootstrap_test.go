@@ -1,19 +1,20 @@
 package agent
 
-// Unit tests for TenantBootstrapSweep: annotation sweep + component profile
-// creation + enforcement gate lifecycle. Uses fake clients — no live cluster.
+// Unit tests for TenantBootstrapSweep: audit sweep + component profile
+// creation. Uses fake clients — no live cluster.
 //
 // Covers conductor-schema.md §15 bootstrap sweep invariants:
-//   - Annotation sweep stamps ownership on un-owned RBAC in non-system namespaces.
+//   - Roles, RoleBindings, ClusterRoles, ClusterRoleBindings are observed (logged) only --
+//     never annotated. Patching RBAC resources triggers Kubernetes escalation checks.
+//   - ServiceAccounts ARE annotated (no escalation risk).
 //   - kube-system, kube-public, kube-node-lease are never swept.
 //   - Namespaces with exempt label are skipped.
 //   - system: prefix ClusterRoles/ClusterRoleBindings are not swept.
 //   - Already-annotated resources are not re-patched (idempotent).
-//   - Component profiles created when namespace exists and CRDs available.
-//   - Component profiles skipped when namespace absent.
-//   - Security CRD absence is handled gracefully (gate not blocked).
-//   - Gate transitions to strict after successful sweep.
-//   - Gate remains in audit mode if sweep fails.
+//   - Component profiles created in ont-system (not component namespace).
+//   - Component profiles skipped when SA absent.
+//   - Security CRD absence is handled gracefully.
+//   - Gate never transitions to strict -- conductor in tenant never enforces.
 
 import (
 	"context"
@@ -130,9 +131,9 @@ func getClusterRoleAnnotation(t *testing.T, kube *kubefake.Clientset, name, key 
 
 // --- sweep: namespace-scoped resources ---
 
-// TestSweep_StampsOwnershipInAppNamespace verifies that un-owned Role,
-// RoleBinding, and ServiceAccount in a non-system namespace are annotated
-// with ontai.dev/rbac-owner=guardian after a sweep.
+// TestSweep_StampsOwnershipInAppNamespace verifies the audit-mode sweep:
+// Roles and RoleBindings are observed (logged) but NOT annotated.
+// ServiceAccounts ARE annotated (not subject to RBAC escalation checks).
 func TestSweep_StampsOwnershipInAppNamespace(t *testing.T) {
 	sweep, kube, _, _ := newSweepSuite(t)
 	ctx := context.Background()
@@ -146,15 +147,16 @@ func TestSweep_StampsOwnershipInAppNamespace(t *testing.T) {
 		t.Fatalf("sweepAllNamespaces: %v", err)
 	}
 
-	if got := getRoleAnnotation(t, kube, "app-ns", "app-role", annotationRBACOwner); got != annotationRBACOwnerValue {
-		t.Errorf("Role annotation: got %q, want %q", got, annotationRBACOwnerValue)
+	// Roles and RoleBindings are observed-only -- no annotation patch.
+	if got := getRoleAnnotation(t, kube, "app-ns", "app-role", annotationRBACOwner); got != "" {
+		t.Errorf("Role should NOT be annotated in audit mode, got %q", got)
 	}
-
 	rb, _ := kube.RbacV1().RoleBindings("app-ns").Get(ctx, "app-rb", metav1.GetOptions{})
-	if rb.Annotations[annotationRBACOwner] != annotationRBACOwnerValue {
-		t.Errorf("RoleBinding missing ownership annotation")
+	if rb.Annotations[annotationRBACOwner] != "" {
+		t.Errorf("RoleBinding should NOT be annotated in audit mode")
 	}
 
+	// ServiceAccounts are still annotated (no escalation risk).
 	if got := getServiceAccountAnnotation(t, kube, "app-ns", "app-sa", annotationRBACOwner); got != annotationRBACOwnerValue {
 		t.Errorf("ServiceAccount annotation: got %q, want %q", got, annotationRBACOwnerValue)
 	}
@@ -268,9 +270,10 @@ func TestSweep_SystemPrefixClusterRoleNotAnnotated(t *testing.T) {
 	}
 }
 
-// TestSweep_NonSystemClusterRoleAnnotated verifies that ClusterRoles without
-// the system: prefix ARE annotated during the cluster-scoped sweep.
-func TestSweep_NonSystemClusterRoleAnnotated(t *testing.T) {
+// TestSweep_NonSystemClusterRoleObserved verifies that ClusterRoles without
+// the system: prefix are observed (logged) but NOT annotated in audit mode.
+// Annotation patching of ClusterRoles triggers Kubernetes RBAC escalation checks.
+func TestSweep_NonSystemClusterRoleObserved(t *testing.T) {
 	sweep, kube, _, _ := newSweepSuite(t)
 
 	addClusterRole(t, kube, "my-app-admin", nil)
@@ -279,8 +282,8 @@ func TestSweep_NonSystemClusterRoleAnnotated(t *testing.T) {
 		t.Fatalf("sweepClusterScoped: %v", err)
 	}
 
-	if got := getClusterRoleAnnotation(t, kube, "my-app-admin", annotationRBACOwner); got != annotationRBACOwnerValue {
-		t.Errorf("non-system ClusterRole annotation: got %q, want %q", got, annotationRBACOwnerValue)
+	if got := getClusterRoleAnnotation(t, kube, "my-app-admin", annotationRBACOwner); got != "" {
+		t.Errorf("non-system ClusterRole should NOT be annotated in audit mode, got %q", got)
 	}
 }
 
@@ -293,7 +296,7 @@ func TestSweep_ProfileCreation_SkipsAbsentSA(t *testing.T) {
 	sweep, _, dyn, _ := newSweepSuite(t)
 
 	// No SA for any known component exists.
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles with absent SAs: %v", err)
 	}
 
@@ -304,9 +307,9 @@ func TestSweep_ProfileCreation_SkipsAbsentSA(t *testing.T) {
 	}
 }
 
-// TestSweep_ProfileCreation_DiscoversByServiceAccountName verifies that
-// PermissionSet, RBACPolicy, and RBACProfile are created in the namespace
-// where the component's SA is found — not from a hardcoded namespace.
+// TestSweep_ProfileCreation_DiscoversByServiceAccountName verifies that the
+// component's install namespace is discovered via SA name (not hardcoded), and
+// that profiles are always created in ont-system regardless of install namespace.
 func TestSweep_ProfileCreation_DiscoversByServiceAccountName(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 
@@ -315,35 +318,36 @@ func TestSweep_ProfileCreation_DiscoversByServiceAccountName(t *testing.T) {
 	addNamespace(t, kube, "tools", nil)
 	addServiceAccount(t, kube, "tools", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
-	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("tools").Get(
+	// Profiles are always created in ont-system, not in the install namespace.
+	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("ont-system").Get(
 		context.Background(), "cert-manager-baseline", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Fatalf("PermissionSet not created in discovered namespace %q: %v", "tools", err)
+		t.Fatalf("PermissionSet not created in ont-system: %v", err)
 	}
 	if ps.GetName() != "cert-manager-baseline" {
 		t.Errorf("PermissionSet name: got %q, want cert-manager-baseline", ps.GetName())
 	}
 
-	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("tools").Get(
+	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
 		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Fatalf("RBACPolicy not created: %v", err)
+		t.Fatalf("RBACPolicy not created in ont-system: %v", err)
 	}
 	if policy.GetName() != "cert-manager-rbac-policy" {
 		t.Errorf("RBACPolicy name: got %q", policy.GetName())
 	}
 
-	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("tools").Get(
+	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("ont-system").Get(
 		context.Background(), "rbac-cert-manager", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Fatalf("RBACProfile not created: %v", err)
+		t.Fatalf("RBACProfile not created in ont-system: %v", err)
 	}
 	if profile.GetName() != "rbac-cert-manager" {
 		t.Errorf("RBACProfile name: got %q", profile.GetName())
@@ -351,7 +355,8 @@ func TestSweep_ProfileCreation_DiscoversByServiceAccountName(t *testing.T) {
 }
 
 // TestSweep_ProfileCreation_HintPreferredOnCollision verifies that when the
-// SA name exists in multiple namespaces, the NamespaceHint namespace is preferred.
+// SA name exists in multiple namespaces, the NamespaceHint namespace is used
+// to build the principalRef — all profiles still land in ont-system.
 func TestSweep_ProfileCreation_HintPreferredOnCollision(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 
@@ -361,43 +366,48 @@ func TestSweep_ProfileCreation_HintPreferredOnCollision(t *testing.T) {
 	addNamespace(t, kube, "cert-manager", nil)
 	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
-	// Profile should be in the hint namespace "cert-manager", not "other-ns".
-	_, err := dyn.Resource(tenantPermissionSetGVR).Namespace("cert-manager").Get(
+	// Profiles always in ont-system, not in the install namespace.
+	_, err := dyn.Resource(tenantPermissionSetGVR).Namespace("ont-system").Get(
 		context.Background(), "cert-manager-baseline", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Errorf("PermissionSet should be in hint namespace cert-manager: %v", err)
+		t.Errorf("PermissionSet not found in ont-system: %v", err)
 	}
-	// other-ns should have nothing.
-	list, _ := dyn.Resource(tenantPermissionSetGVR).Namespace("other-ns").List(context.Background(), metav1.ListOptions{})
-	if list != nil && len(list.Items) > 0 {
-		t.Errorf("PermissionSet should NOT be created in non-hint namespace other-ns")
+	// Neither component namespace should carry profiles.
+	for _, ns := range []string{"cert-manager", "other-ns"} {
+		list, _ := dyn.Resource(tenantPermissionSetGVR).Namespace(ns).List(context.Background(), metav1.ListOptions{})
+		if list != nil && len(list.Items) > 0 {
+			t.Errorf("PermissionSet should NOT be created in component namespace %s", ns)
+		}
 	}
 }
 
 // TestSweep_ProfileCreation_PrincipalRefUsesDiscoveredNamespace verifies that
-// the RBACProfile principalRef is built from the discovered namespace, not hardcoded.
+// the RBACProfile principalRef is built from the discovered install namespace,
+// while the profile itself resides in ont-system.
 func TestSweep_ProfileCreation_PrincipalRefUsesDiscoveredNamespace(t *testing.T) {
 	sweep, kube, dyn, _ := newSweepSuite(t)
 
 	addNamespace(t, kube, "custom-ns", nil)
 	addServiceAccount(t, kube, "custom-ns", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
-	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("custom-ns").Get(
+	// Profile is in ont-system, not the component's install namespace.
+	profile, err := dyn.Resource(tenantRBACProfileGVR).Namespace("ont-system").Get(
 		context.Background(), "rbac-cert-manager", metav1.GetOptions{},
 	)
 	if err != nil {
-		t.Fatalf("RBACProfile not found: %v", err)
+		t.Fatalf("RBACProfile not found in ont-system: %v", err)
 	}
 
+	// PrincipalRef still uses the discovered install namespace.
 	spec, _ := profile.Object["spec"].(map[string]interface{})
 	principalRef, _ := spec["principalRef"].(string)
 	wantPrincipal := "system:serviceaccount:custom-ns:cert-manager"
@@ -414,10 +424,10 @@ func TestSweep_ProfileCreation_IsIdempotent(t *testing.T) {
 	addNamespace(t, kube, "cert-manager", nil)
 	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("first createComponentProfiles: %v", err)
 	}
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("second createComponentProfiles (idempotent): %v", err)
 	}
 }
@@ -439,16 +449,17 @@ func TestSweep_ProfileCreation_SkipsMissingCRDs(t *testing.T) {
 	addNamespace(t, kube, "cert-manager", nil)
 	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles with missing CRDs should not error: %v", err)
 	}
 }
 
 // --- enforcement gate lifecycle ---
 
-// TestRunOnce_SetsGateStrictOnSuccess verifies that the enforcement gate
-// transitions to strict after a fully successful sweep + profile creation.
-func TestRunOnce_SetsGateStrictOnSuccess(t *testing.T) {
+// TestRunOnce_GateRemainsAuditAfterSuccess verifies that the enforcement gate
+// stays in audit mode even after a fully successful sweep. Conductor in tenant
+// never enforces -- it observes only. The gate never transitions to strict.
+func TestRunOnce_GateRemainsAuditAfterSuccess(t *testing.T) {
 	sweep, kube, _, gate := newSweepSuite(t)
 
 	addNamespace(t, kube, "app-ns", nil)
@@ -456,8 +467,8 @@ func TestRunOnce_SetsGateStrictOnSuccess(t *testing.T) {
 
 	sweep.RunOnce(context.Background())
 
-	if !gate.IsStrict() {
-		t.Error("gate should be strict after successful RunOnce")
+	if gate.IsStrict() {
+		t.Error("gate should remain in audit mode after RunOnce -- tenant conductor never enforces")
 	}
 }
 
@@ -506,11 +517,11 @@ func TestSweep_PermissionSetSpec(t *testing.T) {
 	addNamespace(t, kube, "cert-manager", nil)
 	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
-	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("cert-manager").Get(
+	ps, err := dyn.Resource(tenantPermissionSetGVR).Namespace("ont-system").Get(
 		context.Background(), "cert-manager-baseline", metav1.GetOptions{},
 	)
 	if err != nil {
@@ -565,26 +576,225 @@ func TestSweep_AllFiveComponentsCreated(t *testing.T) {
 		addServiceAccount(t, kube, ns, saName, nil)
 	}
 
-	if err := sweep.createComponentProfiles(context.Background()); err != nil {
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
 		t.Fatalf("createComponentProfiles: %v", err)
 	}
 
+	// All profiles land in ont-system regardless of install namespace.
 	for _, comp := range tenantKnownComponents {
-		ns := compNS[comp.ServiceAccountName]
-		if _, err := dyn.Resource(tenantPermissionSetGVR).Namespace(ns).Get(
+		if _, err := dyn.Resource(tenantPermissionSetGVR).Namespace("ont-system").Get(
 			context.Background(), comp.PermissionSetName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("PermissionSet %q not created for component %q", comp.PermissionSetName, comp.Name)
 		}
-		if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace(ns).Get(
+		if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
 			context.Background(), comp.PolicyName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("RBACPolicy %q not created for component %q", comp.PolicyName, comp.Name)
 		}
-		if _, err := dyn.Resource(tenantRBACProfileGVR).Namespace(ns).Get(
+		if _, err := dyn.Resource(tenantRBACProfileGVR).Namespace("ont-system").Get(
 			context.Background(), comp.ProfileName, metav1.GetOptions{},
 		); apierrors.IsNotFound(err) {
 			t.Errorf("RBACProfile %q not created for component %q", comp.ProfileName, comp.Name)
 		}
+	}
+}
+
+// --- RBACPolicy annotation-driven enforcement escalation ---
+
+// TestEnsureRBACPolicy_StampsAuditAnnotationOnCreate verifies that when conductor
+// creates a new RBACPolicy, it stamps ontai.dev/rbac-enforcement-mode=audit on
+// the metadata. This marks the policy as audit-mode so humans can identify it
+// and optionally escalate via annotation. Decision H.
+func TestEnsureRBACPolicy_StampsAuditAnnotationOnCreate(t *testing.T) {
+	sweep, kube, dyn, _ := newSweepSuite(t)
+
+	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
+
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
+		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get RBACPolicy: %v", err)
+	}
+	annotations, _, _ := unstructured.NestedStringMap(policy.Object, "metadata", "annotations")
+	if annotations[annotationEnforcementMode] != annotationEnforcementAudit {
+		t.Errorf("new RBACPolicy annotation %q: got %q, want %q",
+			annotationEnforcementMode, annotations[annotationEnforcementMode], annotationEnforcementAudit)
+	}
+	spec, _, _ := unstructured.NestedStringMap(policy.Object, "spec")
+	if spec["enforcementMode"] != "audit" {
+		t.Errorf("new RBACPolicy enforcementMode: got %q, want audit", spec["enforcementMode"])
+	}
+}
+
+// TestEnsureRBACPolicy_EnforcementAnnotation_EscalatesToStrict verifies that
+// when a human sets ontai.dev/rbac-enforcement-mode=enforcement on an existing
+// RBACPolicy, the sweep escalates enforcementMode to strict on the next cycle.
+// This is the human-in-loop gate: conductor never self-escalates. Decision H.
+func TestEnsureRBACPolicy_EnforcementAnnotation_EscalatesToStrict(t *testing.T) {
+	sweep, kube, dyn, _ := newSweepSuite(t)
+
+	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
+
+	// Pre-create the RBACPolicy with the enforcement annotation already set,
+	// simulating a human who ran: kubectl annotate rbacpolicy/cert-manager-rbac-policy
+	// ontai.dev/rbac-enforcement-mode=enforcement -n ont-system
+	preExisting := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "security.ontai.dev/v1alpha1",
+			"kind":       "RBACPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "cert-manager-rbac-policy",
+				"namespace": "ont-system",
+				"annotations": map[string]interface{}{
+					annotationEnforcementMode: annotationEnforcementStrict,
+				},
+			},
+			"spec": map[string]interface{}{
+				"enforcementMode": "audit",
+			},
+		},
+	}
+	if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Create(
+		context.Background(), preExisting, metav1.CreateOptions{},
+	); err != nil {
+		t.Fatalf("pre-create RBACPolicy: %v", err)
+	}
+
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	updated, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
+		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get updated RBACPolicy: %v", err)
+	}
+	spec, _, _ := unstructured.NestedStringMap(updated.Object, "spec")
+	if spec["enforcementMode"] != "strict" {
+		t.Errorf("enforcementMode after annotation escalation: got %q, want strict", spec["enforcementMode"])
+	}
+}
+
+// TestEnsureRBACPolicy_AuditAnnotation_KeepsAudit verifies that an existing
+// RBACPolicy carrying the default audit annotation is left unchanged (enforcementMode
+// stays audit). Conductor never self-escalates.
+func TestEnsureRBACPolicy_AuditAnnotation_KeepsAudit(t *testing.T) {
+	sweep, kube, dyn, _ := newSweepSuite(t)
+
+	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
+
+	preExisting := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "security.ontai.dev/v1alpha1",
+			"kind":       "RBACPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "cert-manager-rbac-policy",
+				"namespace": "ont-system",
+				"annotations": map[string]interface{}{
+					annotationEnforcementMode: annotationEnforcementAudit,
+				},
+			},
+			"spec": map[string]interface{}{
+				"enforcementMode": "audit",
+			},
+		},
+	}
+	if _, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Create(
+		context.Background(), preExisting, metav1.CreateOptions{},
+	); err != nil {
+		t.Fatalf("pre-create RBACPolicy: %v", err)
+	}
+
+	if err := sweep.createComponentProfiles(context.Background(), annotationEnforcementAudit); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	updated, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
+		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get updated RBACPolicy: %v", err)
+	}
+	spec, _, _ := unstructured.NestedStringMap(updated.Object, "spec")
+	if spec["enforcementMode"] != "audit" {
+		t.Errorf("enforcementMode with audit annotation: got %q, want audit", spec["enforcementMode"])
+	}
+}
+
+// --- management cluster enforcement escalation ---
+
+// TestEnsureRBACPolicy_MgmtClusterAnnotation_EscalatesToStrict verifies that when
+// admin annotates the InfrastructureTalosCluster in seam-system on the management
+// cluster with ontai.dev/rbac-enforcement-mode=enforcement, the sweep escalates
+// all RBACPolicies to strict. This is the management-side human-in-loop gate: admin
+// annotates a governance object on the management cluster; conductor propagates the
+// intent to the tenant cluster's RBACPolicies on the next sweep cycle. Decision H.
+func TestEnsureRBACPolicy_MgmtClusterAnnotation_EscalatesToStrict(t *testing.T) {
+	// Set up mgmt fake client with InfrastructureTalosCluster in seam-system.
+	mgmtScheme := runtime.NewScheme()
+	mgmtScheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Kind: "InfrastructureTalosCluster"},
+		&unstructured.Unstructured{},
+	)
+	mgmtScheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Kind: "InfrastructureTalosClusterList"},
+		&unstructured.UnstructuredList{},
+	)
+
+	// Admin has annotated the TC on the management cluster.
+	tc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructureTalosCluster",
+			"metadata": map[string]interface{}{
+				"name":      "ccs-dev",
+				"namespace": "seam-system",
+				"annotations": map[string]interface{}{
+					annotationEnforcementMode: annotationEnforcementStrict,
+				},
+			},
+		},
+	}
+	mgmtDyn := dynamicfake.NewSimpleDynamicClient(mgmtScheme, tc)
+
+	// Set up tenant sweep with mgmt client.
+	tenantScheme := runtime.NewScheme()
+	registerSecurityCRDs(tenantScheme)
+	kube := kubefake.NewClientset()
+	dyn := dynamicfake.NewSimpleDynamicClient(tenantScheme)
+	sweep := &TenantBootstrapSweep{
+		KubeClient:        kube,
+		DynamicClient:     dyn,
+		MgmtDynamicClient: mgmtDyn,
+		ClusterName:       "ccs-dev",
+		Gate:              webhook.NewEnforcementGate(),
+	}
+
+	addNamespace(t, kube, "cert-manager", nil)
+	addServiceAccount(t, kube, "cert-manager", "cert-manager", nil)
+
+	if err := sweep.createComponentProfiles(context.Background(), sweep.readMgmtEnforcementMode(context.Background())); err != nil {
+		t.Fatalf("createComponentProfiles: %v", err)
+	}
+
+	policy, err := dyn.Resource(tenantRBACPolicyGVR).Namespace("ont-system").Get(
+		context.Background(), "cert-manager-rbac-policy", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get RBACPolicy: %v", err)
+	}
+	spec, _, _ := unstructured.NestedStringMap(policy.Object, "spec")
+	if spec["enforcementMode"] != "strict" {
+		t.Errorf("enforcementMode after mgmt cluster annotation: got %q, want strict", spec["enforcementMode"])
 	}
 }

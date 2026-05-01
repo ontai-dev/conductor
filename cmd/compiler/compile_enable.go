@@ -286,6 +286,7 @@ func runEnableSubcommand(args []string) {
 	clusterName := fs.String("cluster-name", "", "Management cluster name stamped into the Conductor --cluster-ref arg. Required for production deployments.")
 	clusterRole := fs.String("cluster-role", "management", "Conductor role for this cluster (management or tenant). Defaults to management.")
 	dsnsIP := fs.String("dsns-ip", "", "DSNS LoadBalancer IP (lbipam.cilium.io/ips annotation on dsns-loadbalancer Service). Required for production deployments.")
+	mgmtSigningPublicKey := fs.String("management-signing-public-key", "", "Path to the management cluster's Ed25519 public key PEM file. Required when --cluster-role=tenant. INV-026.")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, enableHelp)
@@ -301,8 +302,12 @@ func runEnableSubcommand(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
+	if *clusterRole == "tenant" && *mgmtSigningPublicKey == "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --management-signing-public-key is required when --cluster-role=tenant (INV-026)")
+		os.Exit(1)
+	}
 
-	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole, *mgmtSigningPublicKey); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -326,7 +331,7 @@ func runEnableSubcommand(args []string) {
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole string) error {
+func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole, mgmtSigningPublicKey string) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
@@ -373,7 +378,7 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 			return fmt.Errorf("phase 3 platform-wrapper: %w", err)
 		}
 	}
-	if err := writePhase4Conductor(output, cdt, clusterRole); err != nil {
+	if err := writePhase4Conductor(output, cdt, clusterRole, mgmtSigningPublicKey); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
 	if clusterRole == "management" {
@@ -1600,7 +1605,7 @@ func writePlatformWrapperCRDs(dir string) error {
 
 // --- Phase 4: conductor ---
 
-func writePhase4Conductor(output string, cdt operatorSpec, clusterRole string) error {
+func writePhase4Conductor(output string, cdt operatorSpec, clusterRole, mgmtSigningPublicKey string) error {
 	dir := filepath.Join(output, "04-conductor")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1662,11 +1667,18 @@ func writePhase4Conductor(output string, cdt operatorSpec, clusterRole string) e
 		}
 	}
 
-	// conductor-signing-key.yaml — Ed25519 key pair Secret in ont-system.
+	// conductor-signing-key.yaml — Ed25519 key material Secret in ont-system.
 	// Emitted BEFORE conductor-deployment.yaml so the volume mount resolves at apply time.
-	// INV-026, conductor-schema.md §15.
-	if err := writeConductorSigningKeySecret(dir); err != nil {
-		return err
+	// Management: full keypair (signs PackInstances + PermissionSnapshots, INV-026).
+	// Tenant: management cluster's public key only (verifies, never signs, INV-026).
+	if clusterRole == "tenant" {
+		if err := writeTenantConductorSigningKeySecret(dir, mgmtSigningPublicKey); err != nil {
+			return err
+		}
+	} else {
+		if err := writeConductorSigningKeySecret(dir); err != nil {
+			return err
+		}
 	}
 
 	// conductor-deployment.yaml — Conductor Deployment. Role is set from --cluster-role.
@@ -2314,12 +2326,16 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 	}
 
 	// Conductor mounts the Ed25519 signing key Secret emitted in phase 04.
-	// SIGNING_PRIVATE_KEY_PATH and SIGNING_PUBLIC_KEY_PATH point to the PEM files
-	// within the mount. The Secret (conductor-signing-key) is emitted BEFORE this
-	// Deployment in the phase 04 apply order. INV-026, conductor-schema.md §15.
+	// Management: both SIGNING_PRIVATE_KEY_PATH and SIGNING_PUBLIC_KEY_PATH set (signs + verifies).
+	// Tenant: SIGNING_PUBLIC_KEY_PATH only — tenant carries the management cluster's public key
+	// for verification and must never hold the private key. INV-026, conductor-schema.md §15.
 	if op.Name == "conductor" {
+		if op.Role != "tenant" {
+			env = append(env,
+				corev1.EnvVar{Name: "SIGNING_PRIVATE_KEY_PATH", Value: "/etc/conductor/signing/private.pem"},
+			)
+		}
 		env = append(env,
-			corev1.EnvVar{Name: "SIGNING_PRIVATE_KEY_PATH", Value: "/etc/conductor/signing/private.pem"},
 			corev1.EnvVar{Name: "SIGNING_PUBLIC_KEY_PATH", Value: "/etc/conductor/signing/public.pem"},
 		)
 		volumes = append(volumes, corev1.Volume{
@@ -2962,6 +2978,51 @@ func writeConductorSigningKeySecret(dir string) error {
 	buf.WriteString("# Rotate: re-run compiler enable and restart the Conductor Deployment.\n")
 	buf.WriteString("# WARNING: generated fresh each compiler enable run — store in GitOps after first enable.\n")
 	buf.WriteString("# INV-026, conductor-schema.md §15.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+	return os.WriteFile(filepath.Join(dir, "conductor-signing-key.yaml"), buf.Bytes(), 0644)
+}
+
+// writeTenantConductorSigningKeySecret writes a conductor-signing-key Secret for
+// tenant clusters containing ONLY the management cluster's public key. Tenant
+// conductors verify PackInstance signatures but never sign — they must not hold
+// the private key (INV-026). mgmtPublicKeyPath is the path to the management
+// cluster's public.pem (PKIX PEM-encoded Ed25519 public key).
+func writeTenantConductorSigningKeySecret(dir, mgmtPublicKeyPath string) error {
+	publicKeyPEM, err := os.ReadFile(mgmtPublicKeyPath)
+	if err != nil {
+		return fmt.Errorf("read management public key %s: %w", mgmtPublicKeyPath, err)
+	}
+
+	secret := corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conductor-signing-key",
+			Namespace: "ont-system",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "conductor",
+				"app.kubernetes.io/component": "signing",
+				"ontai.dev/managed-by":        "compiler",
+			},
+			Annotations: map[string]string{
+				"ontai.dev/key-source": "management-cluster-public-key",
+			},
+		},
+		StringData: map[string]string{
+			"public.pem": string(publicKeyPEM),
+		},
+	}
+
+	data, err := yaml.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("marshal tenant conductor-signing-key Secret: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Conductor signing key Secret (tenant cluster) — management cluster public key only.\n")
+	buf.WriteString("# Tenant conductors verify signatures; they never sign. No private.pem. INV-026.\n")
+	buf.WriteString("# Source: management cluster conductor-signing-key Secret public.pem.\n")
+	buf.WriteString("# conductor-schema.md §15.\n")
 	buf.WriteString("---\n")
 	buf.Write(data)
 	return os.WriteFile(filepath.Join(dir, "conductor-signing-key.yaml"), buf.Bytes(), 0644)

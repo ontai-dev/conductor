@@ -168,12 +168,13 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	var snapshotPullLoop *agent.SnapshotPullLoop
 	var packInstancePullLoop *agent.PackInstancePullLoop
 	var packReceiptDriftLoop *agent.PackReceiptDriftLoop
+	var mgmtDynamicClient dynamic.Interface
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
 		if err != nil {
 			return fmt.Errorf("conductor agent: build management cluster REST config: %w", err)
 		}
-		mgmtDynamicClient, err := dynamic.NewForConfig(mgmtConfig)
+		mgmtDynamicClient, err = dynamic.NewForConfig(mgmtConfig)
 		if err != nil {
 			return fmt.Errorf("conductor agent: build management cluster dynamic client: %w", err)
 		}
@@ -218,22 +219,14 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		fmt.Printf("conductor agent: cluster=%q packinstance pull loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
 
-		// PackReceipt drift loop — verifies packSignature, detects missing resources,
-		// emits DriftSignals to management cluster. Role=tenant only. conductor-schema.md §7.
-		if pubKeyPath != "" {
-			packReceiptDriftLoop, err = agent.NewPackReceiptDriftLoopWithKey(
-				dynamicClient, mgmtDynamicClient,
-				execCtx.ClusterRef, ns, pubKeyPath,
-			)
-			if err != nil {
-				return fmt.Errorf("conductor agent: build pack receipt drift loop with signing key: %w", err)
-			}
-		} else {
-			packReceiptDriftLoop = agent.NewPackReceiptDriftLoop(
-				dynamicClient, mgmtDynamicClient,
-				execCtx.ClusterRef, ns,
-			)
-		}
+		// PackReceipt drift loop — reads status.verified (set by packinstance pull loop),
+		// detects missing deployedResources, emits DriftSignals to management cluster.
+		// Role=tenant only. Signature verification is delegated to packinstance pull loop (INV-026).
+		// conductor-schema.md §7.
+		packReceiptDriftLoop = agent.NewPackReceiptDriftLoop(
+			dynamicClient, mgmtDynamicClient,
+			execCtx.ClusterRef, ns,
+		)
 		fmt.Printf("conductor agent: cluster=%q pack receipt drift loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
 	}
@@ -324,9 +317,11 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	if role == RoleTenant {
 		enforcementGate = webhook.NewEnforcementGate()
 		tenantSweep = &agent.TenantBootstrapSweep{
-			KubeClient:    client,
-			DynamicClient: dynamicClient,
-			Gate:          enforcementGate,
+			KubeClient:        client,
+			DynamicClient:     dynamicClient,
+			MgmtDynamicClient: mgmtDynamicClient,
+			ClusterName:       execCtx.ClusterRef,
+			Gate:              enforcementGate,
 		}
 	}
 

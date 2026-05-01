@@ -26,7 +26,7 @@ func readPhaseFile(t *testing.T, outDir, phase, filename string) string {
 // phase subdirectories, each containing a phase-meta.yaml. conductor-schema.md §9 Step 3.
 func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -100,7 +100,7 @@ func TestEnable_ProducesAllOutputFiles(t *testing.T) {
 // fieldRefs, not as static env values. conductor-schema.md §15.
 func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "v1.9.3-r1", defaultRegistry, "", false, "ccs-mgmt", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "v1.9.3-r1", defaultRegistry, "", false, "ccs-mgmt", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestEnable_ConductorDeploymentCarriesManagementRole(t *testing.T) {
 // CONTEXT.md §4 Namespace Model (locked 2026-04-05).
 func TestEnable_Phase00aNamespacesContent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestEnable_Phase00aLexicographicOrder(t *testing.T) {
 // ont-system and other operators are in seam-system. CONTEXT.md §4 Namespace Model.
 func TestEnable_ConductorInOntSystem(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -202,7 +202,7 @@ func TestEnable_ConductorInOntSystem(t *testing.T) {
 // Seam operators are present across the phase deployment files.
 func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -228,7 +228,7 @@ func TestEnable_OperatorsYAMLContainsAllDeployments(t *testing.T) {
 // bypass INV-004 (Guardian owns all RBAC). guardian-schema.md §6.
 func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -276,7 +276,7 @@ func TestEnable_RBACYAMLContainsAllOperators(t *testing.T) {
 // contains Lease resources for all operators.
 func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -294,7 +294,7 @@ func TestEnable_LeaderElectionYAMLContainsLeases(t *testing.T) {
 // guardian-schema.md §6 (Seam operator RBACProfiles).
 func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func TestEnable_RBACProfilesYAMLContainsAllProfiles(t *testing.T) {
 // name. guardian-schema.md §7, CLAUDE.md §14 Decision 2.
 func TestEnable_RBACProfilesDomainIdentityRef(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -340,7 +340,7 @@ func TestEnable_RBACProfilesDomainIdentityRef(t *testing.T) {
 // infrastructure.ontai.dev/v1alpha1, guardian-schema.md §7.
 func TestEnable_SeamMembershipsContent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestEnable_SeamMembershipsContent(t *testing.T) {
 // include the human-review annotation. guardian-schema.md §6.
 func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -380,7 +380,7 @@ func TestEnable_RBACProfilesCarryReviewAnnotation(t *testing.T) {
 // policy-type label and management-maximum ceiling. guardian-schema.md §6, §19.
 func TestEnable_BootstrapRBACPolicyName(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestEnable_BootstrapRBACPolicyName(t *testing.T) {
 // CS-INV-008: exactly one PermissionSet at Layer 1. guardian-schema.md §6, §19.
 func TestEnable_BootstrapPermissionSetNames(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -432,7 +432,7 @@ func TestEnable_BootstrapPermissionSetNames(t *testing.T) {
 // can identify it as the Layer 1 fleet ceiling.
 func TestEnable_ManagementMaximumHasPolicyTypeLabel(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -445,7 +445,7 @@ func TestEnable_ManagementMaximumHasPolicyTypeLabel(t *testing.T) {
 // wildcard Layer 1 ceiling. Per-operator PermissionSets must not be emitted. CS-INV-008.
 func TestEnable_OnlyManagementMaximumPermissionSet(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -468,7 +468,7 @@ func TestEnable_OnlyManagementMaximumPermissionSet(t *testing.T) {
 // as permissionSetRef. CS-INV-008: no per-operator PermissionSet references.
 func TestEnable_RBACProfilesRefManagementPolicyAndMaximum(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -501,10 +501,10 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 	out1 := t.TempDir()
 	out2 := t.TempDir()
 
-	if err := compileEnableBundle(out1, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(out1, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("first compileEnableBundle: %v", err)
 	}
-	if err := compileEnableBundle(out2, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(out2, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("second compileEnableBundle: %v", err)
 	}
 
@@ -562,7 +562,7 @@ func TestEnable_OutputIsDeterministic(t *testing.T) {
 func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 	outDir := t.TempDir()
 	const version = "v1.9.3-r5"
-	if err := compileEnableBundle(outDir, version, defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, version, defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -581,7 +581,7 @@ func TestEnable_VersionPropagatesIntoImages(t *testing.T) {
 // are present across the phase CRD files. conductor-schema.md §9 Step 3.
 func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -608,7 +608,7 @@ func TestEnable_CRDsYAMLIncludesAllOperatorCRDs(t *testing.T) {
 // guardian 25c9e93 WS3 CheckBootstrapLabels contract.
 func TestEnable_NamespaceLabels_BothNamespacesPresent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -622,7 +622,7 @@ func TestEnable_NamespaceLabels_BothNamespacesPresent(t *testing.T) {
 // carries kind: Namespace and the correct seam.ontai.dev/webhook-mode=exempt label.
 func TestEnable_NamespaceLabels_CorrectKindAndLabel(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -638,7 +638,7 @@ func TestEnable_NamespaceLabels_CorrectKindAndLabel(t *testing.T) {
 // not a full Namespace manifest. INV-020, CS-INV-004.
 func TestEnable_NamespaceLabels_IsSSAPatchOnly(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -657,7 +657,7 @@ func TestEnable_NamespaceLabels_IsSSAPatchOnly(t *testing.T) {
 // in applyOrder.
 func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -686,7 +686,7 @@ func TestEnable_NamespaceLabels_PhaseMeta(t *testing.T) {
 // conductor-schema.md §9 phase 0.
 func TestEnable_Phase00_DirectoryExistsAndIsFirst(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -716,7 +716,7 @@ func TestEnable_Phase00_DirectoryExistsAndIsFirst(t *testing.T) {
 // declares order: 0. conductor-schema.md §9 phase 0.
 func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -731,7 +731,7 @@ func TestEnable_Phase00_MetaOrderIsZero(t *testing.T) {
 // conductor-schema.md §9.
 func TestEnable_Phase00_PrerequisitesIsConfigMap(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -747,7 +747,7 @@ func TestEnable_Phase00_PrerequisitesIsConfigMap(t *testing.T) {
 // conductor-schema.md §9.
 func TestEnable_Phase00_PrerequisitesFourCategories(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -765,7 +765,7 @@ func TestEnable_Phase00_PrerequisitesFourCategories(t *testing.T) {
 // conductor-schema.md §9.
 func TestEnable_Phase00_PrerequisitesDatabaseDetails(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -781,7 +781,7 @@ func TestEnable_Phase00_PrerequisitesDatabaseDetails(t *testing.T) {
 // conductor-schema.md §9.
 func TestEnable_Phase00_PrerequisitesApplyOrderListsPrerequisites(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -795,7 +795,7 @@ func TestEnable_Phase00_PrerequisitesApplyOrderListsPrerequisites(t *testing.T) 
 // the guardian-db-app Secret. guardian-schema.md §16 CNPG Deployment Contract.
 func TestEnable_Phase02_GuardianDeploymentCarriesCNPGEnvVars(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -815,7 +815,7 @@ func TestEnable_Phase02_GuardianDeploymentCarriesCNPGEnvVars(t *testing.T) {
 // seam-core-schema.md §8 Decision 2.
 func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -834,7 +834,7 @@ func TestEnable_Phase05_DSNSZoneConfigMapLabelsAndAnnotations(t *testing.T) {
 // seam-core-schema.md §8 Decision 3.
 func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -858,7 +858,7 @@ func TestEnable_Phase05_DSNSLoadBalancerTargetsPort53(t *testing.T) {
 // conductor-schema.md §9, platform-schema.md §3.
 func TestEnable_CAPIPhase_AbsentWithoutFlag(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -873,7 +873,7 @@ func TestEnable_CAPIPhase_AbsentWithoutFlag(t *testing.T) {
 // conductor-schema.md §9, platform-schema.md §3.
 func TestEnable_CAPIPhase_PresentWithFlag(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -904,7 +904,7 @@ func TestEnable_CAPIPhase_PresentWithFlag(t *testing.T) {
 // declares order 0b and sorts lexicographically between 00- and 01- phases.
 func TestEnable_CAPIPhase_PhaseMetaOrder(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -947,7 +947,7 @@ func TestEnable_CAPIPhase_PhaseMetaOrder(t *testing.T) {
 // 00b phase contains the expected CAPI core CRDs. platform-schema.md §3.
 func TestEnable_CAPIPhase_CAPICoreContainsCRDs(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -965,7 +965,7 @@ func TestEnable_CAPIPhase_CAPICoreContainsCRDs(t *testing.T) {
 // contains the TalosConfig CRD. platform-schema.md §3.
 func TestEnable_CAPIPhase_TalosBootstrapContainsCRD(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -979,7 +979,7 @@ func TestEnable_CAPIPhase_TalosBootstrapContainsCRD(t *testing.T) {
 // contains the TalosControlPlane CRD. platform-schema.md §3.
 func TestEnable_CAPIPhase_TalosControlPlaneContainsCRD(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -994,7 +994,7 @@ func TestEnable_CAPIPhase_TalosControlPlaneContainsCRD(t *testing.T) {
 // platform-schema.md §4 Seam Infrastructure Provider.
 func TestEnable_CAPIPhase_SeamInfrastructureCRDs(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1010,7 +1010,7 @@ func TestEnable_CAPIPhase_SeamInfrastructureCRDs(t *testing.T) {
 // remove any of the standard phases that are always present.
 func TestEnable_CAPIPhase_OtherPhasesStillPresent(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", true, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1033,7 +1033,7 @@ func TestEnable_CAPIPhase_OtherPhasesStillPresent(t *testing.T) {
 // --registry flag is provided.
 func TestEnable_DefaultRegistryInImageReferences(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1052,7 +1052,7 @@ func TestEnable_DefaultRegistryInImageReferences(t *testing.T) {
 func TestEnable_RegistryFlagOverride(t *testing.T) {
 	outDir := t.TempDir()
 	const customRegistry = "registry.example.com/myproject"
-	if err := compileEnableBundle(outDir, "dev", customRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", customRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1075,7 +1075,7 @@ func TestEnable_RegistryFlagOverride(t *testing.T) {
 // INV-001 (no shell scripts anywhere). C-COREDNS-PATCH.
 func TestEnable_Phase05_NoDSNSPatchScript(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1092,7 +1092,7 @@ func TestEnable_Phase05_NoDSNSPatchScript(t *testing.T) {
 // language. C-COREDNS-PATCH.
 func TestEnable_Phase05_MetaReferencesCI(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1113,7 +1113,7 @@ func TestEnable_Phase05_MetaReferencesCI(t *testing.T) {
 // conductor-schema.md §5, wrapper-schema.md §4.
 func TestEnable_WrapperRunnerRole_ContainsPackOperationResultRule(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "test-cluster", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "test-cluster", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1136,7 +1136,7 @@ func TestEnable_WrapperRunnerRole_ContainsPackOperationResultRule(t *testing.T) 
 // wrapper-schema.md §4.
 func TestEnable_WrapperRunnerRole_ContainsClusterScopedClusterRole(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "test-cluster", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "test-cluster", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 
@@ -1162,7 +1162,7 @@ func TestEnable_WrapperRunnerRole_ContainsClusterScopedClusterRole(t *testing.T)
 // C-KUEUE-WEBHOOK.
 func TestEnable_Phase00_KueueWebhookScopingDocumented(t *testing.T) {
 	outDir := t.TempDir()
-	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", ""); err != nil {
+	if err := compileEnableBundle(outDir, "dev", defaultRegistry, "", false, "", "", "", ""); err != nil {
 		t.Fatalf("compileEnableBundle error: %v", err)
 	}
 

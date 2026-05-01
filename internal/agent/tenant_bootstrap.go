@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -26,6 +25,7 @@ const (
 	annotationRBACOwnerValue     = "guardian"
 	annotationEnforcementMode    = "ontai.dev/rbac-enforcement-mode"
 	annotationEnforcementAudit   = "audit"
+	annotationEnforcementStrict  = "enforcement"
 	webhookExemptLabel           = "seam.ontai.dev/webhook-mode"
 	webhookExemptValue           = "exempt"
 )
@@ -131,6 +131,14 @@ var (
 		Version:  "v1alpha1",
 		Resource: "rbacprofiles",
 	}
+
+	// mgmtTalosClusterGVR is used to read the InfrastructureTalosCluster from the
+	// management cluster's seam-system namespace to determine admin-set enforcement intent.
+	mgmtTalosClusterGVR = schema.GroupVersionResource{
+		Group:    "infrastructure.ontai.dev",
+		Version:  "v1alpha1",
+		Resource: "infrastructuretalosclusters",
+	}
 )
 
 // TenantBootstrapSweep performs the bootstrap annotation sweep and component
@@ -149,22 +157,23 @@ var (
 // RBAC resources without the ownership annotation. conductor-schema.md §15,
 // guardian-schema.md §3 Step 2, §6.
 type TenantBootstrapSweep struct {
-	KubeClient    kubernetes.Interface
-	DynamicClient dynamic.Interface
-	Gate          *webhook.EnforcementGate
+	KubeClient        kubernetes.Interface
+	DynamicClient     dynamic.Interface
+	MgmtDynamicClient dynamic.Interface // management cluster client; reads enforcement intent
+	ClusterName       string            // this cluster's name; used to look up TC in seam-system
+	Gate              *webhook.EnforcementGate
 }
 
 // RunOnce performs the full bootstrap sweep and component profile creation.
 // Should be started as a goroutine after leader election wins. Blocks until
-// complete, then sets the enforcement gate to strict.
+// complete. The gate remains in audit mode always — conductor in tenant never
+// enforces; it observes and records. guardian-schema.md §6.
 func (s *TenantBootstrapSweep) RunOnce(ctx context.Context) {
 	if err := s.runOnce(ctx); err != nil {
 		fmt.Printf("tenant bootstrap sweep: error: %v\n", err)
-		// Non-fatal: gate remains in audit mode if sweep fails. Retried periodically.
 		return
 	}
-	s.Gate.SetStrict()
-	fmt.Printf("tenant bootstrap sweep: complete — enforcement mode set to strict\n")
+	fmt.Printf("tenant bootstrap sweep: complete (audit mode — sweep observes only, never enforces)\n")
 }
 
 // RunPeriodic runs the bootstrap sweep on startup then repeats on interval.
@@ -193,10 +202,38 @@ func (s *TenantBootstrapSweep) runOnce(ctx context.Context) error {
 	if err := s.sweepAllNamespaces(ctx); err != nil {
 		return fmt.Errorf("sweep namespaces: %w", err)
 	}
-	if err := s.createComponentProfiles(ctx); err != nil {
+	// Read admin enforcement intent from management cluster before profile creation.
+	// Admin annotates InfrastructureTalosCluster in seam-system on the management cluster
+	// with ontai.dev/rbac-enforcement-mode=enforcement to escalate all policies.
+	// This is the management-side human-in-loop gate. Decision H.
+	mgmtMode := s.readMgmtEnforcementMode(ctx)
+	if err := s.createComponentProfiles(ctx, mgmtMode); err != nil {
 		return fmt.Errorf("create component profiles: %w", err)
 	}
 	return nil
+}
+
+// readMgmtEnforcementMode reads the ontai.dev/rbac-enforcement-mode annotation from
+// the InfrastructureTalosCluster named ClusterName in seam-system on the management
+// cluster. Returns annotationEnforcementAudit when the annotation is absent, the
+// management client is nil, or any transient error occurs. Decision H.
+func (s *TenantBootstrapSweep) readMgmtEnforcementMode(ctx context.Context) string {
+	if s.MgmtDynamicClient == nil || s.ClusterName == "" {
+		return annotationEnforcementAudit
+	}
+	tc, err := s.MgmtDynamicClient.Resource(mgmtTalosClusterGVR).Namespace("seam-system").Get(
+		ctx, s.ClusterName, metav1.GetOptions{},
+	)
+	if err != nil {
+		return annotationEnforcementAudit
+	}
+	annotations, _, _ := unstructured.NestedStringMap(tc.Object, "metadata", "annotations")
+	if annotations[annotationEnforcementMode] == annotationEnforcementStrict {
+		fmt.Printf("tenant bootstrap sweep: management cluster enforcement intent detected for %q — escalating all RBACPolicies\n",
+			s.ClusterName)
+		return annotationEnforcementStrict
+	}
+	return annotationEnforcementAudit
 }
 
 // sweepAllNamespaces annotates all un-owned RBAC resources in all non-exempt
@@ -235,14 +272,7 @@ func (s *TenantBootstrapSweep) sweepNamespace(ctx context.Context, ns string) er
 		if role.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		target := &rbacv1.Role{}
-		target.Name = role.Name
-		target.Namespace = role.Namespace
-		if _, err := s.KubeClient.RbacV1().Roles(ns).Patch(
-			ctx, role.Name, apitypes.MergePatchType, sweepAnnotationPatch, metav1.PatchOptions{},
-		); err != nil {
-			return fmt.Errorf("patch Role %s/%s: %w", ns, role.Name, err)
-		}
+		fmt.Printf("tenant bootstrap sweep: observed unowned Role %s/%s\n", ns, role.Name)
 	}
 
 	rbs, err := s.KubeClient.RbacV1().RoleBindings(ns).List(ctx, metav1.ListOptions{})
@@ -253,11 +283,7 @@ func (s *TenantBootstrapSweep) sweepNamespace(ctx context.Context, ns string) er
 		if rb.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		if _, err := s.KubeClient.RbacV1().RoleBindings(ns).Patch(
-			ctx, rb.Name, apitypes.MergePatchType, sweepAnnotationPatch, metav1.PatchOptions{},
-		); err != nil {
-			return fmt.Errorf("patch RoleBinding %s/%s: %w", ns, rb.Name, err)
-		}
+		fmt.Printf("tenant bootstrap sweep: observed unowned RoleBinding %s/%s\n", ns, rb.Name)
 	}
 
 	sas, err := s.KubeClient.CoreV1().ServiceAccounts(ns).List(ctx, metav1.ListOptions{})
@@ -292,11 +318,7 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 		if cr.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		if _, err := s.KubeClient.RbacV1().ClusterRoles().Patch(
-			ctx, cr.Name, apitypes.MergePatchType, sweepAnnotationPatch, metav1.PatchOptions{},
-		); err != nil {
-			return fmt.Errorf("patch ClusterRole %s: %w", cr.Name, err)
-		}
+		fmt.Printf("tenant bootstrap sweep: observed unowned ClusterRole %s\n", cr.Name)
 	}
 
 	crbs, err := s.KubeClient.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
@@ -310,11 +332,7 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 		if crb.Annotations[annotationRBACOwner] == annotationRBACOwnerValue {
 			continue
 		}
-		if _, err := s.KubeClient.RbacV1().ClusterRoleBindings().Patch(
-			ctx, crb.Name, apitypes.MergePatchType, sweepAnnotationPatch, metav1.PatchOptions{},
-		); err != nil {
-			return fmt.Errorf("patch ClusterRoleBinding %s: %w", crb.Name, err)
-		}
+		fmt.Printf("tenant bootstrap sweep: observed unowned ClusterRoleBinding %s\n", crb.Name)
 	}
 
 	return nil
@@ -324,34 +342,38 @@ func (s *TenantBootstrapSweep) sweepClusterScoped(ctx context.Context) error {
 // for each known component discovered on the tenant cluster. Discovery finds the
 // component's install namespace by matching ServiceAccountName across all non-system
 // namespaces — no namespace is hardcoded. Skips silently if security CRDs are absent.
-func (s *TenantBootstrapSweep) createComponentProfiles(ctx context.Context) error {
+// createComponentProfiles creates PermissionSet, RBACPolicy, and RBACProfile in
+// ont-system for each discovered component. mgmtMode is the enforcement mode read
+// from the management cluster TC annotation; it takes precedence over per-policy
+// local annotations. annotationEnforcementAudit means use per-policy local annotation.
+func (s *TenantBootstrapSweep) createComponentProfiles(ctx context.Context, mgmtMode string) error {
 	for _, comp := range tenantKnownComponents {
-		ns, principalRef, found := s.discoverComponentNamespace(ctx, comp)
+		installNS, principalRef, found := s.discoverComponentNamespace(ctx, comp)
 		if !found {
 			continue
 		}
 
-		if err := s.ensurePermissionSet(ctx, ns, comp); err != nil {
+		if err := s.ensurePermissionSet(ctx, "ont-system", comp); err != nil {
 			if isSecurityCRDAbsent(err) {
 				fmt.Printf("tenant bootstrap sweep: security CRDs not installed on this cluster, skipping profile creation\n")
 				return nil
 			}
 			return fmt.Errorf("PermissionSet for %q: %w", comp.Name, err)
 		}
-		if err := s.ensureRBACPolicy(ctx, ns, comp); err != nil {
+		if err := s.ensureRBACPolicy(ctx, "ont-system", comp, mgmtMode); err != nil {
 			if isSecurityCRDAbsent(err) {
 				return nil
 			}
 			return fmt.Errorf("RBACPolicy for %q: %w", comp.Name, err)
 		}
-		if err := s.ensureRBACProfile(ctx, ns, principalRef, comp); err != nil {
+		if err := s.ensureRBACProfile(ctx, "ont-system", principalRef, comp); err != nil {
 			if isSecurityCRDAbsent(err) {
 				return nil
 			}
 			return fmt.Errorf("RBACProfile for %q: %w", comp.Name, err)
 		}
 
-		fmt.Printf("tenant bootstrap sweep: component wrapped: %s in %s\n", comp.Name, ns)
+		fmt.Printf("tenant bootstrap sweep: component wrapped: %s (installed in %s, profiles in ont-system)\n", comp.Name, installNS)
 	}
 	return nil
 }
@@ -461,15 +483,56 @@ func (s *TenantBootstrapSweep) ensurePermissionSet(ctx context.Context, ns strin
 	return err
 }
 
-func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, ns string, comp tenantComponent) error {
-	_, err := s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(ns).Get(
+// ensureRBACPolicy creates or updates the RBACPolicy for comp in ns.
+//
+// Enforcement mode precedence (highest to lowest):
+//  1. mgmtMode=annotationEnforcementStrict: management cluster admin has set
+//     ontai.dev/rbac-enforcement-mode=enforcement on the InfrastructureTalosCluster
+//     in seam-system. All policies escalate to strict.
+//  2. Per-policy local annotation: admin has set the annotation directly on the
+//     RBACPolicy CR in ont-system on the tenant cluster.
+//  3. Default: audit (conductor never self-escalates).
+func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, ns string, comp tenantComponent, mgmtMode string) error {
+	existing, err := s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(ns).Get(
 		ctx, comp.PolicyName, metav1.GetOptions{},
 	)
 	if err == nil {
+		// Determine target enforcement mode. Management cluster annotation wins.
+		targetMode := "audit"
+		if mgmtMode == annotationEnforcementStrict {
+			targetMode = "strict"
+		} else {
+			annotations, _, _ := unstructured.NestedStringMap(existing.Object, "metadata", "annotations")
+			if annotations[annotationEnforcementMode] == annotationEnforcementStrict {
+				targetMode = "strict"
+			}
+		}
+		if targetMode == "strict" {
+			patch := map[string]interface{}{"spec": map[string]interface{}{"enforcementMode": "strict"}}
+			data, _ := json.Marshal(patch)
+			if _, pErr := s.DynamicClient.Resource(tenantRBACPolicyGVR).Namespace(ns).Patch(
+				ctx, comp.PolicyName, apitypes.MergePatchType, data, metav1.PatchOptions{},
+			); pErr != nil {
+				fmt.Printf("tenant bootstrap sweep: escalate RBACPolicy %s/%s to strict: %v\n",
+					ns, comp.PolicyName, pErr)
+			} else {
+				src := "local annotation"
+				if mgmtMode == annotationEnforcementStrict {
+					src = "management cluster"
+				}
+				fmt.Printf("tenant bootstrap sweep: RBACPolicy %s/%s escalated to enforcement (%s)\n",
+					ns, comp.PolicyName, src)
+			}
+		}
 		return nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
+	}
+	// New policy: initial mode is determined by mgmt intent; annotate for future cycles.
+	initialMode := "audit"
+	if mgmtMode == annotationEnforcementStrict {
+		initialMode = "strict"
 	}
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -482,11 +545,14 @@ func (s *TenantBootstrapSweep) ensureRBACPolicy(ctx context.Context, ns string, 
 					"ontai.dev/managed-by": "conductor",
 					"ontai.dev/component":  comp.Name,
 				},
+				"annotations": map[string]interface{}{
+					annotationEnforcementMode: annotationEnforcementAudit,
+				},
 			},
 			"spec": map[string]interface{}{
 				"subjectScope":            "platform",
 				"maximumPermissionSetRef": comp.PermissionSetName,
-				"enforcementMode":         "strict",
+				"enforcementMode":         initialMode,
 			},
 		},
 	}
