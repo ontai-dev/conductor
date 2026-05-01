@@ -426,6 +426,11 @@ func TestPackReceiptDriftLoop_DriftResolved_ConfirmsSignal(t *testing.T) {
 	if state, _ := spec["state"].(string); state != "confirmed" {
 		t.Errorf("expected state=confirmed after drift resolved, got %q", state)
 	}
+	// correlationID must be cleared when confirming -- drift event correlation chain is closed.
+	// conductor-schema.md §7.9.
+	if cid, _ := spec["correlationID"].(string); cid != "" {
+		t.Errorf("expected correlationID cleared on confirmation, got %q", cid)
+	}
 }
 
 // TestPackReceiptDriftLoop_OrphanReceipt_TearsDownResources verifies that when the

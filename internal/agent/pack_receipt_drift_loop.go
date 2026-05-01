@@ -521,7 +521,13 @@ func (l *PackReceiptDriftLoop) resolveSignalIfHealthy(ctx context.Context, recei
 	if state != "queued" {
 		return
 	}
-	patch := map[string]interface{}{"spec": map[string]interface{}{"state": "confirmed"}}
+	// correlationID is cleared when confirming: the drift event correlation chain is
+	// closed once remediation is verified. DriftSignal invariant: confirmed signals carry
+	// no correlationID. conductor-schema.md §7.9.
+	patch := map[string]interface{}{"spec": map[string]interface{}{
+		"state":         "confirmed",
+		"correlationID": "",
+	}}
 	data, _ := json.Marshal(patch)
 	if _, pErr := l.mgmtClient.Resource(driftSignalGVR).Namespace(l.mgmtTenantNS).Patch(
 		ctx, signalName, types.MergePatchType, data, metav1.PatchOptions{},
@@ -530,7 +536,7 @@ func (l *PackReceiptDriftLoop) resolveSignalIfHealthy(ctx context.Context, recei
 			l.clusterName, signalName, pErr)
 		return
 	}
-	fmt.Printf("drift loop: cluster=%q receipt=%q drift resolved — DriftSignal confirmed\n",
+	fmt.Printf("drift loop: cluster=%q receipt=%q drift resolved — DriftSignal confirmed, correlationID cleared\n",
 		l.clusterName, receiptName)
 }
 
