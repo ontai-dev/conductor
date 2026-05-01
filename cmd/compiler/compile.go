@@ -579,6 +579,14 @@ type PackBuildInput struct {
 	// conductor-schema.md §9, wrapper-schema.md §4.
 	// +optional
 	RawSource *RawSource `yaml:"rawSource,omitempty"`
+
+	// KustomizeSource defines a kustomize overlay directory for automated packbuild.
+	// When present, the compiler runs krusty.Kustomizer on the directory, renders
+	// all resources, splits into RBAC/cluster-scoped/workload OCI layers, and pushes
+	// them to the registry. Mutually exclusive with HelmSource and RawSource.
+	// conductor-schema.md §9, wrapper-schema.md §4, T-12.
+	// +optional
+	KustomizeSource *KustomizeSource `yaml:"kustomizeSource,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -633,11 +641,17 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 		if in.Category == "raw" && in.RawSource == nil {
 			return PackBuildInput{}, fmt.Errorf("input file %q: category=raw requires rawSource to be set", path)
 		}
+		if in.Category == "kustomize" && in.KustomizeSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=kustomize requires kustomizeSource to be set", path)
+		}
 		if in.Category != "helm" && in.HelmSource != nil {
 			return PackBuildInput{}, fmt.Errorf("input file %q: helmSource is set but category=%q; remove helmSource or set category=helm", path, in.Category)
 		}
 		if in.Category != "raw" && in.RawSource != nil {
 			return PackBuildInput{}, fmt.Errorf("input file %q: rawSource is set but category=%q; remove rawSource or set category=raw", path, in.Category)
+		}
+		if in.Category != "kustomize" && in.KustomizeSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: kustomizeSource is set but category=%q; remove kustomizeSource or set category=kustomize", path, in.Category)
 		}
 	}
 
@@ -652,6 +666,13 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.RawSource != nil {
 		if in.RegistryURL == "" {
 			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when rawSource is set", path)
+		}
+		return in, nil
+	}
+	// kustomizeSource path: registryUrl required, digests computed by compiler.
+	if in.KustomizeSource != nil {
+		if in.RegistryURL == "" {
+			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when kustomizeSource is set", path)
 		}
 		return in, nil
 	}
@@ -1276,7 +1297,8 @@ func compilePackBuild(input, output string) error {
 		inputDir := filepath.Dir(input)
 		return rawCompilePackBuild(context.Background(), in, inputDir, output)
 	case "kustomize":
-		return fmt.Errorf("category=kustomize is not yet implemented")
+		inputDir := filepath.Dir(input)
+		return kustomizeCompilePackBuild(context.Background(), in, inputDir, output)
 	}
 
 	// Backward-compatible nil-check dispatch when category is absent.
@@ -1288,6 +1310,11 @@ func compilePackBuild(input, output string) error {
 	if in.RawSource != nil {
 		inputDir := filepath.Dir(input)
 		return rawCompilePackBuild(context.Background(), in, inputDir, output)
+	}
+
+	if in.KustomizeSource != nil {
+		inputDir := filepath.Dir(input)
+		return kustomizeCompilePackBuild(context.Background(), in, inputDir, output)
 	}
 
 	ns := in.Namespace

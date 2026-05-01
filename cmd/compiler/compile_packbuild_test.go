@@ -417,9 +417,9 @@ helmSource:
 	}
 }
 
-// TestCategory_KustomizeNotImplemented verifies that category=kustomize returns
-// a not-implemented error (T-12 is deferred).
-func TestCategory_KustomizeNotImplemented(t *testing.T) {
+// TestCategory_KustomizeRequiresKustomizeSource verifies that category=kustomize
+// is rejected when kustomizeSource is absent.
+func TestCategory_KustomizeRequiresKustomizeSource(t *testing.T) {
 	const input = `
 name: my-pack
 version: v1.0.0
@@ -428,7 +428,10 @@ category: kustomize
 `
 	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
 	if err == nil {
-		t.Fatal("expected error for category=kustomize (not implemented); got nil")
+		t.Fatal("expected error for category=kustomize without kustomizeSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "kustomizeSource") {
+		t.Errorf("error %q does not mention 'kustomizeSource'", err.Error())
 	}
 }
 
@@ -508,5 +511,125 @@ rawSource:
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "dispatch-raw-pack.yaml")); os.IsNotExist(err) {
 		t.Fatal("expected output ClusterPack CR; not found")
+	}
+}
+
+// ── kustomize path (T-12) ─────────────────────────────────────────────────────
+
+// writeKustomizationDir creates a minimal kustomization directory with a single
+// ConfigMap resource and returns the directory path.
+func writeKustomizationDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	const cmYAML = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kustomize-test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	const kustomizationYAML = `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- resources.yaml
+`
+	if err := os.WriteFile(filepath.Join(dir, "resources.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write resources.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kustomizationYAML), 0644); err != nil {
+		t.Fatalf("write kustomization.yaml: %v", err)
+	}
+	return dir
+}
+
+// TestKustomizeCompilePackBuild_ProducesClusterPack verifies that
+// kustomizeCompilePackBuild renders a kustomize overlay, pushes OCI layers, and
+// emits a ClusterPack CR with rbacDigest and workloadDigest populated.
+// T-12.
+func TestKustomizeCompilePackBuild_ProducesClusterPack(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	kDir := writeKustomizationDir(t)
+	outDir := t.TempDir()
+
+	in := PackBuildInput{
+		Name:            "kustomize-test-pack",
+		Version:         "v0.1.0-r1",
+		RegistryURL:     ociHost + "/packs/kustomize-test-pack",
+		Namespace:       "seam-system",
+		KustomizeSource: &KustomizeSource{Path: kDir},
+	}
+
+	if err := kustomizeCompilePackBuild(context.Background(), in, "", outDir); err != nil {
+		t.Fatalf("kustomizeCompilePackBuild: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "kustomize-test-pack.yaml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"infrastructure.ontai.dev/v1alpha1",
+		"InfrastructureClusterPack",
+		"workloadDigest",
+		"v0.1.0-r1",
+		"seam-system",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("output YAML missing %q", want)
+		}
+	}
+}
+
+// TestKustomizeCompilePackBuild_EmptyDirFails verifies that a directory with no
+// resources returns a descriptive error.
+func TestKustomizeCompilePackBuild_EmptyDirFails(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	// Directory with no kustomization.yaml — krusty should fail.
+	in := PackBuildInput{
+		Name:            "empty-kustomize-pack",
+		Version:         "v0.1.0-r1",
+		RegistryURL:     ociHost + "/packs/empty-kustomize-pack",
+		Namespace:       "seam-system",
+		KustomizeSource: &KustomizeSource{Path: t.TempDir()},
+	}
+
+	err := kustomizeCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for directory with no kustomization.yaml; got nil")
+	}
+}
+
+// TestCategory_KustomizeDispatchesViaCategory verifies that category=kustomize
+// dispatches to kustomizeCompilePackBuild (T-12, T-13).
+func TestCategory_KustomizeDispatchesViaCategory(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	kDir := writeKustomizationDir(t)
+
+	inputContent := fmt.Sprintf(`
+name: category-kustomize-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/category-kustomize-pack
+category: kustomize
+kustomizeSource:
+  path: %s
+`, ociHost, kDir)
+	outDir := t.TempDir()
+	if err := compilePackBuild(writePackBuildInput(t, inputContent), outDir); err != nil {
+		t.Fatalf("compilePackBuild with category=kustomize: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "category-kustomize-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR with category=kustomize dispatch; not found")
 	}
 }

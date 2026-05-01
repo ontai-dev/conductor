@@ -18,7 +18,6 @@ require (
 	github.com/ontai-dev/guardian v0.0.0-00010101000000-000000000000
 	github.com/ontai-dev/platform v0.0.0-00010101000000-000000000000
 	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260426085946-e3630ad7b38f
-	github.com/ontai-dev/wrapper v0.1.0-alpha.0.20260424113358-8be4f500e6ca
 	github.com/prometheus/client_golang v1.23.2
 	github.com/siderolabs/talos/pkg/machinery v1.12.6
 	google.golang.org/grpc v1.79.3
@@ -28,6 +27,8 @@ require (
 	k8s.io/apimachinery v0.35.3
 	k8s.io/client-go v0.35.3
 	sigs.k8s.io/controller-runtime v0.23.3
+	sigs.k8s.io/kustomize/api v0.19.0
+	sigs.k8s.io/kustomize/kyaml v0.19.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -75,6 +76,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gertd/go-pluralize v0.2.1 // indirect
+	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
@@ -87,6 +89,7 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20250403155104-27863c87afa6 // indirect
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -105,6 +108,7 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
+	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/runtime-spec v1.2.1 // indirect
 	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
@@ -131,6 +135,7 @@ require (
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
+	github.com/xlab/treeprint v1.2.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
