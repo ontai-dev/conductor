@@ -334,6 +334,143 @@ func TestRawCompilePackBuild_MissingPathFails(t *testing.T) {
 	}
 }
 
+// ── category validation (T-05, T-11) ─────────────────────────────────────────
+
+// TestCategory_InvalidValueFails verifies that an unknown category string is
+// rejected at input validation time.
+func TestCategory_InvalidValueFails(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: banana
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for invalid category; got nil")
+	}
+	if !strings.Contains(err.Error(), "category") {
+		t.Errorf("error %q does not mention 'category'", err.Error())
+	}
+}
+
+// TestCategory_HelmRequiresHelmSource verifies that category=helm is rejected
+// when helmSource is absent.
+func TestCategory_HelmRequiresHelmSource(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: helm
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=helm without helmSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "helmSource") {
+		t.Errorf("error %q does not mention 'helmSource'", err.Error())
+	}
+}
+
+// TestCategory_RawRequiresRawSource verifies that category=raw is rejected when
+// rawSource is absent.
+func TestCategory_RawRequiresRawSource(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: raw
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=raw without rawSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "rawSource") {
+		t.Errorf("error %q does not mention 'rawSource'", err.Error())
+	}
+}
+
+// TestCategory_HelmWithRawSourceFails verifies cross-contamination rejection:
+// helmSource present while category=raw.
+func TestCategory_HelmWithRawSourceFails(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+category: raw
+rawSource:
+  path: /tmp
+helmSource:
+  url: http://charts.example.com/nginx-ingress-1.0.0.tgz
+  chart: nginx-ingress
+  version: 1.0.0
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for helmSource set with category=raw; got nil")
+	}
+	if !strings.Contains(err.Error(), "helmSource") {
+		t.Errorf("error %q does not mention 'helmSource'", err.Error())
+	}
+}
+
+// TestCategory_KustomizeNotImplemented verifies that category=kustomize returns
+// a not-implemented error (T-12 is deferred).
+func TestCategory_KustomizeNotImplemented(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+category: kustomize
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=kustomize (not implemented); got nil")
+	}
+}
+
+// TestCategory_RawDispatchesViaCategoryField verifies that category=raw
+// dispatches to rawCompilePackBuild (T-13 category-driven dispatch).
+func TestCategory_RawDispatchesViaCategoryField(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const cmYAML = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: category-test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "cm.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	inputContent := fmt.Sprintf(`
+name: category-raw-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/category-raw-pack
+category: raw
+rawSource:
+  path: %s
+`, ociHost, srcDir)
+	outDir := t.TempDir()
+	if err := compilePackBuild(writePackBuildInput(t, inputContent), outDir); err != nil {
+		t.Fatalf("compilePackBuild with category=raw: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "category-raw-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR with category=raw dispatch; not found")
+	}
+}
+
 // TestPackBuild_RawSourceDispatchesToRawCompile verifies that compilePackBuild
 // dispatches to rawCompilePackBuild when rawSource is set in the input file.
 func TestPackBuild_RawSourceDispatchesToRawCompile(t *testing.T) {

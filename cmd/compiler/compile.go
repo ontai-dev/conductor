@@ -558,6 +558,13 @@ type PackBuildInput struct {
 	// +optional
 	ValuesFile string `yaml:"valuesFile,omitempty"`
 
+	// Category declares the pack type discriminator. Accepted values: helm, kustomize, raw.
+	// Required when helmSource, kustomizeSource, or rawSource is set.
+	// When absent, the compiler falls back to nil-check dispatch for backward compatibility.
+	// T-05, T-11.
+	// +optional
+	Category string `yaml:"category,omitempty"`
+
 	// HelmSource defines the Helm chart source for automated packbuild.
 	// When present, the compiler fetches, renders, and pushes the chart
 	// automatically instead of requiring pre-built OCI digests.
@@ -612,6 +619,28 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.Version == "" {
 		return PackBuildInput{}, fmt.Errorf("input file %q: version is required", path)
 	}
+	// Category validation: when set, must be one of the known enum values. T-05, T-11.
+	if in.Category != "" {
+		switch in.Category {
+		case "helm", "kustomize", "raw":
+		default:
+			return PackBuildInput{}, fmt.Errorf("input file %q: category must be helm, kustomize, or raw; got %q", path, in.Category)
+		}
+		// Cross-contamination check: source field must match declared category.
+		if in.Category == "helm" && in.HelmSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=helm requires helmSource to be set", path)
+		}
+		if in.Category == "raw" && in.RawSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=raw requires rawSource to be set", path)
+		}
+		if in.Category != "helm" && in.HelmSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: helmSource is set but category=%q; remove helmSource or set category=helm", path, in.Category)
+		}
+		if in.Category != "raw" && in.RawSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: rawSource is set but category=%q; remove rawSource or set category=raw", path, in.Category)
+		}
+	}
+
 	// helmSource path: registryUrl required, digests computed by compiler.
 	if in.HelmSource != nil {
 		if in.RegistryURL == "" {
@@ -1229,8 +1258,8 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string, mo
 
 // compilePackBuild implements the packbuild subcommand.
 // Reads a PackBuildInput spec and emits a ClusterPack CR YAML.
-// When helmSource is present, dispatches to helmCompilePackBuild.
-// When rawSource is present, dispatches to rawCompilePackBuild.
+// Dispatch is category-driven when category is set; falls back to source nil-check
+// for backward compatibility when category is absent. T-05, T-13.
 // conductor-schema.md §6 (pack-compile), wrapper-schema.md §3.
 func compilePackBuild(input, output string) error {
 	in, err := readPackBuildInput(input)
@@ -1238,6 +1267,19 @@ func compilePackBuild(input, output string) error {
 		return err
 	}
 
+	// Category-driven dispatch (T-13): explicit category takes precedence.
+	switch in.Category {
+	case "helm":
+		inputDir := filepath.Dir(input)
+		return helmCompilePackBuild(context.Background(), in, inputDir, output)
+	case "raw":
+		inputDir := filepath.Dir(input)
+		return rawCompilePackBuild(context.Background(), in, inputDir, output)
+	case "kustomize":
+		return fmt.Errorf("category=kustomize is not yet implemented")
+	}
+
+	// Backward-compatible nil-check dispatch when category is absent.
 	if in.HelmSource != nil {
 		inputDir := filepath.Dir(input)
 		return helmCompilePackBuild(context.Background(), in, inputDir, output)

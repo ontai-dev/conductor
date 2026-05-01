@@ -56,6 +56,13 @@ type HelmSource struct {
 	// Not yet implemented — future work for private registries.
 	// +optional
 	RegistryCredentialsSecret string `yaml:"registryCredentialsSecret,omitempty"`
+
+	// HelmVersion is the Helm SDK version override. When set, written to the
+	// emitted ClusterPack spec.helmVersion instead of the auto-detected SDK version.
+	// Useful when the pipeline wants to pin a specific version string for auditability.
+	// Defaults to helmSDKVersion() when empty. Decision B, T-11.
+	// +optional
+	HelmVersion string `yaml:"helmVersion,omitempty"`
 }
 
 // helmSDKVersion returns the version of the helm.sh/helm/v3 module linked into
@@ -75,6 +82,14 @@ func helmSDKVersion() string {
 		}
 	}
 	return ""
+}
+
+// helmVersionOrDefault returns override if non-empty; otherwise the auto-detected SDK version.
+func helmVersionOrDefault(override string) string {
+	if override != "" {
+		return override
+	}
+	return helmSDKVersion()
 }
 
 // helmCompilePackBuild implements the helm automation path for packbuild.
@@ -252,7 +267,7 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 			ChartURL:            hs.URL,
 			ChartVersion:        hs.Version,
 			ChartName:           chartName,
-			HelmVersion:         helmSDKVersion(),
+			HelmVersion:         helmVersionOrDefault(hs.HelmVersion),
 			ValuesFile:          hs.ValuesFile,
 		},
 	}
