@@ -10,6 +10,7 @@ package capability
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -46,6 +47,19 @@ type ExecuteParams struct {
 	// ExecuteClients bundles the injected client dependencies.
 	// See ExecuteClients documentation for nil-client semantics.
 	ExecuteClients
+
+	// Logger is the structured JSON logger for this capability execution.
+	// Set by the executor before dispatching. Nil-safe: handlers may call
+	// params.Log().Info(...) which falls back to slog.Default() when Logger is nil.
+	Logger *slog.Logger
+}
+
+// Log returns the capability logger, falling back to slog.Default() if Logger is nil.
+func (p ExecuteParams) Log() *slog.Logger {
+	if p.Logger != nil {
+		return p.Logger
+	}
+	return slog.Default()
 }
 
 // Registry is the static capability registry. All handlers are registered at

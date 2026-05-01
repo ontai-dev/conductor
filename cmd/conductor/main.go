@@ -182,10 +182,13 @@ func runExecute() {
 	if v := os.Getenv("KUBECONFIG"); v != "" {
 		tenantKubeconfigPath = v
 	}
-	if tenantCfg, tcErr := clientcmd.BuildConfigFromFlags("", tenantKubeconfigPath); tcErr == nil {
-		if tdc, tdcErr := dynamic.NewForConfig(tenantCfg); tdcErr == nil {
-			tenantDynamicClient = tdc
-		}
+	if tenantCfg, tcErr := clientcmd.BuildConfigFromFlags("", tenantKubeconfigPath); tcErr != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant kubeconfig load failed (%s): %v -- falling back to management cluster\n", tenantKubeconfigPath, tcErr)
+	} else if tdc, tdcErr := dynamic.NewForConfig(tenantCfg); tdcErr != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant dynamic client build failed: %v -- falling back to management cluster\n", tdcErr)
+	} else {
+		tenantDynamicClient = tdc
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant dynamic client loaded from %s (server: %s)\n", tenantKubeconfigPath, tenantCfg.Host)
 	}
 
 	clients := capability.ExecuteClients{
@@ -372,11 +375,18 @@ func (e *capabilityStepExecutor) Execute(
 		}, nil
 	}
 
+	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", clusterRef),
+		slog.String("capability", step.Capability),
+	)
+
 	params := capability.ExecuteParams{
 		Capability:     step.Capability,
 		ClusterRef:     clusterRef,
 		Namespace:      namespace,
 		ExecuteClients: e.clients,
+		Logger:         dispatchLogger,
 	}
 
 	// Day-2 path: OPERATION_RESULT_CR is set in step parameters.
@@ -388,11 +398,6 @@ func (e *capabilityStepExecutor) Execute(
 	}
 	params.OperationResultCM = packExecutionRef
 
-	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
-		slog.String("component", "conductor-execute"),
-		slog.String("cluster", clusterRef),
-		slog.String("capability", step.Capability),
-	)
 	dispatchLogger.Info("capability dispatching")
 	result, err := handler.Execute(ctx, params)
 	if err != nil {

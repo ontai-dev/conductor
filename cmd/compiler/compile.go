@@ -527,13 +527,20 @@ type PackBuildInput struct {
 	TargetClusters []string `yaml:"targetClusters,omitempty"`
 
 	// RBACDigest is the OCI digest of the RBAC layer (SA, Role, CR, RB, CRB).
-	// Set by the human or pipeline after running the two-layer OCI push.
+	// Set by the human or pipeline after running the three-layer OCI push.
 	// Absent for pre-split artifacts. wrapper-schema.md §4.
 	// +optional
 	RBACDigest string `yaml:"rbacDigest,omitempty"`
 
-	// WorkloadDigest is the OCI digest of the workload layer (all non-RBAC manifests).
-	// Set by the human or pipeline after running the two-layer OCI push.
+	// ClusterScopedDigest is the OCI digest of the cluster-scoped non-RBAC layer
+	// (CRDs, ValidatingWebhookConfigurations, Namespaces, etc.).
+	// Set by the human or pipeline after running the three-layer OCI push.
+	// Absent when the pack has no cluster-scoped resources. wrapper-schema.md §4.
+	// +optional
+	ClusterScopedDigest string `yaml:"clusterScopedDigest,omitempty"`
+
+	// WorkloadDigest is the OCI digest of the workload layer (all non-RBAC, non-cluster-scoped manifests).
+	// Set by the human or pipeline after running the three-layer OCI push.
 	// Absent for pre-split artifacts. wrapper-schema.md §4.
 	// +optional
 	WorkloadDigest string `yaml:"workloadDigest,omitempty"`
@@ -1241,13 +1248,14 @@ func compilePackBuild(input, output string) error {
 				URL:    in.RegistryURL,
 				Digest: in.Digest,
 			},
-			Checksum:       in.Checksum,
-			SourceBuildRef: in.SourceBuildRef,
-			TargetClusters: in.TargetClusters,
-			RBACDigest:     in.RBACDigest,
-			WorkloadDigest: in.WorkloadDigest,
-			BasePackName:   in.BasePackName,
-			ValuesFile:     in.ValuesFile,
+			Checksum:            in.Checksum,
+			SourceBuildRef:      in.SourceBuildRef,
+			TargetClusters:      in.TargetClusters,
+			RBACDigest:          in.RBACDigest,
+			ClusterScopedDigest: in.ClusterScopedDigest,
+			WorkloadDigest:      in.WorkloadDigest,
+			BasePackName:        in.BasePackName,
+			ValuesFile:          in.ValuesFile,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
