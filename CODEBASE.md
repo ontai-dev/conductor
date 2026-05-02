@@ -35,6 +35,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 | `signing_loop.go` | `SigningLoop` | management | Signs PackInstance and PermissionSnapshot CRs with Ed25519 private key; only management cluster conductor holds private key (INV-026) |
 | `receipt_reconciler.go` | `ReceiptReconciler` | management | Reconciles PackReceipt CRs; management-cluster only |
 | `capability_publisher.go` | `CapabilityPublisher` | management | On leader win, publishes 17 named capabilities to RunnerConfig status. After `runnerConfigMissingDriftThreshold=5` consecutive NotFound errors in the publish loop, calls `emitRunnerConfigMissingSignal()` to write a DriftSignal to `seam-tenant-{clusterRef}` (T-23). |
+| `talos_version_drift_loop.go` | `TalosVersionDriftLoop`, `NewTalosVersionDriftLoop()`, `ParseTalosVersionFromOSImage(osImage string) string` | tenant | Reads `node.status.nodeInfo.osImage` from every node via Kubernetes API; parses Talos version from `Talos (vX.Y.Z)` format; compares against `InfrastructureTalosCluster.spec.talosVersion` in `ont-system`. When all nodes agree on a consistent version that differs from spec, emits a DriftSignal with `affectedCRRef.Kind=InfrastructureTalosCluster` to `seam-tenant-{cluster}` on the management cluster. Skips when nodes have mixed versions (mid-upgrade state). After `escalationThreshold=3` consecutive emissions without resolution, stops emitting. `DriftSignalHandler` skips InfrastructureTalosCluster kind -- platform's `DriftSignalReconciler` handles it. |
 
 **`PackReceiptDriftLoop.checkDrift()`** reads `spec["deployedResources"]` (unstructured map), verifies each resource exists on local cluster via dynamic client. `teardownOrphanedReceipt()` reads same field to determine which namespaces and cluster-scoped resources to delete when ClusterPack is deleted from management. Version-upgrade orphan diff is implemented in `PackInstancePullLoop.deleteOrphanedResources()` (CLUSTERPACK-BL-VERSION-CLEANUP closed).
 
@@ -44,7 +45,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 
 `role=management`: CapabilityPublisher, ReceiptReconciler, SigningLoop, DriftSignalHandler, FederationServer.
 
-`role=tenant`: PermissionService gRPC server (port 50051), SnapshotPullLoop, PackInstancePullLoop, PackReceiptDriftLoop, RBACProfilePullLoop (conductor-tenant), RBACPolicyPullLoop (cluster-policy), FederationClient, AdmissionWebhook. Five pull loops fully wired. Decision C satisfied. T-17 closed.
+`role=tenant`: PermissionService gRPC server (port 50051), SnapshotPullLoop, PackInstancePullLoop, PackReceiptDriftLoop, RBACProfilePullLoop (conductor-tenant), RBACPolicyPullLoop (cluster-policy), TalosVersionDriftLoop, FederationClient, AdmissionWebhook. Five pull loops + one drift loop fully wired. Decision C satisfied. T-17 closed. T-23 Talos version drift closed.
 
 **`onLeaderStart()` signature**: clusterRef, namespace, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, rbacPolicyPullLoop, driftSignalHandler, dynamicClient.
 
@@ -52,6 +53,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 
 | Handler | Capability | Key behavior |
 |---------|-----------|-------------|
+| `talosUpgradeHandler` | `talos-upgrade` | (`platform_upgrade.go`) Rolling per-node sequential upgrade. Calls `params.TalosClient.Nodes()` to get node IPs from talosconfig endpoints. For each node: constructs `upgradeImage = "ghcr.io/siderolabs/installer:" + targetVersion` (targetVersion from UpgradePolicy CR), calls `Upgrade(NodeContext(ctx, nodeIP), image, false)` with `stage=false` (immediate reboot), then calls `waitForNodeReboot()` before proceeding to next node. Produces one `StepResult` per node. `waitForNodeReboot()` is two-phase: Phase 1 (2-min window) polls until node goes offline; Phase 2 (8-min window) polls until node comes back online. `NodeRebootPollInterval = 10 * time.Second` exported for test override. |
 | `etcdBackupHandler` | `etcd-backup` | Lists EtcdMaintenance CRs in `seam-tenant-{cluster}`, reads `spec.s3Destination.bucket/key`, calls `TalosClient.EtcdSnapshot` into a `bytes.Buffer`, wraps with `bytes.NewReader(buf.Bytes())` (seekable) before calling `StorageClient.Upload`. Seekable wrapper is required for MinIO/Scality over HTTP -- AWS SDK v2 cannot compute checksums on unseekable streams without TLS. |
 | `etcdDefragHandler` | `etcd-defrag` | Calls `TalosClient.EtcdDefragment`. |
 | `etcdRestoreHandler` | `etcd-restore` | Lists EtcdMaintenance CRs, reads `spec.s3SnapshotPath`, downloads snapshot via `StorageClient.Download`, calls `TalosClient.EtcdRecover`. |
@@ -63,6 +65,10 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 ### Capability (`internal/capability/adapters.go`)
 
 `S3StorageClientAdapter`: wraps `*s3.Client` (AWS SDK v2). Constructor `NewS3StorageClientAdapter()` reads `S3_REGION` (required) and `S3_ENDPOINT` (optional) from env. When `S3_ENDPOINT` is set, `UsePathStyle = true` is enabled for MinIO/Scality path-style addressing. `Upload(ctx, bucket, key, r io.Reader)` calls `PutObject`. `Download(ctx, bucket, key)` calls `GetObject`.
+
+**`TalosClientAdapter`** (`adapters.go`): wraps the real Talos gRPC client. Extended with `nodes []string` field set at construction by `EndpointsFromTalosconfig(talosconfigPath)`. `Nodes() []string` returns the field. `Health(ctx context.Context) error` calls `a.inner.Version(ctx)` -- nil when the node Talos API is responsive, non-nil otherwise. Used by rolling upgrade reboot detection.
+
+**`TalosNodeClient` interface** (`clients.go`) extended with two methods: `Nodes() []string` (returns node IPs from talosconfig endpoints, used by rolling upgrade to iterate nodes) and `Health(ctx context.Context) error` (liveness check via Version RPC, used by `waitForNodeReboot`).
 
 **MinIO over HTTP**: Callers MUST pass an `io.ReadSeeker` (not a plain `io.Reader` like `*bytes.Buffer`) to `Upload` when `S3_ENDPOINT` is an HTTP URL. Without TLS, AWS SDK v2 cannot use trailing checksums and requires the stream to be seekable for upfront checksum computation. `etcdBackupHandler` uses `bytes.NewReader(buf.Bytes())` for this reason.
 
@@ -130,9 +136,9 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 
 | Package | Coverage |
 |---------|----------|
-| `test/unit/agent` | PackInstancePullLoop, SnapshotPullLoop, DriftSignalHandler, PackReceiptDriftLoop (14 tests) |
+| `test/unit/agent` | PackInstancePullLoop, SnapshotPullLoop, DriftSignalHandler, PackReceiptDriftLoop (14 tests), TalosVersionDriftLoop (4 tests: emits on version mismatch, skips when all nodes match spec, skips on mixed versions, ParseTalosVersionFromOSImage) |
 | `internal/agent` | `capability_publisher_test.go`: `TestCapabilityPublisher_EmitsDriftSignalAfterMissingThreshold` (T-23 drift signal create), `TestCapabilityPublisher_EmitDriftSignal_IdempotentOnAlreadyExists`, `TestCapabilityPublisher_IsPublishNotFound` (T-23). |
-| `test/unit/capability` | Split path, guardian intake, RBAC apply, registry; hardeningApplyHandler (6 tests: single-patch, multi-patch, empty-patches, missing-profile-ref, apply-error, nil-clients) |
+| `test/unit/capability` | Split path, guardian intake, RBAC apply, registry; hardeningApplyHandler (6 tests); talosUpgrade rolling (2 tests: `TestTalosUpgrade_RollingUpgrade_AllNodes` 3-node sequential with reboot wait, `TestTalosUpgrade_NoNodesReturnsValidationFailure`) |
 | `test/unit/compiler` | PackBuild split, helm/raw paths, enable bundle |
 | `test/unit/kernel` | Role/mode init, sequencer, execute mode |
 | `test/unit/persistence` | Single-active-revision, superseded label, pruning at max 10 |
@@ -157,3 +163,9 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 **S3 upload requires seekable stream over HTTP**: AWS SDK v2 cannot compute request checksums for `PutObject` on an unseekable `io.Reader` without TLS (trailing checksums are TLS-only). For MinIO/Scality HTTP endpoints, `etcdBackupHandler` uses `bytes.NewReader(buf.Bytes())` which wraps the in-memory snapshot as `io.ReadSeeker`. Passing `*bytes.Buffer` directly to `Upload` causes "unseekable stream is not supported without TLS and trailing checksum".
 
 **`unstructuredString` cannot read slice fields**: `unstructuredString` calls `v.(string)` which silently fails for any field that is `[]interface{}` in the unstructured map. Capability handlers reading list-type spec fields (e.g. `machineConfigPatches`) must use `unstructuredList` followed by a per-element string type assertion. Using `unstructuredString` on a slice field always returns an empty string with no error.
+
+**`targetTalosVersion` is a version string, not an image reference**: UpgradePolicy `spec.targetTalosVersion` holds a semantic version such as `v1.9.3`. The installer image is `ghcr.io/siderolabs/installer:{version}`. Passing the raw version string as an image reference causes `error validating installer image "v1.9.3"`.
+
+**TalosVersionDriftLoop escalation resets must be done manually**: When `escalationCounter` reaches 3, the loop stops emitting. The DriftSignal stays at its last state forever. To re-enable detection: `kubectl patch driftsignal drift-version-{cluster} -n seam-tenant-{cluster} --type=merge -p '{"spec":{"state":"pending","escalationCounter":0}}'` on the management cluster.
+
+**Phase 1 of `waitForNodeReboot` may complete immediately**: If the node reboots faster than `NodeRebootPollInterval` (10s default), `Health()` returns nil on all Phase 1 polls. `waitForNodeReboot` treats this as a fast reboot -- it returns nil and skips Phase 2. The TalosVersionDriftLoop will detect persistence if the upgrade did not actually apply.
