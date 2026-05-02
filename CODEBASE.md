@@ -34,7 +34,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 | `rbacpolicy_pull_loop.go` | `RBACPolicyPullLoop`, `NewRBACPolicyPullLoop()` | tenant | GETs cluster-policy RBACPolicy from seam-tenant-{cluster} on management cluster and SSA-patches into ont-system. Decision C, T-17 closed |
 | `signing_loop.go` | `SigningLoop` | management | Signs PackInstance and PermissionSnapshot CRs with Ed25519 private key; only management cluster conductor holds private key (INV-026) |
 | `receipt_reconciler.go` | `ReceiptReconciler` | management | Reconciles PackReceipt CRs; management-cluster only |
-| `capability_publisher.go` | `CapabilityPublisher` | management | On leader win, publishes 17 named capabilities to RunnerConfig status |
+| `capability_publisher.go` | `CapabilityPublisher` | management | On leader win, publishes 17 named capabilities to RunnerConfig status. After `runnerConfigMissingDriftThreshold=5` consecutive NotFound errors in the publish loop, calls `emitRunnerConfigMissingSignal()` to write a DriftSignal to `seam-tenant-{clusterRef}` (T-23). |
 
 **`PackReceiptDriftLoop.checkDrift()`** reads `spec["deployedResources"]` (unstructured map), verifies each resource exists on local cluster via dynamic client. `teardownOrphanedReceipt()` reads same field to determine which namespaces and cluster-scoped resources to delete when ClusterPack is deleted from management. Version-upgrade orphan diff is implemented in `PackInstancePullLoop.deleteOrphanedResources()` (CLUSTERPACK-BL-VERSION-CLEANUP closed).
 
@@ -131,6 +131,7 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 | Package | Coverage |
 |---------|----------|
 | `test/unit/agent` | PackInstancePullLoop, SnapshotPullLoop, DriftSignalHandler, PackReceiptDriftLoop (14 tests) |
+| `internal/agent` | `capability_publisher_test.go`: `TestCapabilityPublisher_EmitsDriftSignalAfterMissingThreshold` (T-23 drift signal create), `TestCapabilityPublisher_EmitDriftSignal_IdempotentOnAlreadyExists`, `TestCapabilityPublisher_IsPublishNotFound` (T-23). |
 | `test/unit/capability` | Split path, guardian intake, RBAC apply, registry; hardeningApplyHandler (6 tests: single-patch, multi-patch, empty-patches, missing-profile-ref, apply-error, nil-clients) |
 | `test/unit/compiler` | PackBuild split, helm/raw paths, enable bundle |
 | `test/unit/kernel` | Role/mode init, sequencer, execute mode |
