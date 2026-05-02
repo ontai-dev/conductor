@@ -56,6 +56,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 | `etcdDefragHandler` | `etcd-defrag` | Calls `TalosClient.EtcdDefragment`. |
 | `etcdRestoreHandler` | `etcd-restore` | Lists EtcdMaintenance CRs, reads `spec.s3SnapshotPath`, downloads snapshot via `StorageClient.Download`, calls `TalosClient.EtcdRecover`. |
 | `pkiRotateHandler` | `pki-rotate` | Lists PKIRotation CRs to verify trigger exists. Calls `TalosClient.GetMachineConfig` then `TalosClient.ApplyConfiguration` in staged mode to initiate rotation cycle. Then calls `TalosClient.Kubeconfig` (new) to generate fresh kubeconfig and writes it to `seam-mc-{cluster}-kubeconfig` and `target-cluster-kubeconfig` in `seam-tenant-{cluster}` via dynamic client. Kubeconfig refresh is best-effort: failure is logged but does not fail the overall operation. platform-schema.md §13. |
+| `hardeningApplyHandler` | `hardening-apply` | (`platform_security.go`) Lists NodeMaintenance CRs to locate the trigger, reads `spec.hardeningProfileRef` to find the target HardeningProfile, lists HardeningProfile CRs, reads `spec.machineConfigPatches` via `unstructuredList` (not `unstructuredString` -- the field is `[]string`, not a scalar). Applies each patch individually via `TalosClient.ApplyConfiguration` in `no-reboot` mode. Produces one `StepResult` per patch. Empty-patches and missing-ref cases return `ValidationFailure`; `ApplyConfiguration` error returns `ExecutionFailure`. |
 
 `tenantNamespace(clusterRef string) string` -- returns `seam-tenant-{clusterRef}`.
 
@@ -130,7 +131,7 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 | Package | Coverage |
 |---------|----------|
 | `test/unit/agent` | PackInstancePullLoop, SnapshotPullLoop, DriftSignalHandler, PackReceiptDriftLoop (14 tests) |
-| `test/unit/capability` | Split path, guardian intake, RBAC apply, registry |
+| `test/unit/capability` | Split path, guardian intake, RBAC apply, registry; hardeningApplyHandler (6 tests: single-patch, multi-patch, empty-patches, missing-profile-ref, apply-error, nil-clients) |
 | `test/unit/compiler` | PackBuild split, helm/raw paths, enable bundle |
 | `test/unit/kernel` | Role/mode init, sequencer, execute mode |
 | `test/unit/persistence` | Single-active-revision, superseded label, pruning at max 10 |
@@ -153,3 +154,5 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 **RBACProfile pull loop (role=tenant)**: `RBACProfilePullLoop` in `rbacprofile_pull_loop.go` pulls the `conductor-tenant` RBACProfile from `seam-tenant-{cluster}` on the management cluster and SSA-patches it into `ont-system` on the local cluster. Wired into `kernel/agent.go` `onLeaderStart`. CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION closed.
 
 **S3 upload requires seekable stream over HTTP**: AWS SDK v2 cannot compute request checksums for `PutObject` on an unseekable `io.Reader` without TLS (trailing checksums are TLS-only). For MinIO/Scality HTTP endpoints, `etcdBackupHandler` uses `bytes.NewReader(buf.Bytes())` which wraps the in-memory snapshot as `io.ReadSeeker`. Passing `*bytes.Buffer` directly to `Upload` causes "unseekable stream is not supported without TLS and trailing checksum".
+
+**`unstructuredString` cannot read slice fields**: `unstructuredString` calls `v.(string)` which silently fails for any field that is `[]interface{}` in the unstructured map. Capability handlers reading list-type spec fields (e.g. `machineConfigPatches`) must use `unstructuredList` followed by a per-element string type assertion. Using `unstructuredString` on a slice field always returns an empty string with no error.
