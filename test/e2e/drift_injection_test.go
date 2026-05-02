@@ -45,14 +45,9 @@ const (
 	driftSignalPollTimeout = 12 * time.Minute
 )
 
-var (
-	driftSignalGVR = schema.GroupVersionResource{
-		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "driftsignals",
-	}
-	packExecutionGVR = schema.GroupVersionResource{
-		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackexecutions",
-	}
-)
+var driftSignalGVR = schema.GroupVersionResource{
+	Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "driftsignals",
+}
 
 var _ = Describe("Conductor drift detection: full injection cycle", func() {
 	BeforeEach(func() {

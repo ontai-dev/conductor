@@ -36,14 +36,9 @@ const (
 	packSignatureAnnotation = "ontai.dev/pack-signature"
 )
 
-var (
-	clusterPackGVR = schema.GroupVersionResource{
-		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks",
-	}
-	packInstanceGVR = schema.GroupVersionResource{
-		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackinstances",
-	}
-)
+var clusterPackGVR = schema.GroupVersionResource{
+	Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks",
+}
 
 var _ = Describe("Conductor signing loop: PackInstance artifact storage", func() {
 	// All tests use mgmtClient (conductor role=management runs on ccs-mgmt).

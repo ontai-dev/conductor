@@ -119,23 +119,21 @@ func (h *DriftSignalHandler) retriggerPackExecution(ctx context.Context, tenantN
 		return false, ""
 	}
 
-	// Delete the first Succeeded PackExecution found (the one that delivered the drifted pack).
-	for _, pe := range list.Items {
-		spec, _, _ := unstructuredNestedMap(pe.Object, "spec")
-		packName, _ := spec["packRef"].(string)
-		peName := pe.GetName()
+	// Delete the first PackExecution found (the one that delivered the drifted pack).
+	pe := list.Items[0]
+	spec, _, _ := unstructuredNestedMap(pe.Object, "spec")
+	packName, _ := spec["packRef"].(string)
+	peName := pe.GetName()
 
-		if delErr := h.client.Resource(packExecutionGVR).Namespace(tenantNS).Delete(
-			ctx, peName, metav1.DeleteOptions{},
-		); delErr != nil && !k8serrors.IsNotFound(delErr) {
-			fmt.Printf("drift handler: delete PackExecution %s/%s: %v\n", tenantNS, peName, delErr)
-			return false, ""
-		}
-		fmt.Printf("drift handler: deleted PackExecution %s/%s (pack=%q) for retrigger\n",
-			tenantNS, peName, packName)
-		return true, peName
+	if delErr := h.client.Resource(packExecutionGVR).Namespace(tenantNS).Delete(
+		ctx, peName, metav1.DeleteOptions{},
+	); delErr != nil && !k8serrors.IsNotFound(delErr) {
+		fmt.Printf("drift handler: delete PackExecution %s/%s: %v\n", tenantNS, peName, delErr)
+		return false, ""
 	}
-	return false, ""
+	fmt.Printf("drift handler: deleted PackExecution %s/%s (pack=%q) for retrigger\n",
+		tenantNS, peName, packName)
+	return true, peName
 }
 
 // advanceToQueued patches the DriftSignal state from pending to queued and records
