@@ -175,6 +175,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	var rbacProfilePullLoop *agent.RBACProfilePullLoop
 	var rbacPolicyPullLoop *agent.RBACPolicyPullLoop
 	var talosVersionDriftLoop *agent.TalosVersionDriftLoop
+	var kubernetesVersionDriftLoop *agent.KubernetesVersionDriftLoop
 	var mgmtDynamicClient dynamic.Interface
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
@@ -269,6 +270,18 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, ns,
 		)
 		fmt.Printf("conductor agent: cluster=%q talos version drift loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// Kubernetes version drift loop — reads node.status.nodeInfo.kubeletVersion,
+		// compares against InfrastructureTalosCluster.spec.kubernetesVersion, and emits
+		// an InfrastructureTalosCluster DriftSignal when an out-of-band K8s version change
+		// is detected. Platform's DriftSignalReconciler creates a corrective kube-upgrade
+		// UpgradePolicy. conductor-schema.md §7.10.
+		kubernetesVersionDriftLoop = agent.NewKubernetesVersionDriftLoop(
+			dynamicClient, mgmtDynamicClient,
+			execCtx.ClusterRef, ns,
+		)
+		fmt.Printf("conductor agent: cluster=%q kubernetes version drift loop enabled (target cluster)\n",
 			execCtx.ClusterRef)
 	}
 
@@ -395,7 +408,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, rbacPolicyPullLoop, driftSignalHandler, talosVersionDriftLoop, dynamicClient)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, rbacPolicyPullLoop, driftSignalHandler, talosVersionDriftLoop, kubernetesVersionDriftLoop, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -427,6 +440,7 @@ func onLeaderStart(
 	rbacPolicyPullLoop *agent.RBACPolicyPullLoop,
 	driftSignalHandler *agent.DriftSignalHandler,
 	talosVersionDriftLoop *agent.TalosVersionDriftLoop,
+	kubernetesVersionDriftLoop *agent.KubernetesVersionDriftLoop,
 	dynamicClient dynamic.Interface,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
@@ -522,6 +536,14 @@ func onLeaderStart(
 	// DriftSignal to management cluster on out-of-band version change. conductor-schema.md §7.10.
 	if talosVersionDriftLoop != nil {
 		go talosVersionDriftLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start Kubernetes version drift loop (target clusters only).
+	// Reads node.status.nodeInfo.kubeletVersion, compares against
+	// InfrastructureTalosCluster.spec.kubernetesVersion, emits InfrastructureTalosCluster
+	// DriftSignal on out-of-band K8s version change. conductor-schema.md §7.10.
+	if kubernetesVersionDriftLoop != nil {
+		go kubernetesVersionDriftLoop.Run(leaderCtx, reconcileInterval)
 	}
 
 	// Mark InfrastructureTalosCluster Ready=True (tenant clusters only).
