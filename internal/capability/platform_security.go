@@ -316,25 +316,43 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 			fmt.Sprintf("list HardeningProfile in %s: %v", hardeningProfileNs, err)), nil
 	}
 
-	var machineConfigPatches string
+	// machineConfigPatches is []string in the spec; read via unstructuredList to avoid
+	// the incorrect type assertion that unstructuredString would perform on a slice.
+	var configPatches []string
 	for _, item := range hpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
 		if name != hardeningProfileRef {
 			continue
 		}
-		machineConfigPatches, _, _ = unstructuredString(item.Object, "spec", "machineConfigPatches")
+		raw, _, _ := unstructuredList(item.Object, "spec", "machineConfigPatches")
+		for _, p := range raw {
+			if s, ok := p.(string); ok && len(s) > 0 {
+				configPatches = append(configPatches, s)
+			}
+		}
 		break
 	}
 
-	if machineConfigPatches == "" {
+	if len(configPatches) == 0 {
 		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("HardeningProfile %q in %s has no machineConfigPatches", hardeningProfileRef, hardeningProfileNs)), nil
 	}
 
-	stepStart := time.Now().UTC()
-	if err := params.TalosClient.ApplyConfiguration(ctx, []byte(machineConfigPatches), "no-reboot"); err != nil {
-		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("ApplyConfiguration (hardening, profile=%s): %v", hardeningProfileRef, err)), nil
+	// Apply each patch individually in no-reboot mode; one step per patch.
+	var steps []runnerlib.StepResult
+	for i, patch := range configPatches {
+		stepStart := time.Now().UTC()
+		if err := params.TalosClient.ApplyConfiguration(ctx, []byte(patch), "no-reboot"); err != nil {
+			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("ApplyConfiguration (hardening, profile=%s, patch=%d): %v", hardeningProfileRef, i, err)), nil
+		}
+		steps = append(steps, runnerlib.StepResult{
+			Name:        fmt.Sprintf("apply-hardening-%d", i),
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   stepStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     fmt.Sprintf("hardening profile %q patch %d applied (no-reboot mode)", hardeningProfileRef, i),
+		})
 	}
 
 	return runnerlib.OperationResultSpec{
@@ -343,12 +361,6 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "apply-hardening", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("hardening profile %q applied (no-reboot mode)", hardeningProfileRef),
-			},
-		},
+		Steps:       steps,
 	}, nil
 }
