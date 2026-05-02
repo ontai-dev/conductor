@@ -30,16 +30,17 @@ import (
 )
 
 // ── GVR definitions mirroring internal/agent ─────────────────────────────────
+// All pack/receipt GVRs use infrastructure.ontai.dev (Decision G, seam-core).
 
 var (
 	packInstanceGVR = schema.GroupVersionResource{
-		Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "packinstances",
+		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackinstances",
 	}
 	clusterPackGVR = schema.GroupVersionResource{
-		Group: "infra.ontai.dev", Version: "v1alpha1", Resource: "clusterpacks",
+		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructureclusterpacks",
 	}
 	packReceiptGVR = schema.GroupVersionResource{
-		Group: "runner.ontai.dev", Version: "v1alpha1", Resource: "packreceipts",
+		Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructurepackreceipts",
 	}
 	secretGVR = schema.GroupVersionResource{
 		Group: "", Version: "v1", Resource: "secrets",
@@ -100,10 +101,11 @@ func signSpec(t *testing.T, spec map[string]interface{}, priv ed25519.PrivateKey
 
 // gvrToListKind maps GVRs to their List kind names.
 // NewSimpleDynamicClientWithCustomListKinds requires this explicit mapping.
+// Kind names follow seam-core Infrastructure prefix convention (Decision G).
 var gvrToListKind = map[schema.GroupVersionResource]string{
-	packInstanceGVR:              "PackInstanceList",
-	clusterPackGVR:               "ClusterPackList",
-	packReceiptGVR:               "PackReceiptList",
+	packInstanceGVR:              "InfrastructurePackInstanceList",
+	clusterPackGVR:               "InfrastructureClusterPackList",
+	packReceiptGVR:               "InfrastructurePackReceiptList",
 	secretGVR:                    "SecretList",
 	permissionSnapshotGVR:        "PermissionSnapshotList",
 	permissionSnapshotReceiptGVR: "PermissionSnapshotReceiptList",
@@ -150,13 +152,13 @@ func TestSigningLoop_SignsPackInstance_StoresSecret(t *testing.T) {
 	// Pre-create a PackInstance in seam-tenant-ccs-test.
 	packInstance := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "infra.ontai.dev/v1alpha1",
-			"kind":       "PackInstance",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructurePackInstance",
 			"metadata":   map[string]interface{}{"name": "nginx", "namespace": "seam-tenant-ccs-test"},
 			"spec": map[string]interface{}{
-				"clusterRef": "ccs-test",
-				"packRef":    "nginx",
-				"version":    "1.0.0",
+				"targetClusterRef": "ccs-test",
+				"packRef":          "nginx",
+				"version":          "1.0.0",
 			},
 		},
 	}
@@ -185,7 +187,7 @@ func TestSigningLoop_SignsPackInstance_StoresSecret(t *testing.T) {
 		t.Fatalf("get PackInstance after sign: %v", err)
 	}
 	ann := updated.GetAnnotations()
-	if ann == nil || ann["runner.ontai.dev/management-signature"] == "" {
+	if ann == nil || ann["infrastructure.ontai.dev/management-signature"] == "" {
 		t.Error("PackInstance missing management-signature annotation after signing loop")
 	}
 
@@ -213,19 +215,19 @@ func TestSigningLoop_IdempotentOnStaleSignature(t *testing.T) {
 
 	dynClient := newFakeDynamic(t, packInstanceGVR, clusterPackGVR, permissionSnapshotGVR, secretGVR)
 
-	spec := map[string]interface{}{"clusterRef": "ccs-test", "packRef": "redis", "version": "1.0.0"}
+	spec := map[string]interface{}{"targetClusterRef": "ccs-test", "packRef": "redis", "version": "1.0.0"}
 	existingSig := signSpec(t, spec, priv)
 
 	// PackInstance already has a signature annotation.
 	packInstance := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "infra.ontai.dev/v1alpha1",
-			"kind":       "PackInstance",
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructurePackInstance",
 			"metadata": map[string]interface{}{
 				"name":      "redis",
 				"namespace": "seam-tenant-ccs-test",
 				"annotations": map[string]interface{}{
-					"runner.ontai.dev/management-signature": existingSig,
+					"infrastructure.ontai.dev/management-signature": existingSig,
 				},
 			},
 			"spec": spec,
@@ -404,7 +406,7 @@ func TestSnapshotPullLoop_InvalidSignature_PatchesDegradedSecurityState(t *testi
 				"name":      "snapshot-ccs-test",
 				"namespace": "security-system",
 				"annotations": map[string]interface{}{
-					"runner.ontai.dev/management-signature": sigB64,
+					"infrastructure.ontai.dev/management-signature": sigB64,
 				},
 			},
 			"spec": tamperedSpec,

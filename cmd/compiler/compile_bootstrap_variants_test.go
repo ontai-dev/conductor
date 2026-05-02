@@ -89,9 +89,9 @@ func TestBootstrapVariants_MgmtImport_TalosClusterConformance(t *testing.T) {
 
 	cr := readTalosClusterCR(t, outDir, "ccs-mgmt")
 
-	// Type metadata.
-	assertContainsTrimmed(t, cr, "apiVersion: platform.ontai.dev/v1alpha1")
-	assertContainsTrimmed(t, cr, "kind: TalosCluster")
+	// Type metadata (infrastructure.ontai.dev -- Decision G, seam-core owns TalosCluster).
+	assertContainsTrimmed(t, cr, "apiVersion: infrastructure.ontai.dev/v1alpha1")
+	assertContainsTrimmed(t, cr, "kind: InfrastructureTalosCluster")
 
 	// Mode must be import (importExistingCluster=true in fixture).
 	assertContainsTrimmed(t, cr, "mode: import")

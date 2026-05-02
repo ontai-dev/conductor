@@ -335,20 +335,17 @@ func extractFromInitNode(mcPaths map[string]string, nodes []BootstrapNode, extra
 }
 
 // clusterRole returns the TalosClusterRole for a ClusterInput.
-// mode=import requires an explicit role of "management" or "tenant"; absent or
-// invalid role returns an error. mode=bootstrap callers must not call this
-// function -- Role is not emitted on bootstrap paths.
+// An absent or empty role defaults to management. An explicitly set role must be
+// "management" or "tenant"; any other value returns an error.
+// Only called on import paths -- bootstrap callers must not invoke this.
 func clusterRole(in ClusterInput) (platformv1alpha1.TalosClusterRole, error) {
 	switch in.Role {
-	case "management":
+	case "", "management":
 		return platformv1alpha1.TalosClusterRoleManagement, nil
 	case "tenant":
 		return platformv1alpha1.TalosClusterRoleTenant, nil
 	default:
-		if in.Mode == "import" {
-			return "", fmt.Errorf("mode=import requires role to be \"management\" or \"tenant\", got %q", in.Role)
-		}
-		return platformv1alpha1.TalosClusterRoleManagement, nil
+		return "", fmt.Errorf("mode=import role must be \"management\" or \"tenant\", got %q", in.Role)
 	}
 }
 
@@ -641,8 +638,8 @@ func readClusterInput(path string) (ClusterInput, error) {
 	if in.Mode == "" {
 		return ClusterInput{}, fmt.Errorf("input file %q: mode is required (bootstrap or import)", path)
 	}
-	if in.Mode == "import" && in.Role != "management" && in.Role != "tenant" {
-		return ClusterInput{}, fmt.Errorf("input file %q: mode=import requires role to be \"management\" or \"tenant\", got %q", path, in.Role)
+	if in.Mode == "import" && in.Role != "" && in.Role != "management" && in.Role != "tenant" {
+		return ClusterInput{}, fmt.Errorf("input file %q: mode=import role must be \"management\" or \"tenant\", got %q", path, in.Role)
 	}
 	return in, nil
 }
@@ -1146,16 +1143,22 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 
 	// Produce TalosCluster CR. ontai.dev/owns-runnerconfig signals Platform to add
 	// a finalizer and clean up the RunnerConfig in ont-system on deletion. Bug 3.
-	role, err := clusterRole(in)
-	if err != nil {
-		return fmt.Errorf("compileBootstrap: %w", err)
-	}
+	//
+	// Role is set when: (a) import path -- clusterRole defaults empty to management;
+	// (b) bootstrap path with explicit role field (e.g. role: tenant in fixture).
+	// Bootstrap paths with no role field omit the field (omitempty suppresses "").
 	tcSpec := platformv1alpha1.TalosClusterSpec{
 		Mode:              tcMode,
-		Role:              role,
 		TalosVersion:      b.TalosVersion,
 		KubernetesVersion: kubernetesVersion,
 		ClusterEndpoint:   stripScheme(controlPlaneEndpoint),
+	}
+	if in.ImportExistingCluster || in.Role != "" {
+		role, err := clusterRole(in)
+		if err != nil {
+			return fmt.Errorf("compileBootstrap: %w", err)
+		}
+		tcSpec.Role = role
 	}
 	if in.CAPI.Enabled {
 		// CAPI target cluster: populate the full CAPI block using buildCAPIConfig.
