@@ -54,6 +54,16 @@ type TalosNodeClient interface {
 	// PKI rotation cycle. platform-schema.md §13.
 	Kubeconfig(ctx context.Context) ([]byte, error)
 
+	// Nodes returns the list of node IP addresses this client manages, parsed
+	// from the talosconfig endpoints at construction time. Used by the rolling
+	// talos-upgrade path to iterate nodes sequentially.
+	Nodes() []string
+
+	// Health performs a lightweight liveness check against the Talos machine API.
+	// Returns nil when the node is responsive, non-nil otherwise.
+	// Used to detect reboot completion during rolling upgrades.
+	Health(ctx context.Context) error
+
 	// Close releases the underlying gRPC connection.
 	Close() error
 }

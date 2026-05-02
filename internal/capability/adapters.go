@@ -198,17 +198,19 @@ func WaitForRBACProfileProvisioned(
 // INV-013: talos goclient is executor/agent mode only.
 type TalosClientAdapter struct {
 	inner *talos_client.Client
+	nodes []string // endpoint IPs parsed from talosconfig at construction time
 }
 
 // NewTalosClientAdapter creates a TalosClientAdapter by reading the talosconfig
 // from talosconfigPath. Returns an error if the config cannot be read or the
 // gRPC connection cannot be established.
 func NewTalosClientAdapter(ctx context.Context, talosconfigPath string) (*TalosClientAdapter, error) {
+	nodes, _ := EndpointsFromTalosconfig(talosconfigPath) // empty slice on parse error
 	c, err := talos_client.New(ctx, talos_client.WithConfigFromFile(talosconfigPath))
 	if err != nil {
 		return nil, fmt.Errorf("TalosClientAdapter: open talosconfig %s: %w", talosconfigPath, err)
 	}
-	return &TalosClientAdapter{inner: c}, nil
+	return &TalosClientAdapter{inner: c, nodes: nodes}, nil
 }
 
 // Bootstrap bootstraps etcd on the first control plane node.
@@ -243,6 +245,15 @@ func (a *TalosClientAdapter) ApplyConfiguration(ctx context.Context, configBytes
 		Data: configBytes,
 		Mode: modeEnum,
 	})
+	return err
+}
+
+// Nodes returns the endpoint IPs parsed from the talosconfig at construction time.
+func (a *TalosClientAdapter) Nodes() []string { return a.nodes }
+
+// Health calls the Talos Version RPC as a lightweight liveness check.
+func (a *TalosClientAdapter) Health(ctx context.Context) error {
+	_, err := a.inner.Version(ctx)
 	return err
 }
 

@@ -119,6 +119,11 @@ type stubTalosClient struct {
 	resetCalled           bool
 	defragmentCalled      bool
 	applyConfigCalls      []applyConfigCall
+	// Rolling upgrade support.
+	nodes            []string
+	healthResponses  []error // returned in sequence; nil after last entry
+	healthCallIdx    int
+	upgradeCallCount int // incremented on each Upgrade() call
 }
 
 type applyConfigCall struct {
@@ -134,8 +139,18 @@ func (s *stubTalosClient) ApplyConfiguration(_ context.Context, configBytes []by
 	s.applyConfigCalls = append(s.applyConfigCalls, applyConfigCall{configBytes: configBytes, mode: mode})
 	return s.applyConfigErr
 }
+func (s *stubTalosClient) Nodes() []string { return s.nodes }
+func (s *stubTalosClient) Health(_ context.Context) error {
+	if s.healthCallIdx < len(s.healthResponses) {
+		err := s.healthResponses[s.healthCallIdx]
+		s.healthCallIdx++
+		return err
+	}
+	return nil
+}
 func (s *stubTalosClient) Upgrade(_ context.Context, _ string, _ bool) error {
 	s.upgradeCalled = true
+	s.upgradeCallCount++
 	return s.upgradeErr
 }
 func (s *stubTalosClient) Reboot(_ context.Context) error {
@@ -273,12 +288,27 @@ func TestTalosUpgrade_NilClientsReturnsValidationFailure(t *testing.T) {
 	assertValidationFailure(t, result, "talos-upgrade nil clients")
 }
 
-func TestTalosUpgrade_CallsUpgradeAPI(t *testing.T) {
+func TestTalosUpgrade_RollingUpgrade_AllNodes(t *testing.T) {
+	old := capability.NodeRebootPollInterval
+	capability.NodeRebootPollInterval = 0
+	t.Cleanup(func() { capability.NodeRebootPollInterval = old })
+
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityTalosUpgrade)
 
-	talos := &stubTalosClient{}
+	// healthResponses: for each node — one error (node went down) then nil (back up).
+	nodes := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	healthResponses := make([]error, 0, len(nodes)*2)
+	for range nodes {
+		healthResponses = append(healthResponses, fmt.Errorf("rebooting"))
+		healthResponses = append(healthResponses, nil)
+	}
+
+	talos := &stubTalosClient{
+		nodes:           nodes,
+		healthResponses: healthResponses,
+	}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityTalosUpgrade,
 		ClusterRef: "ccs-test",
@@ -293,9 +323,32 @@ func TestTalosUpgrade_CallsUpgradeAPI(t *testing.T) {
 	if result.Status != runnerlib.ResultSucceeded {
 		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
 	}
-	if !talos.upgradeCalled {
-		t.Error("expected Upgrade() to be called")
+	if talos.upgradeCallCount != len(nodes) {
+		t.Errorf("expected Upgrade called %d times (once per node), got %d", len(nodes), talos.upgradeCallCount)
 	}
+	if len(result.Steps) != len(nodes) {
+		t.Errorf("expected %d step results, got %d", len(nodes), len(result.Steps))
+	}
+}
+
+func TestTalosUpgrade_NoNodesReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityTalosUpgrade)
+
+	talos := &stubTalosClient{nodes: []string{}} // empty -- no nodes configured
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityTalosUpgrade,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "talos", "v1.12.0", "")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "talos-upgrade no nodes")
 }
 
 // ---------------------------------------------------------------------------
