@@ -48,6 +48,22 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 
 **`onLeaderStart()` signature**: clusterRef, namespace, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, rbacPolicyPullLoop, driftSignalHandler, dynamicClient.
 
+### Capability (`internal/capability/platform_etcd.go`)
+
+| Handler | Capability | Key behavior |
+|---------|-----------|-------------|
+| `etcdBackupHandler` | `etcd-backup` | Lists EtcdMaintenance CRs in `seam-tenant-{cluster}`, reads `spec.s3Destination.bucket/key`, calls `TalosClient.EtcdSnapshot` into a `bytes.Buffer`, wraps with `bytes.NewReader(buf.Bytes())` (seekable) before calling `StorageClient.Upload`. Seekable wrapper is required for MinIO/Scality over HTTP -- AWS SDK v2 cannot compute checksums on unseekable streams without TLS. |
+| `etcdDefragHandler` | `etcd-defrag` | Calls `TalosClient.EtcdDefragment`. |
+| `etcdRestoreHandler` | `etcd-restore` | Lists EtcdMaintenance CRs, reads `spec.s3SnapshotPath`, downloads snapshot via `StorageClient.Download`, calls `TalosClient.EtcdRecover`. |
+
+`tenantNamespace(clusterRef string) string` -- returns `seam-tenant-{clusterRef}`.
+
+### Capability (`internal/capability/adapters.go`)
+
+`S3StorageClientAdapter`: wraps `*s3.Client` (AWS SDK v2). Constructor `NewS3StorageClientAdapter()` reads `S3_REGION` (required) and `S3_ENDPOINT` (optional) from env. When `S3_ENDPOINT` is set, `UsePathStyle = true` is enabled for MinIO/Scality path-style addressing. `Upload(ctx, bucket, key, r io.Reader)` calls `PutObject`. `Download(ctx, bucket, key)` calls `GetObject`.
+
+**MinIO over HTTP**: Callers MUST pass an `io.ReadSeeker` (not a plain `io.Reader` like `*bytes.Buffer`) to `Upload` when `S3_ENDPOINT` is an HTTP URL. Without TLS, AWS SDK v2 cannot use trailing checksums and requires the stream to be seekable for upfront checksum computation. `etcdBackupHandler` uses `bytes.NewReader(buf.Bytes())` for this reason.
+
 ### Capability (`internal/capability/wrapper.go`)
 
 **`writePackReceipt()` signature** (L934): `func writePackReceipt(ctx, tenantClient dynamic.Interface, clusterPackRef, targetCluster, rbacDigest, workloadDigest string, resources []runnerlib.DeployedResource) error`
@@ -134,3 +150,5 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 **`pkg/runnerlib/packreceipt.go` is a 1-line stub**: The file contains only `package runnerlib`. CRD type definitions are in `seam-core/api/v1alpha1` per Decision G. `packreceipt_test.go` in the same package tests seam-core types only.
 
 **RBACProfile pull loop (role=tenant)**: `RBACProfilePullLoop` in `rbacprofile_pull_loop.go` pulls the `conductor-tenant` RBACProfile from `seam-tenant-{cluster}` on the management cluster and SSA-patches it into `ont-system` on the local cluster. Wired into `kernel/agent.go` `onLeaderStart`. CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION closed.
+
+**S3 upload requires seekable stream over HTTP**: AWS SDK v2 cannot compute request checksums for `PutObject` on an unseekable `io.Reader` without TLS (trailing checksums are TLS-only). For MinIO/Scality HTTP endpoints, `etcdBackupHandler` uses `bytes.NewReader(buf.Bytes())` which wraps the in-memory snapshot as `io.ReadSeeker`. Passing `*bytes.Buffer` directly to `Upload` causes "unseekable stream is not supported without TLS and trailing checksum".

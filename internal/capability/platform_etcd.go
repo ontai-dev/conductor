@@ -73,8 +73,11 @@ func (h *etcdBackupHandler) Execute(ctx context.Context, params ExecuteParams) (
 	step1End := time.Now().UTC()
 
 	// Upload snapshot to object storage.
+	// bytes.NewReader wraps the buffered snapshot as an io.ReadSeeker so the AWS
+	// SDK v2 can compute checksums upfront — required for MinIO/Scality over HTTP
+	// where trailing checksums (TLS-only) are not available.
 	step2Start := time.Now().UTC()
-	if err := params.StorageClient.Upload(ctx, s3Bucket, s3Key, &buf); err != nil {
+	if err := params.StorageClient.Upload(ctx, s3Bucket, s3Key, bytes.NewReader(buf.Bytes())); err != nil {
 		return failureResult(runnerlib.CapabilityEtcdBackup, now, runnerlib.ExternalDependencyFailure,
 			fmt.Sprintf("upload snapshot to s3://%s/%s: %v", s3Bucket, s3Key, err)), nil
 	}
