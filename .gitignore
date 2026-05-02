@@ -38,8 +38,10 @@ Thumbs.db
 CLAUDE.md
 AGENTS.md
 
-# Markdown: only README, schema documents, and CONTRIBUTING are tracked
+# Markdown: only README, schema documents, CONTRIBUTING, and docs/ runbooks are tracked
 *.md
 !README.md
 !*-schema.md
 !CONTRIBUTING.md
+!docs/*.md
+!docs/**/*.md

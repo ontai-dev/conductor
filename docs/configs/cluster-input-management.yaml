@@ -1,0 +1,81 @@
+# cluster-input-management.yaml
+#
+# ClusterInput for importing an existing Talos cluster as the ONT management cluster.
+# Pass this file to:
+#
+#   compiler bootstrap --input cluster-input-management.yaml --output ./out
+#
+# The compiler emits:
+#   {cluster-name}.yaml              -- InfrastructureTalosCluster CR (apply to management cluster)
+#   seam-mc-{cluster}-{node}.yaml   -- machine config Secrets per node
+#   bootstrap-sequence.yaml          -- ordered apply sequence
+#
+# Alpha release: mode=import only. mode=bootstrap and capi.enabled=true are deferred.
+
+name: management              # short cluster identifier; used as label prefix throughout
+namespace: seam-system        # always seam-system for management cluster CRs
+mode: import                  # import: seam governs an already-running cluster
+                              # bootstrap: deferred for alpha release
+role: management              # management: this cluster runs all ONT operators
+                              # tenant: clusters governed by the management cluster use role=tenant
+capi:
+  enabled: false              # CAPI-managed lifecycle is deferred for alpha release
+
+importExistingCluster: true   # must be true for mode=import
+
+bootstrap:
+  # talosVersion must match the version reported by "talosctl version" on the cluster nodes.
+  talosVersion: "v1.9.3"
+
+  # kubernetesVersion: sem-ver without the leading "v".
+  # The compiler derives this from the Talos support matrix when omitted on mode=import.
+  # Explicit value required for mode=bootstrap.
+  # kubernetesVersion: "1.32.3"
+
+  # controlPlaneEndpoint: the stable VIP or load-balancer address for the kube-apiserver.
+  # The compiler extracts this from machineConfigPaths on mode=import when omitted.
+  # controlPlaneEndpoint: "https://10.0.0.10:6443"
+
+  # installDisk: the disk device path used by all nodes (mode=bootstrap only).
+  # installDisk: "/dev/sda"
+
+  # nodes: required for mode=import to enumerate node identities.
+  # The compiler generates one machine config Secret per node.
+  nodes:
+    - hostname: management-cp1
+      ip: "10.0.0.11"
+      role: init            # init: first control plane node (seeds etcd cluster)
+    - hostname: management-cp2
+      ip: "10.0.0.12"
+      role: controlplane    # controlplane: joins existing etcd cluster
+    - hostname: management-cp3
+      ip: "10.0.0.13"
+      role: controlplane
+    - hostname: management-w1
+      ip: "10.0.0.21"
+      role: worker
+    - hostname: management-w2
+      ip: "10.0.0.22"
+      role: worker
+
+# machineConfigPaths: map of hostname to existing Talos machine config file.
+# Required for mode=import. The compiler reads these to extract controlPlaneEndpoint,
+# installDisk, and per-node customization. Paths are relative to the directory where
+# the compiler is invoked.
+machineConfigPaths:
+  management-cp1: ./machine-configs/management-cp1.yaml
+  management-cp2: ./machine-configs/management-cp2.yaml
+  management-cp3: ./machine-configs/management-cp3.yaml
+  management-w1:  ./machine-configs/management-w1.yaml
+  management-w2:  ./machine-configs/management-w2.yaml
+
+# ciliumPrerequisites: injects BPF kernel parameters and CNI=none into machine configs.
+# Set to false if already present in the existing machine configs (import path).
+# ciliumPrerequisites: true
+
+# registryMirrors: inject OCI registry mirrors into every machine config.
+# ciliumPrerequisites and registryMirrors are injected automatically on mode=bootstrap.
+# registryMirrors:
+#   - host: "registry.k8s.io"
+#     endpoints:
+#       - "https://10.0.0.1:5000"
