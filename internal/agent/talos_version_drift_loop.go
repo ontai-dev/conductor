@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -283,15 +282,3 @@ func (l *TalosVersionDriftLoop) confirmSignalIfPresent(ctx context.Context, sign
 	}
 }
 
-// extractObservedVersionFromDriftReason parses the observed talos version out of a
-// driftReason string produced by TalosVersionDriftLoop. Format:
-// "talos version drift: spec={x} observed={y}"
-// Returns "" if the format does not match.
-func extractObservedVersionFromDriftReason(driftReason string) string {
-	for _, part := range strings.Split(driftReason, " ") {
-		if strings.HasPrefix(part, "observed=") {
-			return strings.TrimPrefix(part, "observed=")
-		}
-	}
-	return ""
-}

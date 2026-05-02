@@ -15,8 +15,6 @@ import (
 )
 
 var versionDriftSignalGVR = schema.GroupVersionResource{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "driftsignals"}
-var versionNodeGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
-var versionTalosClusterGVR = schema.GroupVersionResource{Group: "infrastructure.ontai.dev", Version: "v1alpha1", Resource: "infrastructuretalosclusters"}
 
 func buildFakeDriftScheme() *runtime.Scheme {
 	s := runtime.NewScheme()

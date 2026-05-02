@@ -29,9 +29,6 @@ var upgradePolicyGVR = schema.GroupVersionResource{
 // can lower it without modifying production constants.
 var NodeRebootPollInterval = 10 * time.Second
 
-// nodeRebootTimeout is the maximum time to wait for a single node to reboot
-// and become healthy after a talos-upgrade call.
-const nodeRebootTimeout = 10 * time.Minute
 
 // talosUpgradeHandler implements the talos-upgrade named capability.
 // Performs a rolling sequential upgrade of all nodes: each node is upgraded
