@@ -1,0 +1,36 @@
+# packbuild-raw.yaml
+#
+# PackBuild input for a raw YAML manifest directory.
+# Pass this file to:
+#
+#   compiler packbuild --input packbuild-raw.yaml --output ./out
+#
+# The compiler reads all .yaml / .yml files from rawSource.path, classifies each
+# manifest as RBAC, cluster-scoped, or workload, packs them into three OCI layers,
+# pushes to registryUrl, and emits an InfrastructureClusterPack CR.
+#
+# Raw packs are useful for operator CRDs, plain Deployments, or any workload that
+# does not use Helm. No templating is applied -- manifests are used as-is.
+
+name: minio-raw-v0.1.0-r1
+
+namespace: seam-tenant-management
+
+version: v0.1.0-r1
+
+registryUrl: 10.0.0.1:5000/ontai-dev/packs/minio-raw
+
+basePackName: minio-raw
+
+targetClusters:
+  - management
+
+rawSource:
+  # path: directory containing .yaml / .yml files, relative to the compiler invocation
+  # directory. Subdirectories are not scanned -- only top-level files are included.
+  path: ./manifests/minio
+
+# sourceBuildRef: optional human-readable reference to the source that produced
+# the manifests (e.g. a git ref, a release tag, or a build job ID).
+# Stored in PackReceipt for audit traceability. Not interpreted by the platform.
+sourceBuildRef: minio-release-v0.1.0

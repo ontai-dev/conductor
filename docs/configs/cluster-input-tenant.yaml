@@ -1,0 +1,41 @@
+# cluster-input-tenant.yaml
+#
+# ClusterInput for importing an existing Talos cluster as an ONT tenant cluster.
+# Pass this file to:
+#
+#   compiler bootstrap --input cluster-input-tenant.yaml --output ./out
+#
+# Apply the compiler output to the MANAGEMENT cluster (not the tenant cluster).
+# The InfrastructureTalosCluster CR lives in seam-system on the management cluster.
+# The compiler also emits a seam-tenant-{name} namespace manifest.
+#
+# Alpha release: mode=import only. mode=bootstrap and capi.enabled=true are deferred.
+
+name: tenant                  # short cluster identifier
+namespace: seam-system        # InfrastructureTalosCluster is always in seam-system
+mode: import                  # import: the cluster already exists; ONT assumes governance
+role: tenant                  # tenant: governed by the management cluster
+capi:
+  enabled: false              # CAPI-managed lifecycle is deferred for alpha release
+
+importExistingCluster: true
+
+bootstrap:
+  # controlPlaneEndpoint: stable VIP or load-balancer address for the kube-apiserver.
+  # Required for mode=import when machineConfigPaths is not provided.
+  controlPlaneEndpoint: "https://10.1.0.10:6443"
+
+  # talosVersion must match the version on the tenant cluster nodes.
+  talosVersion: "v1.9.3"
+
+  # kubernetesVersion: sem-ver without the leading "v".
+  # Drives the K8s version drift loop -- drift is declared when node kubeletVersion
+  # disagrees with this value. KubernetesVersionDriftLoop emits a corrective
+  # UpgradePolicy automatically when out-of-band k8s upgrades are detected.
+  kubernetesVersion: "1.32.3"
+
+# No machineConfigPaths for a tenant-only import.
+# The compiler emits:
+#   tenant.yaml                      -- InfrastructureTalosCluster CR (apply to management)
+#   seam-tenant-tenant.yaml          -- namespace manifest (apply to management)
+#   bootstrap-sequence.yaml          -- ordered apply sequence

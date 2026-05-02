@@ -1,0 +1,36 @@
+# packbuild-kustomize.yaml
+#
+# PackBuild input for a Kustomize overlay.
+# Pass this file to:
+#
+#   compiler packbuild --input packbuild-kustomize.yaml --output ./out
+#
+# The compiler runs kustomize build on the overlay path, splits the rendered
+# YAML into RBAC / cluster-scoped / workload OCI layers, pushes each to
+# registryUrl, and emits an InfrastructureClusterPack CR.
+#
+# Use Kustomize packs when you maintain per-environment overlays on top of an
+# upstream base (e.g. local-path-provisioner with cluster-specific StorageClass
+# names, or an operator with environment-tuned resource limits).
+
+name: local-path-provisioner-kustomize-v0.0.26-r1
+
+namespace: seam-tenant-management
+
+version: v0.0.26-r1
+
+registryUrl: 10.0.0.1:5000/ontai-dev/packs/local-path-kustomize
+
+basePackName: local-path-provisioner-kustomize
+
+targetClusters:
+  - management
+
+kustomizeSource:
+  # path: directory containing a kustomization.yaml, relative to the compiler
+  # invocation directory. The compiler calls krusty.Kustomizer on this path.
+  # Both overlays (with a base reference) and standalone kustomizations are supported.
+  path: ./overlays/local-path-management
+
+# sourceBuildRef: optional audit reference.
+sourceBuildRef: local-path-provisioner-v0.0.26

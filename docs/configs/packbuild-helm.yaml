@@ -1,0 +1,62 @@
+# packbuild-helm.yaml
+#
+# PackBuild input for a Helm chart sourced from an OCI or HTTP chart repository.
+# Pass this file to:
+#
+#   compiler packbuild --input packbuild-helm.yaml --output ./out
+#
+# The compiler pulls the chart, renders it, splits manifests into RBAC /
+# cluster-scoped / workload OCI layers, pushes each to registryUrl, and emits
+# an InfrastructureClusterPack CR. Apply the CR to the management cluster in the
+# namespace shown below.
+
+# name: unique identifier for this build revision. Convention: {pack-base}-v{semver}-r{revision}.
+name: cert-manager-helm-v1.14.0-r1
+
+# namespace: seam-tenant-{targetCluster}. The ClusterPack CR must live here.
+namespace: seam-tenant-management
+
+# version: semantic version for this artifact. Recorded in PackReceipt for traceability.
+version: v1.14.0-r1
+
+# registryUrl: OCI registry path where the three split layers are pushed.
+# Use your self-hosted registry (see runbook section 2 for registry setup).
+# The compiler pushes three tags: {registryUrl}-rbac, {registryUrl}-cluster, {registryUrl}-workload
+registryUrl: 10.0.0.1:5000/ontai-dev/packs/cert-manager-helm
+
+# basePackName: logical family name, version-independent. Used by the drift loop
+# to group revisions of the same pack when checking for orphaned receipts.
+basePackName: cert-manager-helm
+
+# targetClusters: list of cluster names (must match InfrastructureTalosCluster.metadata.name).
+targetClusters:
+  - management
+
+helmSource:
+  # url: HTTP(S) URL to a .tgz chart archive, or an OCI chart reference (oci://).
+  # Point to your self-hosted chart mirror to avoid external dependencies at compile time.
+  url: http://10.0.0.1:8888/cert-manager-v1.14.0.tgz
+
+  # chart: Helm chart name inside the archive.
+  chart: cert-manager
+
+  # version: chart version string. Recorded in PackReceipt.chartVersion.
+  version: v1.14.0
+
+  # valuesFile: optional path to a Helm values override file, relative to the
+  # directory where the compiler is invoked. The filename is stored in
+  # ClusterPack.spec.valuesFile for full traceability.
+  # valuesFile: ./values/cert-manager-prod.yaml
+
+  # namespace: Kubernetes namespace where the chart resources are deployed.
+  # Defaults to the chart's own default namespace when omitted.
+  # namespace: cert-manager
+
+  # registryCredentialsSecret: name of an existing Secret in the management cluster
+  # that holds OCI registry credentials (type: kubernetes.io/dockerconfigjson).
+  # Required only when the chart registry requires authentication.
+  # registryCredentialsSecret: registry-creds
+
+  # helmVersion: pin a specific Helm binary version (e.g. "v3.16.0").
+  # Defaults to the version bundled in the conductor-execute image when omitted.
+  # helmVersion: "v3.16.0"
