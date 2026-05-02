@@ -527,13 +527,20 @@ type PackBuildInput struct {
 	TargetClusters []string `yaml:"targetClusters,omitempty"`
 
 	// RBACDigest is the OCI digest of the RBAC layer (SA, Role, CR, RB, CRB).
-	// Set by the human or pipeline after running the two-layer OCI push.
+	// Set by the human or pipeline after running the three-layer OCI push.
 	// Absent for pre-split artifacts. wrapper-schema.md §4.
 	// +optional
 	RBACDigest string `yaml:"rbacDigest,omitempty"`
 
-	// WorkloadDigest is the OCI digest of the workload layer (all non-RBAC manifests).
-	// Set by the human or pipeline after running the two-layer OCI push.
+	// ClusterScopedDigest is the OCI digest of the cluster-scoped non-RBAC layer
+	// (CRDs, ValidatingWebhookConfigurations, Namespaces, etc.).
+	// Set by the human or pipeline after running the three-layer OCI push.
+	// Absent when the pack has no cluster-scoped resources. wrapper-schema.md §4.
+	// +optional
+	ClusterScopedDigest string `yaml:"clusterScopedDigest,omitempty"`
+
+	// WorkloadDigest is the OCI digest of the workload layer (all non-RBAC, non-cluster-scoped manifests).
+	// Set by the human or pipeline after running the three-layer OCI push.
 	// Absent for pre-split artifacts. wrapper-schema.md §4.
 	// +optional
 	WorkloadDigest string `yaml:"workloadDigest,omitempty"`
@@ -551,12 +558,35 @@ type PackBuildInput struct {
 	// +optional
 	ValuesFile string `yaml:"valuesFile,omitempty"`
 
+	// Category declares the pack type discriminator. Accepted values: helm, kustomize, raw.
+	// Required when helmSource, kustomizeSource, or rawSource is set.
+	// When absent, the compiler falls back to nil-check dispatch for backward compatibility.
+	// T-05, T-11.
+	// +optional
+	Category string `yaml:"category,omitempty"`
+
 	// HelmSource defines the Helm chart source for automated packbuild.
 	// When present, the compiler fetches, renders, and pushes the chart
 	// automatically instead of requiring pre-built OCI digests.
 	// conductor-schema.md §9, wrapper-schema.md §4, INV-001.
 	// +optional
 	HelmSource *HelmSource `yaml:"helmSource,omitempty"`
+
+	// RawSource defines a directory of raw YAML manifest files for automated packbuild.
+	// When present, the compiler reads all .yaml/.yml files from the directory,
+	// splits them into RBAC, cluster-scoped, and workload OCI layers, and pushes
+	// them to the registry. Mutually exclusive with HelmSource.
+	// conductor-schema.md §9, wrapper-schema.md §4.
+	// +optional
+	RawSource *RawSource `yaml:"rawSource,omitempty"`
+
+	// KustomizeSource defines a kustomize overlay directory for automated packbuild.
+	// When present, the compiler runs krusty.Kustomizer on the directory, renders
+	// all resources, splits into RBAC/cluster-scoped/workload OCI layers, and pushes
+	// them to the registry. Mutually exclusive with HelmSource and RawSource.
+	// conductor-schema.md §9, wrapper-schema.md §4, T-12.
+	// +optional
+	KustomizeSource *KustomizeSource `yaml:"kustomizeSource,omitempty"`
 }
 
 // readClusterInput reads and parses a ClusterInput spec file from the given path.
@@ -597,10 +627,52 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 	if in.Version == "" {
 		return PackBuildInput{}, fmt.Errorf("input file %q: version is required", path)
 	}
+	// Category validation: when set, must be one of the known enum values. T-05, T-11.
+	if in.Category != "" {
+		switch in.Category {
+		case "helm", "kustomize", "raw":
+		default:
+			return PackBuildInput{}, fmt.Errorf("input file %q: category must be helm, kustomize, or raw; got %q", path, in.Category)
+		}
+		// Cross-contamination check: source field must match declared category.
+		if in.Category == "helm" && in.HelmSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=helm requires helmSource to be set", path)
+		}
+		if in.Category == "raw" && in.RawSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=raw requires rawSource to be set", path)
+		}
+		if in.Category == "kustomize" && in.KustomizeSource == nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: category=kustomize requires kustomizeSource to be set", path)
+		}
+		if in.Category != "helm" && in.HelmSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: helmSource is set but category=%q; remove helmSource or set category=helm", path, in.Category)
+		}
+		if in.Category != "raw" && in.RawSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: rawSource is set but category=%q; remove rawSource or set category=raw", path, in.Category)
+		}
+		if in.Category != "kustomize" && in.KustomizeSource != nil {
+			return PackBuildInput{}, fmt.Errorf("input file %q: kustomizeSource is set but category=%q; remove kustomizeSource or set category=kustomize", path, in.Category)
+		}
+	}
+
 	// helmSource path: registryUrl required, digests computed by compiler.
 	if in.HelmSource != nil {
 		if in.RegistryURL == "" {
 			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when helmSource is set", path)
+		}
+		return in, nil
+	}
+	// rawSource path: registryUrl required, digests computed by compiler.
+	if in.RawSource != nil {
+		if in.RegistryURL == "" {
+			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when rawSource is set", path)
+		}
+		return in, nil
+	}
+	// kustomizeSource path: registryUrl required, digests computed by compiler.
+	if in.KustomizeSource != nil {
+		if in.RegistryURL == "" {
+			return PackBuildInput{}, fmt.Errorf("input file %q: registryUrl is required when kustomizeSource is set", path)
 		}
 		return in, nil
 	}
@@ -617,9 +689,10 @@ func readPackBuildInput(path string) (PackBuildInput, error) {
 // writeSeamTenantNamespaceManifest writes a Namespace manifest for
 // seam-tenant-{clusterName} to the output directory. The manifest carries the
 // ontai.dev/tenant and ontai.dev/cluster labels required by the namespace model.
-// For mode=import clusters: Platform does not create this namespace, so the compiler
-// bootstrap output must include it for GitOps to apply. Returns the filename.
-// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
+// For mode=import clusters: the bootstrap bundle must include this manifest so
+// the admin can apply it before the Secrets (which live in seam-tenant-{cluster}).
+// For mode=bootstrap/CAPI: Platform creates the namespace via ensureTenantNamespace.
+// Returns the filename. Governor ruling 2026-04-21 (session/13-namespace-model-fix).
 func writeSeamTenantNamespaceManifest(clusterName, output string) (string, error) {
 	ns := corev1.Namespace{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
@@ -982,9 +1055,8 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 	// Platform can generate the kubeconfig via ensureKubeconfigSecret. Applies to
 	// both the machineConfigPaths path (local file PKI) and the Kubernetes API path
 	// (Seam clusters). Failure is a warning -- the operator can apply manually.
-	// Also emit the seam-tenant namespace manifest (Governor ruling 2026-04-21:
-	// Platform does not create seam-tenant-{name} for mode=import clusters; the
-	// compiler bootstrap output must include it).
+	// Also emit the seam-tenant namespace manifest so the admin can apply it before
+	// the Secrets (which live in seam-tenant-{cluster}). platform-schema.md §9.
 	if in.ImportExistingCluster {
 		nsFile, err := writeSeamTenantNamespaceManifest(in.Name, output)
 		if err != nil {
@@ -1207,8 +1279,8 @@ func writeBootstrapSequence(output, clusterName string, secretFiles []string, mo
 
 // compilePackBuild implements the packbuild subcommand.
 // Reads a PackBuildInput spec and emits a ClusterPack CR YAML.
-// When helmSource is present, dispatches to helmCompilePackBuild which
-// fetches, renders, and pushes the chart before emitting the CR.
+// Dispatch is category-driven when category is set; falls back to source nil-check
+// for backward compatibility when category is absent. T-05, T-13.
 // conductor-schema.md §6 (pack-compile), wrapper-schema.md §3.
 func compilePackBuild(input, output string) error {
 	in, err := readPackBuildInput(input)
@@ -1216,9 +1288,33 @@ func compilePackBuild(input, output string) error {
 		return err
 	}
 
+	// Category-driven dispatch (T-13): explicit category takes precedence.
+	switch in.Category {
+	case "helm":
+		inputDir := filepath.Dir(input)
+		return helmCompilePackBuild(context.Background(), in, inputDir, output)
+	case "raw":
+		inputDir := filepath.Dir(input)
+		return rawCompilePackBuild(context.Background(), in, inputDir, output)
+	case "kustomize":
+		inputDir := filepath.Dir(input)
+		return kustomizeCompilePackBuild(context.Background(), in, inputDir, output)
+	}
+
+	// Backward-compatible nil-check dispatch when category is absent.
 	if in.HelmSource != nil {
 		inputDir := filepath.Dir(input)
 		return helmCompilePackBuild(context.Background(), in, inputDir, output)
+	}
+
+	if in.RawSource != nil {
+		inputDir := filepath.Dir(input)
+		return rawCompilePackBuild(context.Background(), in, inputDir, output)
+	}
+
+	if in.KustomizeSource != nil {
+		inputDir := filepath.Dir(input)
+		return kustomizeCompilePackBuild(context.Background(), in, inputDir, output)
 	}
 
 	ns := in.Namespace
@@ -1241,13 +1337,14 @@ func compilePackBuild(input, output string) error {
 				URL:    in.RegistryURL,
 				Digest: in.Digest,
 			},
-			Checksum:       in.Checksum,
-			SourceBuildRef: in.SourceBuildRef,
-			TargetClusters: in.TargetClusters,
-			RBACDigest:     in.RBACDigest,
-			WorkloadDigest: in.WorkloadDigest,
-			BasePackName:   in.BasePackName,
-			ValuesFile:     in.ValuesFile,
+			Checksum:            in.Checksum,
+			SourceBuildRef:      in.SourceBuildRef,
+			TargetClusters:      in.TargetClusters,
+			RBACDigest:          in.RBACDigest,
+			ClusterScopedDigest: in.ClusterScopedDigest,
+			WorkloadDigest:      in.WorkloadDigest,
+			BasePackName:        in.BasePackName,
+			ValuesFile:          in.ValuesFile,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
@@ -1280,10 +1377,10 @@ func compileImportTalosconfigSecret(in ClusterInput, output, flagValue string) e
 		return fmt.Errorf("compileImportTalosconfigSecret: create output dir: %w", err)
 	}
 
-	// Emit the seam-tenant namespace manifest so GitOps can create the namespace
-	// before applying the Secrets. For mode=import, Platform does not create
-	// seam-tenant-{name}; the compiler output must include it.
-	// Governor ruling 2026-04-21 (session/13-namespace-model-fix).
+	// Emit the seam-tenant namespace manifest so the admin can apply it before the
+	// talosconfig Secret (which lives in seam-tenant-{cluster}). For mode=import,
+	// the bootstrap bundle must include this manifest for one-shot kubectl apply.
+	// Governor ruling 2026-04-21 (session/13-namespace-model-fix). platform-schema.md §9.
 	if _, err := writeSeamTenantNamespaceManifest(in.Name, output); err != nil {
 		return err
 	}

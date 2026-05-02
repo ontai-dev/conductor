@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -172,13 +173,32 @@ func runExecute() {
 		guardianHTTPClient,
 	)
 
+	// TenantDynamicClient: loaded from the mounted kubeconfig Secret for pack-deploy.
+	// Pack-deploy Jobs always mount seam-mc-{clusterRef}-kubeconfig at this path.
+	// Other capabilities (day-2 Talos ops) do not mount a kubeconfig, so this stays nil.
+	// conductor-schema.md §6: all capabilities reach target clusters via mounted kubeconfig.
+	var tenantDynamicClient dynamic.Interface
+	tenantKubeconfigPath := "/var/run/secrets/kubeconfig/value"
+	if v := os.Getenv("KUBECONFIG"); v != "" {
+		tenantKubeconfigPath = v
+	}
+	if tenantCfg, tcErr := clientcmd.BuildConfigFromFlags("", tenantKubeconfigPath); tcErr != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant kubeconfig load failed (%s): %v -- falling back to management cluster\n", tenantKubeconfigPath, tcErr)
+	} else if tdc, tdcErr := dynamic.NewForConfig(tenantCfg); tdcErr != nil {
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant dynamic client build failed: %v -- falling back to management cluster\n", tdcErr)
+	} else {
+		tenantDynamicClient = tdc
+		fmt.Fprintf(os.Stderr, "conductor execute: tenant dynamic client loaded from %s (server: %s)\n", tenantKubeconfigPath, tenantCfg.Host)
+	}
+
 	clients := capability.ExecuteClients{
-		KubeClient:    kubeClient,
-		DynamicClient: dynamicClient,
-		TalosClient:   talosClient,
-		StorageClient: storageClient,
-		OCIClient:     ociClient,
-		GuardianClient: guardianClient,
+		KubeClient:          kubeClient,
+		DynamicClient:       dynamicClient,
+		TenantDynamicClient: tenantDynamicClient,
+		TalosClient:         talosClient,
+		StorageClient:       storageClient,
+		OCIClient:           ociClient,
+		GuardianClient:      guardianClient,
 	}
 
 	ctrlClient, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: seamScheme})
@@ -219,6 +239,7 @@ func runExecute() {
 		slog.String("cluster", execCtx.ClusterRef),
 		slog.String("capability", execCtx.Capability),
 	)
+	slog.SetDefault(execLogger)
 	execLogger.Info("starting")
 	if err := kernel.RunExecute(execCtx, executor, statusWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor execute: %v\n", err)
@@ -306,7 +327,7 @@ func buildStepParameters() map[string]string {
 	if v := os.Getenv("OPERATION_RESULT_CR"); v != "" {
 		params["operationResultCR"] = v
 	}
-	kubeconfigPath := "/var/run/secrets/kubeconfig/kubeconfig"
+	kubeconfigPath := "/var/run/secrets/kubeconfig/value"
 	if v := os.Getenv("KUBECONFIG"); v != "" {
 		kubeconfigPath = v
 	}
@@ -355,11 +376,18 @@ func (e *capabilityStepExecutor) Execute(
 		}, nil
 	}
 
+	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
+		slog.String("component", "conductor-execute"),
+		slog.String("cluster", clusterRef),
+		slog.String("capability", step.Capability),
+	)
+
 	params := capability.ExecuteParams{
 		Capability:     step.Capability,
 		ClusterRef:     clusterRef,
 		Namespace:      namespace,
 		ExecuteClients: e.clients,
+		Logger:         dispatchLogger,
 	}
 
 	// Day-2 path: OPERATION_RESULT_CR is set in step parameters.
@@ -371,11 +399,6 @@ func (e *capabilityStepExecutor) Execute(
 	}
 	params.OperationResultCM = packExecutionRef
 
-	dispatchLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
-		slog.String("component", "conductor-execute"),
-		slog.String("cluster", clusterRef),
-		slog.String("capability", step.Capability),
-	)
 	dispatchLogger.Info("capability dispatching")
 	result, err := handler.Execute(ctx, params)
 	if err != nil {

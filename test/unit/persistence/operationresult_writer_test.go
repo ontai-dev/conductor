@@ -73,10 +73,11 @@ func TestOperationResultWriter_FirstWrite(t *testing.T) {
 	}
 }
 
-// TestOperationResultWriter_SecondWriteDeletesPredecessor verifies that the
+// TestOperationResultWriter_SecondWriteRetainsPredecessorAsSuperseded verifies that the
 // second WriteResult call creates a POR at revision=2, sets PreviousRevisionRef,
-// and deletes the revision=1 CR -- leaving exactly one POR in the namespace.
-func TestOperationResultWriter_SecondWriteDeletesPredecessor(t *testing.T) {
+// and labels the revision=1 CR ontai.dev/superseded=true (retained for N-step rollback).
+// Both PORs must exist after two writes. seam-core-schema.md §7.8.
+func TestOperationResultWriter_SecondWriteRetainsPredecessorAsSuperseded(t *testing.T) {
 	scheme := buildTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	writer := persistence.NewKubeOperationResultWriter(fakeClient, "cluster-b")
@@ -101,7 +102,7 @@ func TestOperationResultWriter_SecondWriteDeletesPredecessor(t *testing.T) {
 		t.Fatalf("second WriteResult: %v", err)
 	}
 
-	// Revision 2 must exist with PreviousRevisionRef set.
+	// Revision 2 must exist with PreviousRevisionRef set and no superseded label.
 	r2 := &seamv1alpha1.PackOperationResult{}
 	if err := fakeClient.Get(context.Background(),
 		ctrlclient.ObjectKey{Namespace: "seam-tenant-cluster-b", Name: "pack-deploy-result-pe2-r2"},
@@ -117,8 +118,22 @@ func TestOperationResultWriter_SecondWriteDeletesPredecessor(t *testing.T) {
 	if r2.Spec.Status != seamv1alpha1.PackResultSucceeded {
 		t.Errorf("r2.Status=%q, want Succeeded", r2.Spec.Status)
 	}
+	if got := r2.Labels["ontai.dev/superseded"]; got != "" {
+		t.Errorf("r2 superseded label=%q, want empty (active revision)", got)
+	}
 
-	// Exactly one POR must remain in the namespace for this packExecutionRef.
+	// Revision 1 must still exist and be labeled superseded.
+	r1 := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-cluster-b", Name: "pack-deploy-result-pe2-r1"},
+		r1); err != nil {
+		t.Fatalf("revision 1 POR not found after second write (must be retained): %v", err)
+	}
+	if got := r1.Labels["ontai.dev/superseded"]; got != "true" {
+		t.Errorf("r1 superseded label=%q, want true", got)
+	}
+
+	// Both PORs must be present in the namespace for this packExecutionRef.
 	list := &seamv1alpha1.PackOperationResultList{}
 	if err := fakeClient.List(context.Background(), list,
 		ctrlclient.InNamespace("seam-tenant-cluster-b"),
@@ -126,8 +141,8 @@ func TestOperationResultWriter_SecondWriteDeletesPredecessor(t *testing.T) {
 	); err != nil {
 		t.Fatalf("list PORs: %v", err)
 	}
-	if len(list.Items) != 1 {
-		t.Errorf("POR count=%d after two writes, want 1 (single-active-revision)", len(list.Items))
+	if len(list.Items) != 2 {
+		t.Errorf("POR count=%d after two writes, want 2 (active + superseded retained)", len(list.Items))
 	}
 }
 
@@ -161,6 +176,114 @@ func TestOperationResultWriter_PredecessorDumpLogged(t *testing.T) {
 		if !bytes.Contains(buf.Bytes(), []byte(want)) {
 			t.Errorf("log output missing %q; got:\n%s", want, logged)
 		}
+	}
+}
+
+// TestOperationResultWriter_ClusterPackLabelSet verifies that the ontai.dev/cluster-pack
+// label is set on the POR when ClusterPackRef is populated in the result.
+func TestOperationResultWriter_ClusterPackLabelSet(t *testing.T) {
+	scheme := buildTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	writer := persistence.NewKubeOperationResultWriter(fakeClient, "ccs-dev")
+
+	result := runnerlib.OperationResultSpec{
+		Capability:     "pack-deploy",
+		Status:         runnerlib.ResultSucceeded,
+		ClusterPackRef: "nginx-ccs-dev",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "nginx-ccs-dev-ccs-dev", result); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+
+	por := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-ccs-dev", Name: "pack-deploy-result-nginx-ccs-dev-ccs-dev-r1"},
+		por); err != nil {
+		t.Fatalf("POR not found: %v", err)
+	}
+	if got := por.Labels["ontai.dev/cluster-pack"]; got != "nginx-ccs-dev" {
+		t.Errorf("label ontai.dev/cluster-pack=%q, want nginx-ccs-dev", got)
+	}
+	if por.Spec.ClusterPackRef != "nginx-ccs-dev" {
+		t.Errorf("ClusterPackRef=%q, want nginx-ccs-dev", por.Spec.ClusterPackRef)
+	}
+}
+
+// TestOperationResultWriter_SupersededPORRetainsRollbackAnchor verifies that after two
+// deploys, the superseded revision 1 POR is retained with its own version/digest fields
+// intact -- making N-step rollback possible by reading those fields directly.
+// seam-core-schema.md §7.8, wrapper-schema.md §6.2.
+func TestOperationResultWriter_SupersededPORRetainsRollbackAnchor(t *testing.T) {
+	scheme := buildTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	writer := persistence.NewKubeOperationResultWriter(fakeClient, "ccs-dev")
+
+	// First deploy: version v1 with known digests.
+	first := runnerlib.OperationResultSpec{
+		Capability:         "pack-deploy",
+		Status:             runnerlib.ResultSucceeded,
+		ClusterPackRef:     "nginx-ccs-dev",
+		ClusterPackVersion: "v4.9.0-r1",
+		RBACDigest:         "sha256:aaaa",
+		WorkloadDigest:     "sha256:bbbb",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "pe-rollback", first); err != nil {
+		t.Fatalf("first WriteResult: %v", err)
+	}
+
+	// Second deploy: version v2 supersedes v1.
+	second := runnerlib.OperationResultSpec{
+		Capability:         "pack-deploy",
+		Status:             runnerlib.ResultSucceeded,
+		ClusterPackRef:     "nginx-ccs-dev",
+		ClusterPackVersion: "v4.10.0-r1",
+		RBACDigest:         "sha256:cccc",
+		WorkloadDigest:     "sha256:dddd",
+	}
+	if err := writer.WriteResult(context.Background(), "seam-tenant-ccs-dev", "pe-rollback", second); err != nil {
+		t.Fatalf("second WriteResult: %v", err)
+	}
+
+	// Active revision 2 must reflect the second deploy.
+	r2 := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-ccs-dev", Name: "pack-deploy-result-pe-rollback-r2"},
+		r2); err != nil {
+		t.Fatalf("revision 2 POR not found: %v", err)
+	}
+	if r2.Spec.ClusterPackVersion != "v4.10.0-r1" {
+		t.Errorf("r2.ClusterPackVersion=%q, want v4.10.0-r1", r2.Spec.ClusterPackVersion)
+	}
+	if r2.Spec.RBACDigest != "sha256:cccc" {
+		t.Errorf("r2.RBACDigest=%q, want sha256:cccc", r2.Spec.RBACDigest)
+	}
+	if r2.Spec.WorkloadDigest != "sha256:dddd" {
+		t.Errorf("r2.WorkloadDigest=%q, want sha256:dddd", r2.Spec.WorkloadDigest)
+	}
+	if got := r2.Labels["ontai.dev/superseded"]; got != "" {
+		t.Errorf("r2 should not be labeled superseded; got %q", got)
+	}
+
+	// Superseded revision 1 must still exist with its original anchor fields intact.
+	r1 := &seamv1alpha1.PackOperationResult{}
+	if err := fakeClient.Get(context.Background(),
+		ctrlclient.ObjectKey{Namespace: "seam-tenant-ccs-dev", Name: "pack-deploy-result-pe-rollback-r1"},
+		r1); err != nil {
+		t.Fatalf("revision 1 POR must be retained for rollback: %v", err)
+	}
+	if got := r1.Labels["ontai.dev/superseded"]; got != "true" {
+		t.Errorf("r1 superseded label=%q, want true", got)
+	}
+	// The wrapper rollback handler reads ClusterPackVersion/RBACDigest/WorkloadDigest
+	// directly from this retained POR to restore the ClusterPack spec.
+	if r1.Spec.ClusterPackVersion != "v4.9.0-r1" {
+		t.Errorf("r1.ClusterPackVersion=%q, want v4.9.0-r1", r1.Spec.ClusterPackVersion)
+	}
+	if r1.Spec.RBACDigest != "sha256:aaaa" {
+		t.Errorf("r1.RBACDigest=%q, want sha256:aaaa", r1.Spec.RBACDigest)
+	}
+	if r1.Spec.WorkloadDigest != "sha256:bbbb" {
+		t.Errorf("r1.WorkloadDigest=%q, want sha256:bbbb", r1.Spec.WorkloadDigest)
 	}
 }
 

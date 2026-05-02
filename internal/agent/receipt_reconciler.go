@@ -37,6 +37,13 @@ var permissionSnapshotReceiptGVR = schema.GroupVersionResource{
 // of the receipt CR's spec field. INV-026.
 const managementSignatureAnnotation = "infrastructure.ontai.dev/management-signature"
 
+// managementSpecHashAnnotation stores the SHA-256 hex digest of the spec that
+// was signed. The signing loop compares this against the current spec on each
+// cycle to detect Guardian spec updates and trigger re-signing. Without this
+// guard the annotation-absent check causes stale signatures to persist after
+// a spec update.
+const managementSpecHashAnnotation = "infrastructure.ontai.dev/management-spec-hash"
+
 // ReceiptReconciler reconciles PackReceipt and PermissionSnapshotReceipt CRs.
 //
 // On each reconcile cycle it:

@@ -42,6 +42,24 @@ type OperationResultSpec struct {
 	// deletion cleanup. wrapper-schema.md §3, Decision 11.
 	// +optional
 	DeployedResources []DeployedResource
+
+	// ClusterPackRef is the name of the ClusterPack CR deployed by this operation.
+	// Populated by pack-deploy capability. Used to set the ontai.dev/cluster-pack
+	// POR label so the wrapper rollback handler can query PORs by ClusterPack.
+	ClusterPackRef string
+
+	// ClusterPackVersion is the ClusterPack spec.version deployed.
+	// Populated by pack-deploy on success. Stored in POR as rollback anchor.
+	// seam-core-schema.md §7.8, wrapper-schema.md §6.2.
+	ClusterPackVersion string
+
+	// RBACDigest is the OCI digest of the RBAC layer deployed.
+	// Populated by pack-deploy on success (split path). Stored in POR as rollback anchor.
+	RBACDigest string
+
+	// WorkloadDigest is the OCI digest of the workload layer deployed.
+	// Populated by pack-deploy on success (split path). Stored in POR as rollback anchor.
+	WorkloadDigest string
 }
 
 // ResultStatus is a typed string representing the terminal status of a capability

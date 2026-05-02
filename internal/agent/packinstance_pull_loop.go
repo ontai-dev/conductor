@@ -13,6 +13,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -20,35 +21,54 @@ import (
 // fields that are written into PackReceipt.spec when a PackInstance is acknowledged.
 // All fields are optional: absent for kustomize and raw category packs (chart
 // fields) or for pre-split ClusterPack artifacts (digest fields). T-10.
+//
+// DeployedResources carries the resource inventory from the PackInstance artifact.
+// Written to PackReceipt.spec.deployedResources to enable version-upgrade orphan
+// cleanup (CLUSTERPACK-BL-VERSION-CLEANUP).
 type packDeliveryMetadata struct {
-	RBACDigest     string
-	WorkloadDigest string
-	ChartVersion   string
-	ChartURL       string
-	ChartName      string
-	HelmVersion    string
+	RBACDigest        string
+	WorkloadDigest    string
+	ChartVersion      string
+	ChartURL          string
+	ChartName         string
+	HelmVersion       string
+	DeployedResources []map[string]interface{} // from PackInstance spec.deployedResources
 }
 
 // extractPackMetadataFromArtifact extracts chart provenance fields from a
-// PackInstance artifact JSON blob. The artifact is the full PackInstance CR
-// as produced by the management cluster. Chart fields are populated after T-07
-// adds them to PackInstanceSpec. Returns zero-value metadata on parse failure
-// (non-fatal: PackReceipt is still created without chart fields). T-10.
+// PackInstance artifact JSON blob. The signing loop serializes the PackInstance
+// spec directly (flat map), so fields are at the top level of the JSON object.
+// Older artifacts or full-CR blobs wrap them under a "spec" key. Both forms are
+// supported. Returns zero-value metadata on parse failure. T-10.
 func extractPackMetadataFromArtifact(artifactJSON []byte) (clusterPackRef string, meta packDeliveryMetadata) {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(artifactJSON, &obj); err != nil {
 		return "", packDeliveryMetadata{}
 	}
-	spec, _ := obj["spec"].(map[string]interface{})
-	if spec == nil {
-		return "", packDeliveryMetadata{}
+	// Try spec-wrapped form first (full PackInstance CR); fall back to flat form.
+	fields, _ := obj["spec"].(map[string]interface{})
+	if fields == nil {
+		fields = obj
 	}
-	clusterPackRef, _ = spec["clusterPackRef"].(string)
+	clusterPackRef, _ = fields["clusterPackRef"].(string)
+
+	// Extract deployedResources for version-upgrade orphan cleanup.
+	// CLUSTERPACK-BL-VERSION-CLEANUP.
+	var deployedResources []map[string]interface{}
+	if rawDR, ok := fields["deployedResources"].([]interface{}); ok {
+		for _, raw := range rawDR {
+			if m, ok := raw.(map[string]interface{}); ok {
+				deployedResources = append(deployedResources, m)
+			}
+		}
+	}
+
 	return clusterPackRef, packDeliveryMetadata{
-		ChartVersion: stringField(spec, "chartVersion"),
-		ChartURL:     stringField(spec, "chartURL"),
-		ChartName:    stringField(spec, "chartName"),
-		HelmVersion:  stringField(spec, "helmVersion"),
+		ChartVersion:      stringField(fields, "chartVersion"),
+		ChartURL:          stringField(fields, "chartURL"),
+		ChartName:         stringField(fields, "chartName"),
+		HelmVersion:       stringField(fields, "helmVersion"),
+		DeployedResources: deployedResources,
 	}
 }
 
@@ -211,10 +231,28 @@ func (l *PackInstancePullLoop) pullOnce(ctx context.Context) {
 		// Extract chart metadata from the PackInstance artifact and look up
 		// OCI digest anchors from the referenced ClusterPack. T-10.
 		clusterPackRef, meta := extractPackMetadataFromArtifact(artifactJSON)
+
+		// Stale Secret cleanup: if the referenced ClusterPack no longer exists, this
+		// signing Secret is orphaned. Delete it so the pull loop stops re-processing
+		// it on every cycle. The PackReceiptDriftLoop handles tenant-side teardown.
+		if clusterPackRef != "" {
+			_, cpErr := l.mgmtClient.Resource(clusterPackGVR).Namespace(secretNS).Get(
+				ctx, clusterPackRef, metav1.GetOptions{},
+			)
+			if k8serrors.IsNotFound(cpErr) {
+				_ = l.mgmtClient.Resource(secretGVR).Namespace(secretNS).Delete(
+					ctx, secretName, metav1.DeleteOptions{},
+				)
+				fmt.Printf("packinstance pull loop: cluster=%q deleted orphaned Secret %s (ClusterPack %s gone)\n",
+					l.clusterName, secretName, clusterPackRef)
+				continue
+			}
+		}
+
 		meta.RBACDigest, meta.WorkloadDigest = l.readClusterPackDigests(ctx, secretNS, clusterPackRef)
 
 		// Create or update the local PackReceipt.
-		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, verified, failureReason, meta)
+		l.upsertPackReceipt(ctx, packInstanceName, sigB64, secretName, clusterPackRef, verified, failureReason, meta)
 	}
 }
 
@@ -246,12 +284,14 @@ func (l *PackInstancePullLoop) verifyArtifact(artifactJSON []byte, sigB64 string
 }
 
 // buildReceiptSpecPayload constructs the spec payload map for a PackReceipt CR.
-// Empty metadata fields are omitted so that kustomize and raw category packs do
-// not emit spurious zero-value fields in the CR. T-10.
-func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDeliveryMetadata) map[string]interface{} {
+// clusterPackRef and targetClusterRef are required by the CRD schema; empty
+// strings produce a validation error on create. T-10.
+func buildReceiptSpecPayload(packInstanceName, signatureRef, clusterPackRef, targetClusterRef string, meta packDeliveryMetadata) map[string]interface{} {
 	payload := map[string]interface{}{
-		"packInstanceRef": packInstanceName,
-		"signatureRef":    signatureRef,
+		"packInstanceRef":  packInstanceName,
+		"signatureRef":     signatureRef,
+		"clusterPackRef":   clusterPackRef,
+		"targetClusterRef": targetClusterRef,
 	}
 	if meta.RBACDigest != "" {
 		payload["rbacDigest"] = meta.RBACDigest
@@ -271,6 +311,15 @@ func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDel
 	if meta.HelmVersion != "" {
 		payload["helmVersion"] = meta.HelmVersion
 	}
+	if len(meta.DeployedResources) > 0 {
+		// Convert []map[string]interface{} to []interface{} so that unstructured
+		// deep copy (which only handles []interface{}) does not panic on Update.
+		drs := make([]interface{}, len(meta.DeployedResources))
+		for i, r := range meta.DeployedResources {
+			drs[i] = r
+		}
+		payload["deployedResources"] = drs
+	}
 	return payload
 }
 
@@ -285,14 +334,14 @@ func buildReceiptSpecPayload(packInstanceName, signatureRef string, meta packDel
 // Gap 28, conductor-schema.md §10, T-10.
 func (l *PackInstancePullLoop) upsertPackReceipt(
 	ctx context.Context,
-	packInstanceName, sigB64, signatureRef string,
+	packInstanceName, sigB64, signatureRef, clusterPackRef string,
 	verified bool,
 	failureReason string,
 	meta packDeliveryMetadata,
 ) {
 	receiptName := packInstanceName
 
-	specPayload := buildReceiptSpecPayload(packInstanceName, signatureRef, meta)
+	specPayload := buildReceiptSpecPayload(packInstanceName, signatureRef, clusterPackRef, l.clusterName, meta)
 	statusPayload := map[string]interface{}{
 		"verified":  verified,
 		"signature": sigB64,
@@ -301,6 +350,9 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		statusPayload["verificationFailedReason"] = failureReason
 	}
 
+	// Build receipt without status — the CRD has +kubebuilder:subresource:status,
+	// so the API server strips the status field during create/update on the main
+	// resource. Status must be written separately via the status subresource.
 	receipt := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
@@ -309,8 +361,7 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 				"name":      receiptName,
 				"namespace": l.namespace,
 			},
-			"spec":   specPayload,
-			"status": statusPayload,
+			"spec": specPayload,
 		},
 	}
 
@@ -319,43 +370,124 @@ func (l *PackInstancePullLoop) upsertPackReceipt(
 		ctx, receiptName, metav1.GetOptions{},
 	)
 	if k8serrors.IsNotFound(err) {
-		// Does not exist — create it.
 		if _, err := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Create(
 			ctx, receipt, metav1.CreateOptions{},
 		); err != nil {
 			fmt.Printf("packinstance pull loop: cluster=%q create PackReceipt %q: %v\n",
 				l.clusterName, receiptName, err)
-		} else {
-			fmt.Printf("packinstance pull loop: cluster=%q created PackReceipt %q verified=%v\n",
-				l.clusterName, receiptName, verified)
+			return
 		}
-		return
-	}
-	if err != nil {
-		// Real Get error — log and skip; next cycle retries.
+		fmt.Printf("packinstance pull loop: cluster=%q created PackReceipt %q verified=%v\n",
+			l.clusterName, receiptName, verified)
+	} else if err != nil {
 		fmt.Printf("packinstance pull loop: cluster=%q get PackReceipt %q: %v\n",
 			l.clusterName, receiptName, err)
 		return
-	}
-
-	// Exists — check idempotency: compare verified status and signature.
-	existingStatus, _, _ := unstructuredNestedMap(existing.Object, "status")
-	existingVerified, _ := existingStatus["verified"].(bool)
-	existingSig, _ := existingStatus["signature"].(string)
-	if existingVerified == verified && existingSig == sigB64 {
-		// Content unchanged — skip update. Gap 28 idempotency.
-		return
-	}
-
-	// Content differs — update the PackReceipt.
-	receipt.SetResourceVersion(existing.GetResourceVersion())
-	if _, err := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Update(
-		ctx, receipt, metav1.UpdateOptions{},
-	); err != nil {
-		fmt.Printf("packinstance pull loop: cluster=%q update PackReceipt %q: %v\n",
-			l.clusterName, receiptName, err)
 	} else {
+		// Exists — check status idempotency before patching.
+		existingStatus, _, _ := unstructuredNestedMap(existing.Object, "status")
+		existingVerified, _ := existingStatus["verified"].(bool)
+		existingSig, _ := existingStatus["signature"].(string)
+		if existingVerified == verified && existingSig == sigB64 {
+			return // status unchanged — skip the subresource patch. Gap 28 idempotency.
+		}
+
+		// Signature changed — new version arrived. Delete resources present in the
+		// previous PackReceipt that are absent from the new deployedResources list
+		// before writing the updated spec. CLUSTERPACK-BL-VERSION-CLEANUP.
+		if len(meta.DeployedResources) > 0 {
+			existingSpec, _, _ := unstructuredNestedMap(existing.Object, "spec")
+			l.deleteOrphanedResources(ctx, existingSpec, meta.DeployedResources)
+		}
+
+		// Update spec with the new deliveredResources inventory.
+		existing.Object["spec"] = specPayload
+		if _, updateErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Update(
+			ctx, existing, metav1.UpdateOptions{},
+		); updateErr != nil {
+			fmt.Printf("packinstance pull loop: cluster=%q update PackReceipt %q spec: %v\n",
+				l.clusterName, receiptName, updateErr)
+		}
+
 		fmt.Printf("packinstance pull loop: cluster=%q updated PackReceipt %q verified=%v\n",
 			l.clusterName, receiptName, verified)
 	}
+
+	// Write status via the status subresource. Separate from the spec write because
+	// +kubebuilder:subresource:status causes the API server to ignore status in the
+	// main resource body. conductor-schema.md §10, INV-026.
+	statusPatch, _ := json.Marshal(map[string]interface{}{"status": statusPayload})
+	if _, pErr := l.localClient.Resource(packReceiptGVR).Namespace(l.namespace).Patch(
+		ctx, receiptName, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status",
+	); pErr != nil {
+		fmt.Printf("packinstance pull loop: cluster=%q patch PackReceipt %q status: %v\n",
+			l.clusterName, receiptName, pErr)
+	}
+}
+
+// deleteOrphanedResources deletes resources that were present in the previous
+// PackReceipt spec.deployedResources but are absent from the incoming newDRs list.
+// Called on version upgrade when a new PackInstance signature arrives.
+// CLUSTERPACK-BL-VERSION-CLEANUP.
+func (l *PackInstancePullLoop) deleteOrphanedResources(ctx context.Context, oldSpec map[string]interface{}, newDRs []map[string]interface{}) {
+	newSet := make(map[string]struct{}, len(newDRs))
+	for _, r := range newDRs {
+		if k := deployedResourceKey(r); k != "" {
+			newSet[k] = struct{}{}
+		}
+	}
+
+	rawOld, _ := oldSpec["deployedResources"].([]interface{})
+	for _, raw := range rawOld {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		k := deployedResourceKey(item)
+		if k == "" {
+			continue
+		}
+		if _, stillPresent := newSet[k]; stillPresent {
+			continue
+		}
+
+		apiVersion, _ := item["apiVersion"].(string)
+		kind, _ := item["kind"].(string)
+		name, _ := item["name"].(string)
+		ns, _ := item["namespace"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			continue
+		}
+
+		gvr, err := gvrFromAPIVersionKind(apiVersion, kind)
+		if err != nil {
+			fmt.Printf("packinstance pull loop: cluster=%q orphan cleanup: unknown GVR for %s/%s: %v\n",
+				l.clusterName, apiVersion, kind, err)
+			continue
+		}
+
+		var delErr error
+		if ns == "" {
+			delErr = l.localClient.Resource(gvr).Delete(ctx, name, metav1.DeleteOptions{})
+		} else {
+			delErr = l.localClient.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		}
+		if delErr != nil && !k8serrors.IsNotFound(delErr) {
+			fmt.Printf("packinstance pull loop: cluster=%q orphan cleanup: delete %s/%s %s/%s: %v\n",
+				l.clusterName, apiVersion, kind, ns, name, delErr)
+		}
+	}
+}
+
+// deployedResourceKey returns a canonical key for a deployed resource map entry.
+// Returns "" for entries missing required identity fields (apiVersion, kind, name).
+func deployedResourceKey(m map[string]interface{}) string {
+	apiVersion, _ := m["apiVersion"].(string)
+	kind, _ := m["kind"].(string)
+	name, _ := m["name"].(string)
+	ns, _ := m["namespace"].(string)
+	if apiVersion == "" || kind == "" || name == "" {
+		return ""
+	}
+	return apiVersion + "\x00" + kind + "\x00" + ns + "\x00" + name
 }

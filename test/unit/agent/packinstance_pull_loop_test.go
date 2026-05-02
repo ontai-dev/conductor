@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -387,5 +388,169 @@ func TestPackInstancePullLoop_ConnectivityError_NoPanic(t *testing.T) {
 	}
 	if createCount > 0 {
 		t.Errorf("no PackReceipts must be created on connectivity error; got %d", createCount)
+	}
+}
+
+// ── orphan resource cleanup (CLUSTERPACK-BL-VERSION-CLEANUP) ─────────────────
+
+// configMapGVR is the GVR for v1/ConfigMap, used as a stand-in workload resource
+// in orphan cleanup tests.
+var configMapGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+
+// buildVersionedArtifact builds a signed PackInstance artifact JSON with the
+// given deployedResources list and returns (base64-encoded artifact, sigB64).
+func buildVersionedArtifact(t *testing.T, priv ed25519.PrivateKey, deployedResources []interface{}) (string, string) {
+	t.Helper()
+	artifact := map[string]interface{}{
+		"deployedResources": deployedResources,
+	}
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("marshal artifact: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(data), signBytes(t, priv, data)
+}
+
+// buildOldReceiptWithDeployedResources builds a pre-existing PackReceipt with
+// the given spec.deployedResources and a placeholder old signature.
+func buildOldReceiptWithDeployedResources(name, ns string, drs []interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructurePackReceipt",
+			"metadata":   map[string]interface{}{"name": name, "namespace": ns},
+			"spec": map[string]interface{}{
+				"packInstanceRef":   name,
+				"deployedResources": drs,
+			},
+			"status": map[string]interface{}{
+				"verified":  true,
+				"signature": "old-placeholder-sig",
+			},
+		},
+	}
+}
+
+// TestOrphanCleanup_DeletesOrphanedResource verifies that when a new PackInstance
+// arrives with a changed signature and a different deployedResources list, resources
+// present in the old PackReceipt spec.deployedResources but absent from the new
+// list are deleted from the local cluster. CLUSTERPACK-BL-VERSION-CLEANUP.
+func TestOrphanCleanup_DeletesOrphanedResource(t *testing.T) {
+	pub, priv := genEd25519KeyPair(t)
+	keyPath := writePubKeyFile(t, pub)
+
+	// New artifact contains "new-cm" but NOT "old-cm".
+	newDRs := []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"name":       "new-cm",
+			"namespace":  "ont-system",
+		},
+	}
+	artifactB64, newSigB64 := buildVersionedArtifact(t, priv, newDRs)
+
+	secret := makePackArtifactSecret(
+		"seam-pack-signed-ccs-dev-orphan-pack", "seam-tenant-ccs-dev",
+		artifactB64, newSigB64,
+	)
+	mgmtClient := newMgmtSecretClient(secret)
+
+	// Old receipt has "old-cm" in deployedResources.
+	oldDRs := []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"name":       "old-cm",
+			"namespace":  "ont-system",
+		},
+	}
+	oldReceipt := buildOldReceiptWithDeployedResources("orphan-pack", "ont-system", oldDRs)
+
+	// Pre-create the orphaned ConfigMap in the local cluster.
+	oldCM := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "old-cm", "namespace": "ont-system"},
+		},
+	}
+	localClient := newFakeDynamicClientWithGVRs(
+		[]schema.GroupVersionResource{packReceiptGVR, configMapGVR},
+		oldReceipt, oldCM,
+	)
+
+	loop, err := agent.NewPackInstancePullLoopWithKey(
+		mgmtClient, localClient, "ccs-dev", "ont-system", keyPath,
+	)
+	if err != nil {
+		t.Fatalf("NewPackInstancePullLoopWithKey: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	loop.Run(ctx, 0)
+
+	deleted := false
+	for _, a := range localClient.Actions() {
+		if a.GetVerb() != "delete" || a.GetResource() != configMapGVR {
+			continue
+		}
+		if a.(k8stesting.DeleteAction).GetName() == "old-cm" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Errorf("expected delete of orphaned ConfigMap 'old-cm'; actions: %v", localClient.Actions())
+	}
+}
+
+// TestOrphanCleanup_PreservesStillPresentResource verifies that resources present
+// in both the old and new deployedResources lists are not deleted on version upgrade.
+// CLUSTERPACK-BL-VERSION-CLEANUP.
+func TestOrphanCleanup_PreservesStillPresentResource(t *testing.T) {
+	pub, priv := genEd25519KeyPair(t)
+	keyPath := writePubKeyFile(t, pub)
+
+	// New artifact contains "shared-cm" — same as old receipt.
+	sharedDR := []interface{}{
+		map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"name":       "shared-cm",
+			"namespace":  "ont-system",
+		},
+	}
+	artifactB64, newSigB64 := buildVersionedArtifact(t, priv, sharedDR)
+
+	secret := makePackArtifactSecret(
+		"seam-pack-signed-ccs-dev-shared-pack", "seam-tenant-ccs-dev",
+		artifactB64, newSigB64,
+	)
+	mgmtClient := newMgmtSecretClient(secret)
+
+	oldReceipt := buildOldReceiptWithDeployedResources("shared-pack", "ont-system", sharedDR)
+	localClient := newFakeDynamicClientWithGVRs(
+		[]schema.GroupVersionResource{packReceiptGVR, configMapGVR},
+		oldReceipt,
+	)
+
+	loop, err := agent.NewPackInstancePullLoopWithKey(
+		mgmtClient, localClient, "ccs-dev", "ont-system", keyPath,
+	)
+	if err != nil {
+		t.Fatalf("NewPackInstancePullLoopWithKey: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	loop.Run(ctx, 0)
+
+	for _, a := range localClient.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource() == configMapGVR {
+			if a.(k8stesting.DeleteAction).GetName() == "shared-cm" {
+				t.Error("shared ConfigMap 'shared-cm' must not be deleted when still present in new manifest")
+			}
+		}
 	}
 }

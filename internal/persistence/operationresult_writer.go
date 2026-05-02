@@ -5,7 +5,6 @@ package persistence
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -21,6 +20,21 @@ import (
 // the PackExecution they belong to. The single-active-revision pattern relies on
 // this label for list queries.
 const labelPackExecution = "ontai.dev/pack-execution"
+
+// labelClusterPack is the label key used to group PackOperationResult CRs by
+// the ClusterPack they belong to. Used by the wrapper rollback handler to find
+// any POR for a given ClusterPack (both active and superseded) for N-step rollback.
+// seam-core-schema.md §7.8.
+const labelClusterPack = "ontai.dev/cluster-pack"
+
+// labelSuperseded marks a PackOperationResult as superseded (retained for rollback
+// history). Value is "true". Superseded PORs are never deleted by the writer
+// until the retention cap (maxRetainedSupersededPORs) is reached.
+const labelSuperseded = "ontai.dev/superseded"
+
+// maxRetainedSupersededPORs is the maximum number of superseded PORs retained per
+// ClusterPack. When exceeded, the oldest superseded POR (lowest revision) is pruned.
+const maxRetainedSupersededPORs = 10
 
 // OperationResultWriter writes an OperationResultSpec to a named
 // PackOperationResult CR. This is the output channel between Conductor
@@ -48,19 +62,22 @@ func NewKubeOperationResultWriter(client ctrlclient.Client, clusterRef string) O
 	return &kubeOperationResultWriter{client: client, clusterRef: clusterRef}
 }
 
-// WriteResult implements the single-active-revision pattern for PackOperationResult.
+// WriteResult implements the N-step rollback-aware revision pattern for PackOperationResult.
 //
 // Steps:
-//  1. List all PackOperationResults in namespace labelled by packExecutionRef.
+//  1. List all PackOperationResults in namespace labelled by packExecutionRef
+//     (includes both active and superseded).
 //  2. Select the one with the highest Revision as the predecessor (N). If none
 //     exist, N=0 and there is no predecessor.
 //  3. Build the new spec at revision N+1 and create a CR named
 //     pack-deploy-result-{packExecutionRef}-r{N+1}.
 //  4. Log the predecessor spec at INFO level (GraphQuery DB stub).
-//  5. Delete the predecessor CR.
+//  5. Label the predecessor ontai.dev/superseded=true (retained for N-step rollback).
+//  6. Prune: if superseded POR count for this ClusterPack exceeds maxRetainedSupersededPORs,
+//     delete the oldest superseded POR (lowest revision).
 //
-// After a successful call exactly one PackOperationResult labelled by
-// packExecutionRef exists in the namespace.
+// Exactly one active (non-superseded) PackOperationResult exists per packExecutionRef
+// at any time. Superseded PORs are retained up to maxRetainedSupersededPORs per ClusterPack.
 func (w *kubeOperationResultWriter) WriteResult(
 	ctx context.Context,
 	namespace, packExecutionRef string,
@@ -112,11 +129,16 @@ func (w *kubeOperationResultWriter) WriteResult(
 		}}
 	}
 
+	labels := map[string]string{labelPackExecution: packExecutionRef}
+	if result.ClusterPackRef != "" {
+		labels[labelClusterPack] = result.ClusterPackRef
+	}
+
 	por := &seamv1alpha1.PackOperationResult{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       namespace,
 			Name:            newName,
-			Labels:          map[string]string{labelPackExecution: packExecutionRef},
+			Labels:          labels,
 			OwnerReferences: ownerRefs,
 		},
 		Spec: spec,
@@ -127,20 +149,66 @@ func (w *kubeOperationResultWriter) WriteResult(
 	}
 
 	if prev != nil {
-		specJSON, _ := json.Marshal(prev.Spec)
 		slog.InfoContext(ctx, "operationresult writer: superseding previous revision",
 			"predecessor", prev.Name,
 			"namespace", namespace,
 			"supersededRevision", prev.Spec.Revision,
 			"newRevision", newRevision,
 			"packExecutionRef", packExecutionRef,
-			"spec", string(specJSON),
 		)
-		if err := w.client.Delete(ctx, prev); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("operationresult writer: delete predecessor %q in %q: %w", prev.Name, namespace, err)
+		labelPatch := ctrlclient.MergeFrom(prev.DeepCopy())
+		if prev.Labels == nil {
+			prev.Labels = map[string]string{}
+		}
+		prev.Labels[labelSuperseded] = "true"
+		if err := w.client.Patch(ctx, prev, labelPatch); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("operationresult writer: label predecessor superseded %q in %q: %w", prev.Name, namespace, err)
+		}
+
+		// Prune oldest superseded POR for this ClusterPack if the cap is exceeded.
+		if result.ClusterPackRef != "" {
+			if err := w.pruneSupersededPORs(ctx, namespace, result.ClusterPackRef); err != nil {
+				slog.WarnContext(ctx, "operationresult writer: superseded POR pruning failed (non-fatal)",
+					"clusterPack", result.ClusterPackRef, "namespace", namespace, "err", err)
+			}
 		}
 	}
 
+	return nil
+}
+
+// pruneSupersededPORs deletes the oldest superseded PORs for a ClusterPack when
+// the retained count exceeds maxRetainedSupersededPORs. Oldest = lowest revision.
+func (w *kubeOperationResultWriter) pruneSupersededPORs(ctx context.Context, namespace, clusterPackRef string) error {
+	superseded := &seamv1alpha1.PackOperationResultList{}
+	if err := w.client.List(ctx, superseded,
+		ctrlclient.InNamespace(namespace),
+		ctrlclient.MatchingLabels{
+			labelClusterPack: clusterPackRef,
+			labelSuperseded:  "true",
+		},
+	); err != nil {
+		return fmt.Errorf("list superseded PORs for %s: %w", clusterPackRef, err)
+	}
+
+	if len(superseded.Items) <= maxRetainedSupersededPORs {
+		return nil
+	}
+
+	// Sort ascending by revision so we delete the oldest first.
+	items := superseded.Items
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j].Spec.Revision < items[j-1].Spec.Revision; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
+
+	toDelete := len(items) - maxRetainedSupersededPORs
+	for i := 0; i < toDelete; i++ {
+		if err := w.client.Delete(ctx, &items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete oldest superseded POR %s: %w", items[i].Name, err)
+		}
+	}
 	return nil
 }
 
@@ -152,11 +220,15 @@ func buildPackOperationResultSpec(
 	packExecutionRef, clusterRef string,
 ) seamv1alpha1.PackOperationResultSpec {
 	spec := seamv1alpha1.PackOperationResultSpec{
-		PackExecutionRef: packExecutionRef,
-		TargetClusterRef: clusterRef,
-		Capability:       result.Capability,
-		Phase:            result.Phase,
-		Status:           seamv1alpha1.PackResultStatus(result.Status),
+		PackExecutionRef:   packExecutionRef,
+		ClusterPackRef:     result.ClusterPackRef,
+		TargetClusterRef:   clusterRef,
+		Capability:         result.Capability,
+		Phase:              result.Phase,
+		Status:             seamv1alpha1.PackResultStatus(result.Status),
+		ClusterPackVersion: result.ClusterPackVersion,
+		RBACDigest:         result.RBACDigest,
+		WorkloadDigest:     result.WorkloadDigest,
 	}
 
 	if !result.StartedAt.IsZero() {

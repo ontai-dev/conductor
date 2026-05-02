@@ -44,7 +44,9 @@
 //	    phase-meta.yaml
 //	    leaderelection.yaml     — Leader election Lease resources for all operators
 //
-// All output is deterministic: no timestamps, no random values.
+// Key generation: the management cluster signing key pair is generated fresh when
+// --signing-private-key is absent (non-deterministic). When --signing-private-key is
+// provided the output is deterministic for the same input key.
 // Conductor Deployment carries CONDUCTOR_ROLE=management per §15.
 //
 // conductor-schema.md §9 Step 3, §15 Role Declaration Contract.
@@ -286,6 +288,9 @@ func runEnableSubcommand(args []string) {
 	clusterName := fs.String("cluster-name", "", "Management cluster name stamped into the Conductor --cluster-ref arg. Required for production deployments.")
 	clusterRole := fs.String("cluster-role", "management", "Conductor role for this cluster (management or tenant). Defaults to management.")
 	dsnsIP := fs.String("dsns-ip", "", "DSNS LoadBalancer IP (lbipam.cilium.io/ips annotation on dsns-loadbalancer Service). Required for production deployments.")
+	mgmtSigningPublicKey := fs.String("management-signing-public-key", "", "Path to the management cluster's Ed25519 public key PEM file. Required when --cluster-role=tenant. INV-026.")
+	signingPrivateKey := fs.String("signing-private-key", "", "Path to an existing PKCS8 PEM Ed25519 private key for management cluster signing. Optional — generates a new key pair if absent. Must not be set when --cluster-role=tenant (INV-026). Use for rotation: provide the new private key, re-run tenant enables with the derived public key.")
+	outputPublicKey := fs.String("output-public-key", "", "Path to write the Ed25519 public key PEM derived from the management signing key (generated or loaded). Pass this file as --management-signing-public-key on subsequent tenant cluster enable runs.")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, enableHelp)
@@ -301,8 +306,20 @@ func runEnableSubcommand(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
+	if *clusterRole == "tenant" && *mgmtSigningPublicKey == "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --management-signing-public-key is required when --cluster-role=tenant (INV-026)")
+		os.Exit(1)
+	}
+	if *clusterRole == "tenant" && *signingPrivateKey != "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --signing-private-key must not be set for --cluster-role=tenant — tenant clusters hold only the management public key (INV-026)")
+		os.Exit(1)
+	}
+	if *clusterRole == "tenant" && *outputPublicKey != "" {
+		fmt.Fprintln(os.Stderr, "compiler enable: --output-public-key is only valid for --cluster-role=management")
+		os.Exit(1)
+	}
 
-	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole); err != nil {
+	if err := compileEnableBundle(*output, *version, *registry, *kubeconfig, *withCAPI, *clusterName, *dsnsIP, *clusterRole, *mgmtSigningPublicKey, *signingPrivateKey, *outputPublicKey); err != nil {
 		fmt.Fprintf(os.Stderr, "compiler enable: %v\n", err)
 		os.Exit(1)
 	}
@@ -326,9 +343,12 @@ func runEnableSubcommand(args []string) {
 // and phase 1. This phase is required for clusters using the CAPI lifecycle path.
 // platform-schema.md §3 CAPI composition model.
 // conductor-schema.md §9 Step 3, §15.
-func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole string) error {
+func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI bool, clusterName, dsnsIP, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey string) error {
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
+	}
+	if clusterRole == "" {
+		clusterRole = "management"
 	}
 
 	gdn := guardianOp(version, registry)
@@ -348,10 +368,10 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 		}
 	}
 
-	if err := writePhase0InfrastructureDependencies(output); err != nil {
+	if err := writePhase0InfrastructureDependencies(output, clusterRole); err != nil {
 		return fmt.Errorf("phase 0 infrastructure-dependencies: %w", err)
 	}
-	if err := writePhase00aNamespaces(output, clusterName); err != nil {
+	if err := writePhase00aNamespaces(output, clusterName, clusterRole); err != nil {
 		return fmt.Errorf("phase 00a namespaces: %w", err)
 	}
 	if withCAPI {
@@ -359,20 +379,28 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 			return fmt.Errorf("phase 00b capi-prerequisites: %w", err)
 		}
 	}
-	if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
-		return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
+	if clusterRole == "management" {
+		if err := writePhase1GuardianBootstrap(output, gdn); err != nil {
+			return fmt.Errorf("phase 1 guardian-bootstrap: %w", err)
+		}
+		if err := writePhase2GuardianDeploy(output, gdn); err != nil {
+			return fmt.Errorf("phase 2 guardian-deploy: %w", err)
+		}
+		if err := writePhase3PlatformWrapper(output, pwOps); err != nil {
+			return fmt.Errorf("phase 3 platform-wrapper: %w", err)
+		}
 	}
-	if err := writePhase2GuardianDeploy(output, gdn); err != nil {
-		return fmt.Errorf("phase 2 guardian-deploy: %w", err)
-	}
-	if err := writePhase3PlatformWrapper(output, pwOps); err != nil {
-		return fmt.Errorf("phase 3 platform-wrapper: %w", err)
-	}
-	if err := writePhase4Conductor(output, cdt); err != nil {
+	if err := writePhase4Conductor(output, cdt, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey); err != nil {
 		return fmt.Errorf("phase 4 conductor: %w", err)
 	}
-	if err := writePhase5PostBootstrap(output, allOperators(version, registry, clusterName, dsnsIP), dsnsIP, clusterName); err != nil {
-		return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+	if clusterRole == "management" {
+		if err := writePhase5PostBootstrap(output, allOperators(version, registry, clusterName, dsnsIP), dsnsIP, clusterName, clusterRole); err != nil {
+			return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+		}
+	} else {
+		if err := writePhase5PostBootstrap(output, []operatorSpec{cdt}, dsnsIP, clusterName, clusterRole); err != nil {
+			return fmt.Errorf("phase 5 post-bootstrap: %w", err)
+		}
 	}
 
 	return nil
@@ -389,29 +417,68 @@ func compileEnableBundle(output, version, registry, kubeconfig string, withCAPI 
 // exist and be healthy before Guardian can start.
 //
 // conductor-schema.md §9.
-func writePhase0InfrastructureDependencies(output string) error {
+func writePhase0InfrastructureDependencies(output, clusterRole string) error {
 	dir := filepath.Join(output, "00-infrastructure-dependencies")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	files := []string{"prerequisites.yaml"}
+	var files []string
+	var readinessGate string
 
-	meta := phaseMeta{
-		Phase: "infrastructure-dependencies",
-		Order: 0,
-		ReadinessGate: "All prerequisites listed in prerequisites.yaml must be satisfied " +
+	if clusterRole == "tenant" {
+		files = []string{"prerequisites.yaml", "seam-core-crds.yaml"}
+		readinessGate = "All prerequisites listed in prerequisites.yaml must be satisfied " +
+			"by the operator before applying phase 4 (04-conductor). " +
+			"Verify: default StorageClass present. " +
+			"seam-core-crds.yaml installs the infrastructure.ontai.dev CRD group required by Conductor."
+	} else {
+		files = []string{"prerequisites.yaml"}
+		readinessGate = "All prerequisites listed in prerequisites.yaml must be satisfied " +
 			"by the operator before applying phase 1 (01-guardian-bootstrap). " +
 			"Verify: CNPG operator running in cnpg-system, guardian-db Cluster Ready " +
 			"in seam-system, guardian-db-credentials Secret present in seam-system, " +
-			"Kueue ClusterQueue and LocalQueue CRDs registered, default StorageClass present.",
-		ApplyOrder: files,
+			"Kueue ClusterQueue and LocalQueue CRDs registered, default StorageClass present."
+	}
+
+	meta := phaseMeta{
+		Phase:         "infrastructure-dependencies",
+		Order:         0,
+		ReadinessGate: readinessGate,
+		ApplyOrder:    files,
 	}
 	if err := writePhaseMeta(dir, meta); err != nil {
 		return err
 	}
 
-	return writePrerequisitesConfigMap(dir)
+	if err := writePrerequisitesConfigMap(dir); err != nil {
+		return err
+	}
+
+	if clusterRole == "tenant" {
+		if err := writeSeamCoreCRDsFile(dir); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeSeamCoreCRDsFile writes seam-core-crds.yaml containing the infrastructure.ontai.dev
+// CRD group. Used in tenant cluster enable bundles where phase 3 (platform-wrapper) is
+// omitted but Conductor still requires the seam-core CRDs to be present.
+func writeSeamCoreCRDsFile(dir string) error {
+	var allBuf bytes.Buffer
+	if err := writeCRDBundleToBuffer(&allBuf); err != nil {
+		return fmt.Errorf("read CRD bundle for seam-core CRDs: %w", err)
+	}
+	infraCRDs := filterCRDsByGroup(allBuf.String(), "infrastructure.ontai.dev")
+	var buf bytes.Buffer
+	buf.WriteString("# Seam Core CRD Definitions (infrastructure.ontai.dev)\n")
+	buf.WriteString("# SC-INV-003: seam-core CRDs must be installed before all operators.\n")
+	buf.WriteString("# Source: seam-core/config/crd/\n")
+	buf.WriteString(infraCRDs)
+	return os.WriteFile(filepath.Join(dir, "seam-core-crds.yaml"), buf.Bytes(), 0644)
 }
 
 // writePrerequisitesConfigMap writes prerequisites.yaml — a ConfigMap in seam-system
@@ -491,7 +558,7 @@ func writePrerequisitesConfigMap(dir string) error {
 // — the pipeline applies phases in directory name order.
 //
 // conductor-schema.md §9, CONTEXT.md §4.
-func writePhase00aNamespaces(output, clusterName string) error {
+func writePhase00aNamespaces(output, clusterName, clusterRole string) error {
 	dir := filepath.Join(output, "00a-namespaces")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -500,7 +567,14 @@ func writePhase00aNamespaces(output, clusterName string) error {
 	if err := writeNamespacesPhaseMetaYAML(dir); err != nil {
 		return err
 	}
-	return writeNamespacesManifest(dir, clusterName)
+
+	// Tenant clusters do not get a seam-tenant-{name} namespace — that namespace
+	// lives on the management cluster only (CP-INV-004). Pass "" to suppress it.
+	nameArg := clusterName
+	if clusterRole == "tenant" {
+		nameArg = ""
+	}
+	return writeNamespacesManifest(dir, nameArg)
 }
 
 // writeNamespacesPhaseMetaYAML writes the phase-meta.yaml for the 00a-namespaces phase
@@ -1543,19 +1617,32 @@ func writePlatformWrapperCRDs(dir string) error {
 
 // --- Phase 4: conductor ---
 
-func writePhase4Conductor(output string, cdt operatorSpec) error {
+func writePhase4Conductor(output string, cdt operatorSpec, clusterRole, mgmtSigningPublicKey, signingPrivateKey, outputPublicKey string) error {
 	dir := filepath.Join(output, "04-conductor")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	files := []string{
-		"conductor-crds.yaml",
-		"conductor-rbac.yaml",
-		"conductor-rbacprofile.yaml",
-		"conductor-signing-key.yaml",
-		"conductor-deployment.yaml",
-		"conductor-metrics-service.yaml",
+	// conductor-rbacprofile.yaml is omitted for tenant clusters: RBACProfile is a
+	// Guardian resource and Guardian is a management-cluster-only component (INV-003).
+	var files []string
+	if clusterRole == "tenant" {
+		files = []string{
+			"conductor-crds.yaml",
+			"conductor-rbac.yaml",
+			"conductor-signing-key.yaml",
+			"conductor-deployment.yaml",
+			"conductor-metrics-service.yaml",
+		}
+	} else {
+		files = []string{
+			"conductor-crds.yaml",
+			"conductor-rbac.yaml",
+			"conductor-rbacprofile.yaml",
+			"conductor-signing-key.yaml",
+			"conductor-deployment.yaml",
+			"conductor-metrics-service.yaml",
+		}
 	}
 
 	meta := phaseMeta{
@@ -1584,15 +1671,26 @@ func writePhase4Conductor(output string, cdt operatorSpec) error {
 	}
 
 	// conductor-rbacprofile.yaml — Conductor RBACProfile CR.
-	if err := writeOperatorRBACProfilesFile(dir, "conductor-rbacprofile.yaml", []operatorSpec{cdt}); err != nil {
-		return err
+	// Omitted for tenant clusters: Guardian (which provisions RBACProfiles) is
+	// management-cluster-only (INV-003, INV-004).
+	if clusterRole != "tenant" {
+		if err := writeOperatorRBACProfilesFile(dir, "conductor-rbacprofile.yaml", []operatorSpec{cdt}); err != nil {
+			return err
+		}
 	}
 
-	// conductor-signing-key.yaml — Ed25519 key pair Secret in ont-system.
+	// conductor-signing-key.yaml — Ed25519 key material Secret in ont-system.
 	// Emitted BEFORE conductor-deployment.yaml so the volume mount resolves at apply time.
-	// INV-026, conductor-schema.md §15.
-	if err := writeConductorSigningKeySecret(dir); err != nil {
-		return err
+	// Management: full keypair (signs PackInstances + PermissionSnapshots, INV-026).
+	// Tenant: management cluster's public key only (verifies, never signs, INV-026).
+	if clusterRole == "tenant" {
+		if err := writeTenantConductorSigningKeySecret(dir, mgmtSigningPublicKey); err != nil {
+			return err
+		}
+	} else {
+		if err := writeConductorSigningKeySecret(dir, signingPrivateKey, outputPublicKey); err != nil {
+			return err
+		}
 	}
 
 	// conductor-deployment.yaml — Conductor Deployment. Role is set from --cluster-role.
@@ -1626,7 +1724,7 @@ func writeConductorCRDs(dir string) error {
 
 // --- Phase 5: post-bootstrap ---
 
-func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, clusterName string) error {
+func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, clusterName, clusterRole string) error {
 	dir := filepath.Join(output, "05-post-bootstrap")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -1638,7 +1736,9 @@ func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, c
 		"dsns-loadbalancer.yaml",
 		"leaderelection.yaml",
 	}
-	if clusterName != "" {
+	// pack-deploy-queue.yaml and wrapper-runner.yaml require Kueue and seam-tenant-{name}
+	// namespaces, which exist only on the management cluster (INV-003).
+	if clusterName != "" && clusterRole != "tenant" {
 		files = append(files, "pack-deploy-queue.yaml", "wrapper-runner.yaml")
 	}
 
@@ -1673,7 +1773,8 @@ func writePhase5PostBootstrap(output string, operators []operatorSpec, dsnsIP, c
 		return err
 	}
 
-	if clusterName != "" {
+	// Kueue and seam-tenant-{name} resources are management-cluster-only (INV-003).
+	if clusterName != "" && clusterRole != "tenant" {
 		// pack-deploy-queue.yaml — Kueue LocalQueue in seam-tenant-{clusterName}.
 		// wrapper-schema.md §9 pack delivery chain.
 		if err := writePackDeployQueueYAML(dir, clusterName); err != nil {
@@ -2237,12 +2338,16 @@ func buildOperatorDeployment(op operatorSpec) appsv1.Deployment {
 	}
 
 	// Conductor mounts the Ed25519 signing key Secret emitted in phase 04.
-	// SIGNING_PRIVATE_KEY_PATH and SIGNING_PUBLIC_KEY_PATH point to the PEM files
-	// within the mount. The Secret (conductor-signing-key) is emitted BEFORE this
-	// Deployment in the phase 04 apply order. INV-026, conductor-schema.md §15.
+	// Management: both SIGNING_PRIVATE_KEY_PATH and SIGNING_PUBLIC_KEY_PATH set (signs + verifies).
+	// Tenant: SIGNING_PUBLIC_KEY_PATH only — tenant carries the management cluster's public key
+	// for verification and must never hold the private key. INV-026, conductor-schema.md §15.
 	if op.Name == "conductor" {
+		if op.Role != "tenant" {
+			env = append(env,
+				corev1.EnvVar{Name: "SIGNING_PRIVATE_KEY_PATH", Value: "/etc/conductor/signing/private.pem"},
+			)
+		}
 		env = append(env,
-			corev1.EnvVar{Name: "SIGNING_PRIVATE_KEY_PATH", Value: "/etc/conductor/signing/private.pem"},
 			corev1.EnvVar{Name: "SIGNING_PUBLIC_KEY_PATH", Value: "/etc/conductor/signing/public.pem"},
 		)
 		volumes = append(volumes, corev1.Volume{
@@ -2828,15 +2933,49 @@ func writeWrapperRunnerRBACYAML(dir, clusterName string) error {
 	return os.WriteFile(filepath.Join(dir, "wrapper-runner.yaml"), buf.Bytes(), 0644)
 }
 
-// writeConductorSigningKeySecret generates a fresh Ed25519 signing key pair and
-// writes it as a Kubernetes Secret named conductor-signing-key in ont-system.
+// writeConductorSigningKeySecret generates (or loads) an Ed25519 signing key pair
+// and writes it as a Kubernetes Secret named conductor-signing-key in ont-system.
 // The Secret carries private.pem (PKCS8 PEM) and public.pem (PKIX PEM).
 // Emitted in phase 04 BEFORE conductor-deployment.yaml so the volume mount resolves.
+//
+// signingPrivateKeyPath: if non-empty, load an existing PKCS8 PEM private key from
+// this file instead of generating a new pair. Use for key rotation: provide the new
+// private key, then re-run tenant enables with the derived public key.
+//
+// outputPublicKeyPath: if non-empty, write the public key PEM to this file after
+// generation or load. Pass this file as --management-signing-public-key on all
+// tenant cluster enable runs. An empty value skips the output write.
+//
 // INV-026, conductor-schema.md §15 (signing key lifecycle).
-func writeConductorSigningKeySecret(dir string) error {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate Ed25519 signing key: %w", err)
+func writeConductorSigningKeySecret(dir, signingPrivateKeyPath, outputPublicKeyPath string) error {
+	var publicKey ed25519.PublicKey
+	var privateKey ed25519.PrivateKey
+
+	if signingPrivateKeyPath != "" {
+		keyPEM, err := os.ReadFile(signingPrivateKeyPath)
+		if err != nil {
+			return fmt.Errorf("read signing private key %s: %w", signingPrivateKeyPath, err)
+		}
+		block, _ := pem.Decode(keyPEM)
+		if block == nil {
+			return fmt.Errorf("signing private key %s: no PEM block found", signingPrivateKeyPath)
+		}
+		rawKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse PKCS8 private key %s: %w", signingPrivateKeyPath, err)
+		}
+		var ok bool
+		privateKey, ok = rawKey.(ed25519.PrivateKey)
+		if !ok {
+			return fmt.Errorf("signing private key %s is not an Ed25519 key (got %T)", signingPrivateKeyPath, rawKey)
+		}
+		publicKey = privateKey.Public().(ed25519.PublicKey)
+	} else {
+		var err error
+		publicKey, privateKey, err = ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generate Ed25519 signing key: %w", err)
+		}
 	}
 
 	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
@@ -2851,6 +2990,14 @@ func writeConductorSigningKeySecret(dir string) error {
 	}
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 
+	if outputPublicKeyPath != "" {
+		if err := os.WriteFile(outputPublicKeyPath, publicPEM, 0644); err != nil {
+			return fmt.Errorf("write public key to %s: %w", outputPublicKeyPath, err)
+		}
+		fmt.Printf("compiler enable: management public key written to %s\n", outputPublicKeyPath)
+		fmt.Printf("compiler enable: use --management-signing-public-key=%s for each tenant cluster enable\n", outputPublicKeyPath)
+	}
+
 	secret := corev1.Secret{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -2862,9 +3009,10 @@ func writeConductorSigningKeySecret(dir string) error {
 				"ontai.dev/managed-by":        "compiler",
 			},
 			Annotations: map[string]string{
-				// Human review: rotate this Secret via a new compiler enable run.
-				// The Conductor Deployment must be restarted after rotation.
-				"ontai.dev/rotate-via": "compiler enable",
+				// Rotate: compiler enable --signing-private-key=<new-key> --output-public-key=<pub-out>
+				// then re-run tenant enables with --management-signing-public-key=<pub-out>.
+				// Restart the Conductor Deployment on all clusters after rotation.
+				"ontai.dev/rotate-via": "compiler enable --signing-private-key=<path> --output-public-key=<path>",
 			},
 		},
 		StringData: map[string]string{
@@ -2885,6 +3033,51 @@ func writeConductorSigningKeySecret(dir string) error {
 	buf.WriteString("# Rotate: re-run compiler enable and restart the Conductor Deployment.\n")
 	buf.WriteString("# WARNING: generated fresh each compiler enable run — store in GitOps after first enable.\n")
 	buf.WriteString("# INV-026, conductor-schema.md §15.\n")
+	buf.WriteString("---\n")
+	buf.Write(data)
+	return os.WriteFile(filepath.Join(dir, "conductor-signing-key.yaml"), buf.Bytes(), 0644)
+}
+
+// writeTenantConductorSigningKeySecret writes a conductor-signing-key Secret for
+// tenant clusters containing ONLY the management cluster's public key. Tenant
+// conductors verify PackInstance signatures but never sign — they must not hold
+// the private key (INV-026). mgmtPublicKeyPath is the path to the management
+// cluster's public.pem (PKIX PEM-encoded Ed25519 public key).
+func writeTenantConductorSigningKeySecret(dir, mgmtPublicKeyPath string) error {
+	publicKeyPEM, err := os.ReadFile(mgmtPublicKeyPath)
+	if err != nil {
+		return fmt.Errorf("read management public key %s: %w", mgmtPublicKeyPath, err)
+	}
+
+	secret := corev1.Secret{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conductor-signing-key",
+			Namespace: "ont-system",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "conductor",
+				"app.kubernetes.io/component": "signing",
+				"ontai.dev/managed-by":        "compiler",
+			},
+			Annotations: map[string]string{
+				"ontai.dev/key-source": "management-cluster-public-key",
+			},
+		},
+		StringData: map[string]string{
+			"public.pem": string(publicKeyPEM),
+		},
+	}
+
+	data, err := yaml.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("marshal tenant conductor-signing-key Secret: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("# Conductor signing key Secret (tenant cluster) — management cluster public key only.\n")
+	buf.WriteString("# Tenant conductors verify signatures; they never sign. No private.pem. INV-026.\n")
+	buf.WriteString("# Source: management cluster conductor-signing-key Secret public.pem.\n")
+	buf.WriteString("# conductor-schema.md §15.\n")
 	buf.WriteString("---\n")
 	buf.Write(data)
 	return os.WriteFile(filepath.Join(dir, "conductor-signing-key.yaml"), buf.Bytes(), 0644)

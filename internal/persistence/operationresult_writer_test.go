@@ -59,7 +59,8 @@ func TestWriteResult_FirstWrite(t *testing.T) {
 	}
 }
 
-// TestWriteResult_UpgradesRevision verifies N→N+1 with predecessor deletion.
+// TestWriteResult_UpgradesRevision verifies N→N+1: active POR advances to revision 2,
+// predecessor is retained as superseded (ontai.dev/superseded=true) for N-step rollback.
 func TestWriteResult_UpgradesRevision(t *testing.T) {
 	scheme := newTestScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -81,15 +82,35 @@ func TestWriteResult_UpgradesRevision(t *testing.T) {
 	); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list.Items) != 1 {
-		t.Fatalf("expected exactly 1 POR after upgrade, got %d", len(list.Items))
+	if len(list.Items) != 2 {
+		t.Fatalf("expected 2 PORs after upgrade (active + superseded), got %d", len(list.Items))
 	}
-	if list.Items[0].Spec.Revision != 2 {
-		t.Errorf("revision = %d, want 2", list.Items[0].Spec.Revision)
+
+	// Find active (revision 2) and superseded (revision 1).
+	var active, superseded *seamv1alpha1.PackOperationResult
+	for i := range list.Items {
+		item := &list.Items[i]
+		if item.Spec.Revision == 2 {
+			active = item
+		} else if item.Spec.Revision == 1 {
+			superseded = item
+		}
 	}
-	if list.Items[0].Spec.PreviousRevisionRef != "pack-deploy-result-pe-upgrade-r1" {
+	if active == nil {
+		t.Fatal("revision 2 POR not found")
+	}
+	if superseded == nil {
+		t.Fatal("revision 1 POR not found (must be retained as superseded)")
+	}
+	if active.Spec.PreviousRevisionRef != "pack-deploy-result-pe-upgrade-r1" {
 		t.Errorf("previousRevisionRef = %q, want %q",
-			list.Items[0].Spec.PreviousRevisionRef, "pack-deploy-result-pe-upgrade-r1")
+			active.Spec.PreviousRevisionRef, "pack-deploy-result-pe-upgrade-r1")
+	}
+	if got := superseded.Labels[labelSuperseded]; got != "true" {
+		t.Errorf("revision 1 superseded label=%q, want true", got)
+	}
+	if got := active.Labels[labelSuperseded]; got != "" {
+		t.Errorf("revision 2 should not be labeled superseded; got %q", got)
 	}
 }
 

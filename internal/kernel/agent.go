@@ -94,20 +94,30 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 	names := reg.RegisteredNames()
 	manifest := agent.BuildManifest(names, agentVersion)
 
-	publisher := agent.NewCapabilityPublisher(dynamicClient, ns)
+	// Capability publisher is management-cluster-only. RunnerConfig does not exist on
+	// tenant clusters -- role=tenant conductor skips capability publication entirely.
+	// conductor-schema.md §10 step 3. Decision H.
+	var publisher *agent.CapabilityPublisher
+	if role == RoleManagement {
+		publisher = agent.NewCapabilityPublisher(dynamicClient, ns)
+	}
 
-	// Construct the receipt reconciler. When SIGNING_PUBLIC_KEY_PATH is set,
-	// use the mounted Ed25519 public key for INV-026 signature enforcement.
-	// When absent, operate in bootstrap window mode (INV-020).
+	// Construct the receipt reconciler (management cluster only). On tenant clusters
+	// the PackInstancePullLoop and SnapshotPullLoop own their respective receipt
+	// lifecycles; running the reconciler there produces spurious "unknown field"
+	// API server warnings because the reconciler uses annotation-based signature
+	// fields that predate the pull-loop status field conventions.
 	var reconciler *agent.ReceiptReconciler
-	if keyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); keyPath != "" {
-		var err error
-		reconciler, err = agent.NewReceiptReconcilerWithKey(dynamicClient, ns, keyPath)
-		if err != nil {
-			return fmt.Errorf("conductor agent: build receipt reconciler with signing key: %w", err)
+	if role == RoleManagement {
+		if keyPath := os.Getenv("SIGNING_PUBLIC_KEY_PATH"); keyPath != "" {
+			var err error
+			reconciler, err = agent.NewReceiptReconcilerWithKey(dynamicClient, ns, keyPath)
+			if err != nil {
+				return fmt.Errorf("conductor agent: build receipt reconciler with signing key: %w", err)
+			}
+		} else {
+			reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
 		}
-	} else {
-		reconciler = agent.NewReceiptReconciler(dynamicClient, ns)
 	}
 
 	// Construct the signing loop (management cluster only). When
@@ -154,18 +164,23 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef)
 	}
 
-	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance).
-	// When MGMT_KUBECONFIG_PATH is set, this Conductor is on a target cluster and
-	// must pull artifacts from the management cluster, verify Ed25519 signatures
-	// (INV-026), and update local state. conductor-schema.md §10, Gap 28.
+	// Construct the target-cluster pull loops (PermissionSnapshot + PackInstance)
+	// and the PackReceipt drift loop. When MGMT_KUBECONFIG_PATH is set, this
+	// Conductor is on a target cluster and must pull artifacts from the management
+	// cluster, verify Ed25519 signatures (INV-026), and update local state.
+	// conductor-schema.md §10, Gap 28.
 	var snapshotPullLoop *agent.SnapshotPullLoop
 	var packInstancePullLoop *agent.PackInstancePullLoop
+	var packReceiptDriftLoop *agent.PackReceiptDriftLoop
+	var rbacProfilePullLoop *agent.RBACProfilePullLoop
+	var rbacPolicyPullLoop *agent.RBACPolicyPullLoop
+	var mgmtDynamicClient dynamic.Interface
 	if mgmtKubeconfigPath := os.Getenv("MGMT_KUBECONFIG_PATH"); mgmtKubeconfigPath != "" {
 		mgmtConfig, err := clientcmd.BuildConfigFromFlags("", mgmtKubeconfigPath)
 		if err != nil {
 			return fmt.Errorf("conductor agent: build management cluster REST config: %w", err)
 		}
-		mgmtDynamicClient, err := dynamic.NewForConfig(mgmtConfig)
+		mgmtDynamicClient, err = dynamic.NewForConfig(mgmtConfig)
 		if err != nil {
 			return fmt.Errorf("conductor agent: build management cluster dynamic client: %w", err)
 		}
@@ -208,6 +223,49 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			)
 		}
 		fmt.Printf("conductor agent: cluster=%q packinstance pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// PackReceipt drift loop — reads status.verified (set by packinstance pull loop),
+		// detects missing deployedResources, emits DriftSignals to management cluster.
+		// Role=tenant only. Signature verification is delegated to packinstance pull loop (INV-026).
+		// conductor-schema.md §7.
+		packReceiptDriftLoop = agent.NewPackReceiptDriftLoop(
+			dynamicClient, mgmtDynamicClient,
+			execCtx.ClusterRef, ns,
+		)
+		fmt.Printf("conductor agent: cluster=%q pack receipt drift loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// RBACProfile pull loop — GET conductor-tenant RBACProfile from seam-tenant-{clusterRef}
+		// on the management cluster and SSA-patch into ont-system on this cluster.
+		// Delivers the Conductor RBAC identity declaration to the target cluster.
+		// Decision C, CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION.
+		mgmtTenantNS := "seam-tenant-" + execCtx.ClusterRef
+		rbacProfilePullLoop = agent.NewRBACProfilePullLoop(
+			mgmtDynamicClient, dynamicClient,
+			execCtx.ClusterRef, mgmtTenantNS, ns,
+		)
+		fmt.Printf("conductor agent: cluster=%q rbacprofile pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+
+		// RBACPolicy pull loop — GET cluster-policy RBACPolicy from seam-tenant-{clusterRef}
+		// on the management cluster and SSA-patch into ont-system on this cluster.
+		// Delivers the cluster RBAC policy scope to the target cluster. Decision C, T-17.
+		rbacPolicyPullLoop = agent.NewRBACPolicyPullLoop(
+			mgmtDynamicClient, dynamicClient,
+			execCtx.ClusterRef, mgmtTenantNS, ns,
+		)
+		fmt.Printf("conductor agent: cluster=%q rbacpolicy pull loop enabled (target cluster)\n",
+			execCtx.ClusterRef)
+	}
+
+	// DriftSignal handler — role=management only. Watches DriftSignals in seam-tenant-*
+	// namespaces, retriggers pack-deploy by deleting PackExecution, enforces circuit
+	// breaker at escalationThreshold. conductor-schema.md §7.9, Decision H.
+	var driftSignalHandler *agent.DriftSignalHandler
+	if role == RoleManagement {
+		driftSignalHandler = agent.NewDriftSignalHandler(dynamicClient)
+		fmt.Printf("conductor agent: cluster=%q drift signal handler enabled (management role)\n",
 			execCtx.ClusterRef)
 	}
 
@@ -277,20 +335,13 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 			execCtx.ClusterRef, mgmtFedAddr)
 	}
 
-	// Phase 3 — Tenant bootstrap sweep + RBAC enforcement gate (tenant clusters only).
-	// The gate starts in audit mode. TenantBootstrapSweep annotates all existing RBAC
-	// (audit phase) and creates component profiles, then sets the gate to strict.
-	// After that point the webhook rejects RBAC resources without ownership annotation.
-	// guardian-schema.md §3 Step 2, §6. CS-INV-001.
+	// Phase 3 — RBAC enforcement gate (tenant clusters only).
+	// Conductor starts in audit mode and stays there; Guardian role=tenant owns all
+	// security.ontai.dev provisioning and enforcement on the tenant cluster.
+	// guardian-schema.md §3, §6. CS-INV-001.
 	var enforcementGate *webhook.EnforcementGate
-	var tenantSweep *agent.TenantBootstrapSweep
 	if role == RoleTenant {
 		enforcementGate = webhook.NewEnforcementGate()
-		tenantSweep = &agent.TenantBootstrapSweep{
-			KubeClient:    client,
-			DynamicClient: dynamicClient,
-			Gate:          enforcementGate,
-		}
 	}
 
 	if WebhookEnabled(role) {
@@ -331,7 +382,7 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 		"", // identity: resolved from hostname inside RunLeaderElection
 		agent.LeaderCallbacks{
 			OnStartedLeading: func(leaderCtx context.Context) {
-				onLeaderStart(leaderCtx, execCtx.ClusterRef, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, tenantSweep)
+				onLeaderStart(leaderCtx, execCtx.ClusterRef, ns, manifest, publisher, reconciler, signingLoop, snapshotPullLoop, packInstancePullLoop, packReceiptDriftLoop, rbacProfilePullLoop, rbacPolicyPullLoop, driftSignalHandler, dynamicClient)
 			},
 			OnStoppedLeading: func() {
 				fmt.Printf("conductor agent: cluster=%q lost leadership — entering standby\n",
@@ -351,42 +402,55 @@ func RunAgent(goCtx context.Context, execCtx config.ExecutionContext, client kub
 func onLeaderStart(
 	leaderCtx context.Context,
 	clusterRef string,
+	namespace string,
 	manifest []runnerlib.CapabilityEntry,
 	publisher *agent.CapabilityPublisher,
 	reconciler *agent.ReceiptReconciler,
 	signingLoop *agent.SigningLoop,
 	snapshotPullLoop *agent.SnapshotPullLoop,
 	packInstancePullLoop *agent.PackInstancePullLoop,
-	tenantSweep *agent.TenantBootstrapSweep,
+	packReceiptDriftLoop *agent.PackReceiptDriftLoop,
+	rbacProfilePullLoop *agent.RBACProfilePullLoop,
+	rbacPolicyPullLoop *agent.RBACPolicyPullLoop,
+	driftSignalHandler *agent.DriftSignalHandler,
+	dynamicClient dynamic.Interface,
 ) {
 	// Publish capability manifest to RunnerConfig status with background retry.
-	// If the RunnerConfig does not yet exist (Platform creates it after Conductor
-	// starts), the initial attempt fails and a goroutine retries every 30s until
-	// it succeeds. conductor-schema.md §10 step 3.
-	publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
-	fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
-		clusterRef, len(manifest))
+	// publisher is nil for role=tenant — RunnerConfig does not exist on tenant clusters.
+	// PublishWithRetry covers the management cluster's own RunnerConfig (clusterRef).
+	// PublishAllWithRetry covers all other RunnerConfigs in the namespace so the
+	// PackExecution ConductorReady gate clears for every target cluster.
+	// conductor-schema.md §10 step 3.
+	if publisher != nil {
+		publisher.PublishWithRetry(leaderCtx, clusterRef, agentVersion, "", manifest)
+		publisher.PublishAllWithRetry(leaderCtx, agentVersion, "", manifest)
+		fmt.Printf("conductor agent: cluster=%q capability publish initiated (%d capabilities)\n",
+			clusterRef, len(manifest))
+	}
 
 	const reconcileInterval = 30 * time.Second
 	const signingInterval = 30 * time.Second
 
-	// Start receipt reconciliation loop as a goroutine.
+	// Start receipt reconciliation loop as a goroutine (management cluster only).
+	// reconciler is nil for tenant clusters — see construction gate above.
 	// conductor-schema.md §10 step 4, conductor-design.md §2.10.
-	go func() {
-		ticker := time.NewTicker(reconcileInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				if err := reconciler.Reconcile(leaderCtx); err != nil {
-					fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
-						clusterRef, err)
+	if reconciler != nil {
+		go func() {
+			ticker := time.NewTicker(reconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-leaderCtx.Done():
+					return
+				case <-ticker.C:
+					if err := reconciler.Reconcile(leaderCtx); err != nil {
+						fmt.Printf("conductor agent: cluster=%q receipt reconcile error: %v\n",
+							clusterRef, err)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// Start signing loop (management cluster only).
 	// conductor-schema.md §10 steps 9–10. INV-026.
@@ -409,15 +473,46 @@ func onLeaderStart(
 		go packInstancePullLoop.Run(leaderCtx, signingInterval)
 	}
 
-	// Start tenant bootstrap sweep (tenant clusters only).
-	// Phase 1 (audit): annotates all pre-existing RBAC with ownership annotations.
-	// Phase 2 (profile creation): creates component profiles in component namespaces.
-	// After both phases: sets enforcement gate to strict — webhook begins rejecting
-	// RBAC without ontai.dev/rbac-owner=guardian. Re-runs periodically to pick up
-	// newly deployed components. guardian-schema.md §3 Step 2, §6.
-	if tenantSweep != nil {
-		const sweepInterval = 5 * time.Minute
-		go tenantSweep.RunPeriodic(leaderCtx, sweepInterval)
+	// Start PackReceipt drift loop (target clusters only).
+	// Verifies packSignature, checks deployed resource inventory, emits DriftSignals
+	// to management cluster on drift detection. conductor-schema.md §7.9, Decision H.
+	if packReceiptDriftLoop != nil {
+		go packReceiptDriftLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start RBACProfile pull loop (target clusters only).
+	// Pulls conductor-tenant RBACProfile from management seam-tenant-{cluster} and
+	// SSA-patches into ont-system on this cluster. Decision C,
+	// CONDUCTOR-BL-TENANT-ROLE-RBACPROFILE-DISTRIBUTION.
+	if rbacProfilePullLoop != nil {
+		go rbacProfilePullLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start RBACPolicy pull loop (target clusters only).
+	// Pulls cluster-policy RBACPolicy from management seam-tenant-{cluster} and
+	// SSA-patches into ont-system on this cluster. Decision C, T-17.
+	if rbacPolicyPullLoop != nil {
+		go rbacPolicyPullLoop.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Start DriftSignal handler (management cluster only).
+	// Watches DriftSignals in seam-tenant-* namespaces, retriggers PackExecution,
+	// enforces circuit breaker at escalationThreshold. conductor-schema.md §7.9.
+	if driftSignalHandler != nil {
+		go driftSignalHandler.Run(leaderCtx, reconcileInterval)
+	}
+
+	// Mark InfrastructureTalosCluster Ready=True (tenant clusters only).
+	// snapshotPullLoop non-nil indicates role=tenant. Conductor signals readiness
+	// to management once leadership is established. guardian-schema.md §3.
+	if snapshotPullLoop != nil {
+		go func() {
+			if err := agent.SetTalosClusterReady(leaderCtx, dynamicClient, namespace, clusterRef); err != nil {
+				fmt.Printf("conductor agent: cluster=%q set TalosCluster Ready: %v\n", clusterRef, err)
+			} else {
+				fmt.Printf("conductor agent: cluster=%q TalosCluster Ready=True set\n", clusterRef)
+			}
+		}()
 	}
 
 	// Block until leadership is lost.

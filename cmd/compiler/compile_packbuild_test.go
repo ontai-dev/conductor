@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,5 +207,429 @@ registryUrl: registry.example.com/packs/foo
 	}
 	if !strings.Contains(err.Error(), "digest") {
 		t.Errorf("error %q does not mention 'digest'", err.Error())
+	}
+}
+
+// WS-RAW — RawSource packbuild unit tests.
+
+// TestRawCompilePackBuild_SplitsAndEmitsClusterPack verifies that rawCompilePackBuild
+// reads YAML from a directory, splits into layers, pushes to OCI, and emits a
+// ClusterPack CR with rbacDigest and workloadDigest populated.
+func TestRawCompilePackBuild_SplitsAndEmitsClusterPack(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const sampleYAML = `---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-sa
+  namespace: test-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: test-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: test
+        image: 10.20.0.1:5000/test:dev
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "manifests.yaml"), []byte(sampleYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	outDir := t.TempDir()
+	in := PackBuildInput{
+		Name:           "test-raw-pack",
+		Version:        "v0.1.0-r1",
+		RegistryURL:    ociHost + "/packs/test-raw-pack",
+		Namespace:      "seam-tenant-ccs-mgmt",
+		TargetClusters: []string{"ccs-mgmt"},
+		BasePackName:   "test-raw-pack",
+		RawSource:      &RawSource{Path: srcDir},
+	}
+
+	if err := rawCompilePackBuild(context.Background(), in, "", outDir); err != nil {
+		t.Fatalf("rawCompilePackBuild: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "test-raw-pack.yaml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"infrastructure.ontai.dev/v1alpha1",
+		"InfrastructureClusterPack",
+		"rbacDigest",
+		"workloadDigest",
+		"v0.1.0-r1",
+		"seam-tenant-ccs-mgmt",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("output YAML missing %q", want)
+		}
+	}
+}
+
+// TestRawCompilePackBuild_EmptyDirectoryFails verifies that a directory with no
+// YAML files returns a descriptive error.
+func TestRawCompilePackBuild_EmptyDirectoryFails(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	in := PackBuildInput{
+		Name:        "empty-pack",
+		Version:     "v0.1.0-r1",
+		RegistryURL: ociHost + "/packs/empty-pack",
+		Namespace:   "seam-system",
+		RawSource:   &RawSource{Path: t.TempDir()},
+	}
+
+	err := rawCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for empty directory; got nil")
+	}
+	if !strings.Contains(err.Error(), "no YAML files") {
+		t.Errorf("error %q does not mention 'no YAML files'", err.Error())
+	}
+}
+
+// TestRawCompilePackBuild_MissingPathFails verifies that an empty rawSource.path
+// returns a descriptive error.
+func TestRawCompilePackBuild_MissingPathFails(t *testing.T) {
+	in := PackBuildInput{
+		Name:        "path-missing-pack",
+		Version:     "v0.1.0-r1",
+		RegistryURL: "localhost:5000/packs/path-missing",
+		Namespace:   "seam-system",
+		RawSource:   &RawSource{Path: ""},
+	}
+
+	err := rawCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for missing path; got nil")
+	}
+	if !strings.Contains(err.Error(), "path") {
+		t.Errorf("error %q does not mention 'path'", err.Error())
+	}
+}
+
+// ── category validation (T-05, T-11) ─────────────────────────────────────────
+
+// TestCategory_InvalidValueFails verifies that an unknown category string is
+// rejected at input validation time.
+func TestCategory_InvalidValueFails(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: banana
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for invalid category; got nil")
+	}
+	if !strings.Contains(err.Error(), "category") {
+		t.Errorf("error %q does not mention 'category'", err.Error())
+	}
+}
+
+// TestCategory_HelmRequiresHelmSource verifies that category=helm is rejected
+// when helmSource is absent.
+func TestCategory_HelmRequiresHelmSource(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: helm
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=helm without helmSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "helmSource") {
+		t.Errorf("error %q does not mention 'helmSource'", err.Error())
+	}
+}
+
+// TestCategory_RawRequiresRawSource verifies that category=raw is rejected when
+// rawSource is absent.
+func TestCategory_RawRequiresRawSource(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+digest: sha256:abc
+category: raw
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=raw without rawSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "rawSource") {
+		t.Errorf("error %q does not mention 'rawSource'", err.Error())
+	}
+}
+
+// TestCategory_HelmWithRawSourceFails verifies cross-contamination rejection:
+// helmSource present while category=raw.
+func TestCategory_HelmWithRawSourceFails(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+category: raw
+rawSource:
+  path: /tmp
+helmSource:
+  url: http://charts.example.com/nginx-ingress-1.0.0.tgz
+  chart: nginx-ingress
+  version: 1.0.0
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for helmSource set with category=raw; got nil")
+	}
+	if !strings.Contains(err.Error(), "helmSource") {
+		t.Errorf("error %q does not mention 'helmSource'", err.Error())
+	}
+}
+
+// TestCategory_KustomizeRequiresKustomizeSource verifies that category=kustomize
+// is rejected when kustomizeSource is absent.
+func TestCategory_KustomizeRequiresKustomizeSource(t *testing.T) {
+	const input = `
+name: my-pack
+version: v1.0.0
+registryUrl: registry.example.com/packs/foo
+category: kustomize
+`
+	err := compilePackBuild(writePackBuildInput(t, input), t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for category=kustomize without kustomizeSource; got nil")
+	}
+	if !strings.Contains(err.Error(), "kustomizeSource") {
+		t.Errorf("error %q does not mention 'kustomizeSource'", err.Error())
+	}
+}
+
+// TestCategory_RawDispatchesViaCategoryField verifies that category=raw
+// dispatches to rawCompilePackBuild (T-13 category-driven dispatch).
+func TestCategory_RawDispatchesViaCategoryField(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const cmYAML = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: category-test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "cm.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	inputContent := fmt.Sprintf(`
+name: category-raw-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/category-raw-pack
+category: raw
+rawSource:
+  path: %s
+`, ociHost, srcDir)
+	outDir := t.TempDir()
+	if err := compilePackBuild(writePackBuildInput(t, inputContent), outDir); err != nil {
+		t.Fatalf("compilePackBuild with category=raw: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "category-raw-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR with category=raw dispatch; not found")
+	}
+}
+
+// TestPackBuild_RawSourceDispatchesToRawCompile verifies that compilePackBuild
+// dispatches to rawCompilePackBuild when rawSource is set in the input file.
+func TestPackBuild_RawSourceDispatchesToRawCompile(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	srcDir := t.TempDir()
+	const cmYAML = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "cm.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	inputContent := fmt.Sprintf(`
+name: dispatch-raw-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/dispatch-raw-pack
+rawSource:
+  path: %s
+`, ociHost, srcDir)
+	inputPath := writePackBuildInput(t, inputContent)
+
+	outDir := t.TempDir()
+	if err := compilePackBuild(inputPath, outDir); err != nil {
+		t.Fatalf("compilePackBuild with rawSource: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "dispatch-raw-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR; not found")
+	}
+}
+
+// ── kustomize path (T-12) ─────────────────────────────────────────────────────
+
+// writeKustomizationDir creates a minimal kustomization directory with a single
+// ConfigMap resource and returns the directory path.
+func writeKustomizationDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	const cmYAML = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kustomize-test-cm
+  namespace: test-system
+data:
+  key: value
+`
+	const kustomizationYAML = `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- resources.yaml
+`
+	if err := os.WriteFile(filepath.Join(dir, "resources.yaml"), []byte(cmYAML), 0644); err != nil {
+		t.Fatalf("write resources.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kustomizationYAML), 0644); err != nil {
+		t.Fatalf("write kustomization.yaml: %v", err)
+	}
+	return dir
+}
+
+// TestKustomizeCompilePackBuild_ProducesClusterPack verifies that
+// kustomizeCompilePackBuild renders a kustomize overlay, pushes OCI layers, and
+// emits a ClusterPack CR with rbacDigest and workloadDigest populated.
+// T-12.
+func TestKustomizeCompilePackBuild_ProducesClusterPack(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	kDir := writeKustomizationDir(t)
+	outDir := t.TempDir()
+
+	in := PackBuildInput{
+		Name:            "kustomize-test-pack",
+		Version:         "v0.1.0-r1",
+		RegistryURL:     ociHost + "/packs/kustomize-test-pack",
+		Namespace:       "seam-system",
+		KustomizeSource: &KustomizeSource{Path: kDir},
+	}
+
+	if err := kustomizeCompilePackBuild(context.Background(), in, "", outDir); err != nil {
+		t.Fatalf("kustomizeCompilePackBuild: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "kustomize-test-pack.yaml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"infrastructure.ontai.dev/v1alpha1",
+		"InfrastructureClusterPack",
+		"workloadDigest",
+		"v0.1.0-r1",
+		"seam-system",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("output YAML missing %q", want)
+		}
+	}
+}
+
+// TestKustomizeCompilePackBuild_EmptyDirFails verifies that a directory with no
+// resources returns a descriptive error.
+func TestKustomizeCompilePackBuild_EmptyDirFails(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	// Directory with no kustomization.yaml — krusty should fail.
+	in := PackBuildInput{
+		Name:            "empty-kustomize-pack",
+		Version:         "v0.1.0-r1",
+		RegistryURL:     ociHost + "/packs/empty-kustomize-pack",
+		Namespace:       "seam-system",
+		KustomizeSource: &KustomizeSource{Path: t.TempDir()},
+	}
+
+	err := kustomizeCompilePackBuild(context.Background(), in, "", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for directory with no kustomization.yaml; got nil")
+	}
+}
+
+// TestCategory_KustomizeDispatchesViaCategory verifies that category=kustomize
+// dispatches to kustomizeCompilePackBuild (T-12, T-13).
+func TestCategory_KustomizeDispatchesViaCategory(t *testing.T) {
+	ociSrv := mockOCIRegistry(t)
+	defer ociSrv.Close()
+	ociHost := strings.TrimPrefix(ociSrv.URL, "http://")
+
+	kDir := writeKustomizationDir(t)
+
+	inputContent := fmt.Sprintf(`
+name: category-kustomize-pack
+version: v0.1.0-r1
+namespace: seam-system
+registryUrl: %s/packs/category-kustomize-pack
+category: kustomize
+kustomizeSource:
+  path: %s
+`, ociHost, kDir)
+	outDir := t.TempDir()
+	if err := compilePackBuild(writePackBuildInput(t, inputContent), outDir); err != nil {
+		t.Fatalf("compilePackBuild with category=kustomize: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "category-kustomize-pack.yaml")); os.IsNotExist(err) {
+		t.Fatal("expected output ClusterPack CR with category=kustomize dispatch; not found")
 	}
 }

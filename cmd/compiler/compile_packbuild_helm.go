@@ -45,11 +45,24 @@ type HelmSource struct {
 	// Relative paths are resolved from the PackBuildInput file's directory.
 	ValuesFile string `yaml:"valuesFile,omitempty"`
 
+	// Namespace is the Kubernetes namespace used when rendering the Helm chart.
+	// All namespace-scoped resources in the chart will be rendered into this namespace.
+	// Defaults to "default" if not set.
+	// +optional
+	Namespace string `yaml:"namespace,omitempty"`
+
 	// RegistryCredentialsSecret is the name of a Kubernetes Secret in the
 	// management cluster that holds registry credentials. Optional.
 	// Not yet implemented — future work for private registries.
 	// +optional
 	RegistryCredentialsSecret string `yaml:"registryCredentialsSecret,omitempty"`
+
+	// HelmVersion is the Helm SDK version override. When set, written to the
+	// emitted ClusterPack spec.helmVersion instead of the auto-detected SDK version.
+	// Useful when the pipeline wants to pin a specific version string for auditability.
+	// Defaults to helmSDKVersion() when empty. Decision B, T-11.
+	// +optional
+	HelmVersion string `yaml:"helmVersion,omitempty"`
 }
 
 // helmSDKVersion returns the version of the helm.sh/helm/v3 module linked into
@@ -69,6 +82,14 @@ func helmSDKVersion() string {
 		}
 	}
 	return ""
+}
+
+// helmVersionOrDefault returns override if non-empty; otherwise the auto-detected SDK version.
+func helmVersionOrDefault(override string) string {
+	if override != "" {
+		return override
+	}
+	return helmSDKVersion()
 }
 
 // helmCompilePackBuild implements the helm automation path for packbuild.
@@ -129,9 +150,13 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 	if chartName == "" {
 		chartName = chrt.Name()
 	}
+	helmNS := hs.Namespace
+	if helmNS == "" {
+		helmNS = "default"
+	}
 	renderOpts := chartutil.ReleaseOptions{
 		Name:      chartName,
-		Namespace: "default",
+		Namespace: helmNS,
 	}
 	renderVals, err := chartutil.ToRenderValues(chrt, vals, renderOpts, nil)
 	if err != nil {
@@ -242,15 +267,24 @@ func helmCompilePackBuild(ctx context.Context, in PackBuildInput, inputDir, outp
 			ChartURL:            hs.URL,
 			ChartVersion:        hs.Version,
 			ChartName:           chartName,
-			HelmVersion:         helmSDKVersion(),
+			HelmVersion:         helmVersionOrDefault(hs.HelmVersion),
 			ValuesFile:          hs.ValuesFile,
 		},
 	}
 	return writeCRYAML(output, in.Name, cp)
 }
 
-// fetchURL downloads bytes from a URL using a plain http.Client.
+// fetchURL downloads bytes from a URL. Supports http://, https://, and file:// schemes.
+// file:// URLs are read directly from the local filesystem.
 func fetchURL(ctx context.Context, url string) ([]byte, error) {
+	if strings.HasPrefix(url, "file://") {
+		path := strings.TrimPrefix(url, "file://")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("fetchURL file %q: %w", path, err)
+		}
+		return data, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

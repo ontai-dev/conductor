@@ -197,11 +197,13 @@ bootstrap:
 	}
 }
 
-// ── seam-tenant namespace manifest (WS4) ─────────────────────────────────────
+// ── seam-tenant namespace manifest ───────────────────────────────────────────
 
 // TestBootstrap_ImportMode_EmitsSeamTenantNamespaceManifest verifies that
 // compileBootstrap with importExistingCluster=true produces seam-tenant-namespace.yaml
 // with the correct name (seam-tenant-{clusterName}) and required labels.
+// The manifest is required so the admin can apply it before the Secrets (which
+// live in seam-tenant-{cluster}) in a single kubectl apply -f compiled/bootstrap/.
 // Governor ruling 2026-04-21: mode=import compiler output must include the namespace.
 func TestBootstrap_ImportMode_EmitsSeamTenantNamespaceManifest(t *testing.T) {
 	mcPath := generateMachineConfigFile(t, "my-cluster", "cp1")

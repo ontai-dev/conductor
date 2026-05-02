@@ -516,6 +516,146 @@ func TestSplitManifests_LegacyTwoBucketPreserved(t *testing.T) {
 	}
 }
 
+// certManagerWithHookManifests extends certManagerLikeManifests with a
+// cert-manager-startupapicheck Job annotated as a Helm post-install hook.
+// The hook Job must be excluded from ParseManifests output; the remaining
+// four resources must pass through unchanged.
+const certManagerWithHookManifests = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: certificates.cert-manager.io
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: cert-manager-webhook
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cert-manager-startupapicheck
+  namespace: cert-manager
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded`
+
+// TestParseManifests_HelmHookExcluded verifies that a manifest carrying a
+// helm.sh/hook annotation is excluded from the ParseManifests output.
+// Helm lifecycle hook Jobs (startupapicheck, tests) must never enter OCI layers.
+func TestParseManifests_HelmHookExcluded(t *testing.T) {
+	const hookOnly = `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cert-manager-startupapicheck
+  namespace: cert-manager
+  annotations:
+    helm.sh/hook: post-install,post-upgrade`
+
+	manifests, err := packbuild.ParseManifests(hookOnly)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	if len(manifests) != 0 {
+		t.Errorf("expected 0 manifests (hook excluded); got %d: %v", len(manifests), collectKinds(manifests))
+	}
+}
+
+// TestParseManifests_HelmHookExcludedFromMixedSet verifies that in a mixed
+// manifest set, all helm.sh/hook-annotated resources are excluded and all
+// non-hook resources pass through unchanged.
+func TestParseManifests_HelmHookExcludedFromMixedSet(t *testing.T) {
+	manifests, err := packbuild.ParseManifests(certManagerWithHookManifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	// 5 resources pass through: CRD, MutatingWebhookConfiguration, Deployment,
+	// ClusterRole, ServiceAccount. The hook Job is excluded.
+	if len(manifests) != 5 {
+		t.Errorf("expected 5 manifests (hook excluded); got %d: %v", len(manifests), collectKinds(manifests))
+	}
+	for _, m := range manifests {
+		if m.Name == "cert-manager-startupapicheck" {
+			t.Errorf("hook Job cert-manager-startupapicheck must not appear in ParseManifests output")
+		}
+	}
+}
+
+// TestParseManifests_NonHookJobIncluded verifies that a Job without a
+// helm.sh/hook annotation is NOT excluded -- only hook-annotated resources
+// are filtered, not all Jobs.
+func TestParseManifests_NonHookJobIncluded(t *testing.T) {
+	const regularJob = `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-migration
+  namespace: myapp`
+
+	manifests, err := packbuild.ParseManifests(regularJob)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	if len(manifests) != 1 {
+		t.Errorf("expected 1 manifest (non-hook Job included); got %d", len(manifests))
+	}
+	if manifests[0].Kind != "Job" {
+		t.Errorf("expected Kind=Job; got %q", manifests[0].Kind)
+	}
+}
+
+// TestParseManifests_MultipleHooksAllExcluded verifies that when multiple
+// manifests in the same document set carry helm.sh/hook annotations, all of
+// them are excluded regardless of hook type value.
+func TestParseManifests_MultipleHooksAllExcluded(t *testing.T) {
+	const multiHook = `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pre-install-job
+  annotations:
+    helm.sh/hook: pre-install
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: real-app
+  namespace: myapp
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: post-install-job
+  annotations:
+    helm.sh/hook: post-install`
+
+	manifests, err := packbuild.ParseManifests(multiHook)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	if len(manifests) != 1 {
+		t.Errorf("expected 1 manifest (both hook Jobs excluded); got %d: %v", len(manifests), collectKinds(manifests))
+	}
+	if manifests[0].Kind != "Deployment" {
+		t.Errorf("expected the surviving manifest to be Deployment; got %q", manifests[0].Kind)
+	}
+}
+
 // collectKinds returns a comma-separated string of manifest kinds for test diagnostics.
 func collectKinds(manifests []packbuild.Manifest) string {
 	kinds := make([]string, len(manifests))

@@ -20,8 +20,6 @@ func TestPackReceiptSpec_NewFields_RoundTrip(t *testing.T) {
 	spec := seamcorev1alpha1.InfrastructurePackReceiptSpec{
 		ClusterPackRef:   "cert-manager-v1.13.3-r1",
 		TargetClusterRef: "ccs-mgmt",
-		PackSignature:    "sig==",
-		SignatureVerified: true,
 		RBACDigest:       "sha256:aabbcc",
 		WorkloadDigest:   "sha256:ddeeff",
 		ChartVersion:     "v1.13.3",
@@ -59,7 +57,6 @@ func TestPackReceiptSpec_NewFields_ZeroWhenAbsent(t *testing.T) {
 	spec := seamcorev1alpha1.InfrastructurePackReceiptSpec{
 		ClusterPackRef:   "raw-pack-v1.0.0-r1",
 		TargetClusterRef: "ccs-mgmt",
-		SignatureVerified: true,
 		// No digest or chart fields -- raw or kustomize pack.
 	}
 

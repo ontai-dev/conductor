@@ -52,7 +52,9 @@ type Manifest struct {
 
 // ParseManifests splits a multi-document YAML string (separated by "---") into
 // individual Manifest records. Blank or whitespace-only documents are skipped.
-// Returns an error if any document cannot be parsed as a YAML object.
+// Manifests carrying any helm.sh/hook annotation are excluded: they are Helm
+// lifecycle hooks (post-install, pre-delete, test, etc.) and must never enter
+// the OCI artifact layers. Returns an error if any document cannot be parsed.
 func ParseManifests(multiYAML string) ([]Manifest, error) {
 	docs := strings.Split(multiYAML, "\n---")
 	var result []Manifest
@@ -65,8 +67,12 @@ func ParseManifests(multiYAML string) ([]Manifest, error) {
 		if err := sigsyaml.Unmarshal([]byte(trimmed), &obj); err != nil {
 			return nil, fmt.Errorf("parse manifest: %w", err)
 		}
-		kind, _ := obj["kind"].(string)
 		meta, _ := obj["metadata"].(map[string]interface{})
+		annotations, _ := meta["annotations"].(map[string]interface{})
+		if _, isHook := annotations["helm.sh/hook"]; isHook {
+			continue
+		}
+		kind, _ := obj["kind"].(string)
 		name, _ := meta["name"].(string)
 		ns, _ := meta["namespace"].(string)
 		result = append(result, Manifest{Kind: kind, Namespace: ns, Name: name, YAML: trimmed})
