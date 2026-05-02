@@ -335,20 +335,17 @@ func extractFromInitNode(mcPaths map[string]string, nodes []BootstrapNode, extra
 }
 
 // clusterRole returns the TalosClusterRole for a ClusterInput.
-// mode=import requires an explicit role of "management" or "tenant"; absent or
-// invalid role returns an error. mode=bootstrap callers must not call this
-// function -- Role is not emitted on bootstrap paths.
+// An absent or empty role defaults to management. An explicitly set role must be
+// "management" or "tenant"; any other value returns an error.
+// Only called on import paths -- bootstrap callers must not invoke this.
 func clusterRole(in ClusterInput) (platformv1alpha1.TalosClusterRole, error) {
 	switch in.Role {
-	case "management":
+	case "", "management":
 		return platformv1alpha1.TalosClusterRoleManagement, nil
 	case "tenant":
 		return platformv1alpha1.TalosClusterRoleTenant, nil
 	default:
-		if in.Mode == "import" {
-			return "", fmt.Errorf("mode=import requires role to be \"management\" or \"tenant\", got %q", in.Role)
-		}
-		return platformv1alpha1.TalosClusterRoleManagement, nil
+		return "", fmt.Errorf("mode=import role must be \"management\" or \"tenant\", got %q", in.Role)
 	}
 }
 
@@ -473,6 +470,34 @@ type ClusterInput struct {
 	CiliumPrerequisites bool `yaml:"ciliumPrerequisites,omitempty"`
 }
 
+// CAPIControlPlaneInput holds control plane configuration within a CAPIInput.
+type CAPIControlPlaneInput struct {
+	// Replicas is the desired number of control plane nodes.
+	Replicas int32 `yaml:"replicas,omitempty"`
+	// EndpointVIP is the VIP address for the control plane endpoint. When set,
+	// it is used as the cluster's control plane endpoint in CAPI objects.
+	EndpointVIP string `yaml:"endpointVIP,omitempty"`
+}
+
+// CAPIWorkerInput declares a worker node pool within a CAPIInput.
+type CAPIWorkerInput struct {
+	// Name is the pool identifier, used as the MachineDeployment name suffix.
+	Name string `yaml:"name"`
+	// Replicas is the desired number of worker nodes in this pool.
+	Replicas int32 `yaml:"replicas,omitempty"`
+	// Machines lists the SeamInfrastructureMachine CR names pre-provisioned for
+	// this pool. Maps to CAPIWorkerPool.SeamInfrastructureMachineNames.
+	Machines []string `yaml:"machines,omitempty"`
+}
+
+// CAPICiliumPackRefInput is the human-authored Cilium pack reference in CAPIInput.
+type CAPICiliumPackRefInput struct {
+	// Name is the ClusterPack CR name for the cluster-specific Cilium pack.
+	Name string `yaml:"name"`
+	// Version is the ClusterPack version string.
+	Version string `yaml:"version"`
+}
+
 // CAPIInput is the CAPI configuration section of ClusterInput.
 type CAPIInput struct {
 	// Enabled is true for all target (CAPI-managed) clusters, false for the
@@ -487,9 +512,17 @@ type CAPIInput struct {
 	// Required when Enabled=true.
 	KubernetesVersion string `yaml:"kubernetesVersion,omitempty"`
 
-	// ControlPlaneReplicas is the desired number of control plane nodes.
-	// Required when Enabled=true.
-	ControlPlaneReplicas int32 `yaml:"controlPlaneReplicas,omitempty"`
+	// ControlPlane holds control plane configuration. Required when Enabled=true.
+	ControlPlane *CAPIControlPlaneInput `yaml:"controlPlane,omitempty"`
+
+	// Workers is the list of worker node pools. Each pool maps to a
+	// MachineDeployment and a set of pre-provisioned SeamInfrastructureMachine CRs.
+	Workers []CAPIWorkerInput `yaml:"workers,omitempty"`
+
+	// CiliumPackRef references the cluster-specific Cilium ClusterPack.
+	// Required when Enabled=true. Applied as the first pack after the CAPI cluster
+	// reaches Running state. platform-schema.md §2.3.
+	CiliumPackRef *CAPICiliumPackRefInput `yaml:"ciliumPackRef,omitempty"`
 }
 
 // PackBuildInput is the human-authored spec format for the packbuild subcommand.
@@ -605,8 +638,8 @@ func readClusterInput(path string) (ClusterInput, error) {
 	if in.Mode == "" {
 		return ClusterInput{}, fmt.Errorf("input file %q: mode is required (bootstrap or import)", path)
 	}
-	if in.Mode == "import" && in.Role != "management" && in.Role != "tenant" {
-		return ClusterInput{}, fmt.Errorf("input file %q: mode=import requires role to be \"management\" or \"tenant\", got %q", path, in.Role)
+	if in.Mode == "import" && in.Role != "" && in.Role != "management" && in.Role != "tenant" {
+		return ClusterInput{}, fmt.Errorf("input file %q: mode=import role must be \"management\" or \"tenant\", got %q", path, in.Role)
 	}
 	return in, nil
 }
@@ -726,6 +759,36 @@ func writeCRYAML(outDir, name string, obj interface{}) error {
 		return fmt.Errorf("write output file %q: %w", outPath, err)
 	}
 	return nil
+}
+
+// buildCAPIConfig maps a CAPIInput to a platformv1alpha1.CAPIConfig pointer.
+// Returns a fully populated CAPIConfig with all provided fields set.
+// The caller is responsible for only calling this when CAPIInput.Enabled=true.
+func buildCAPIConfig(c CAPIInput) *platformv1alpha1.CAPIConfig {
+	cfg := &platformv1alpha1.CAPIConfig{
+		Enabled:           true,
+		TalosVersion:      c.TalosVersion,
+		KubernetesVersion: c.KubernetesVersion,
+	}
+	if c.ControlPlane != nil {
+		cfg.ControlPlane = &platformv1alpha1.CAPIControlPlaneConfig{
+			Replicas: c.ControlPlane.Replicas,
+		}
+	}
+	for _, w := range c.Workers {
+		cfg.Workers = append(cfg.Workers, platformv1alpha1.CAPIWorkerPool{
+			Name:                           w.Name,
+			Replicas:                       w.Replicas,
+			SeamInfrastructureMachineNames: w.Machines,
+		})
+	}
+	if c.CiliumPackRef != nil {
+		cfg.CiliumPackRef = &platformv1alpha1.CAPICiliumPackRef{
+			Name:    c.CiliumPackRef.Name,
+			Version: c.CiliumPackRef.Version,
+		}
+	}
+	return cfg
 }
 
 // validateBootstrapInput checks required fields in the BootstrapSection.
@@ -1080,21 +1143,27 @@ func compileBootstrap(input, output, kubeconfigPath, talosconfigPath string) err
 
 	// Produce TalosCluster CR. ontai.dev/owns-runnerconfig signals Platform to add
 	// a finalizer and clean up the RunnerConfig in ont-system on deletion. Bug 3.
-	// Role is absent on all bootstrap paths (mode=bootstrap, capi.enabled=false or true).
-	// Role is present only on mode=import, where it is mandatory.
+	//
+	// Role is set when: (a) import path -- clusterRole defaults empty to management;
+	// (b) bootstrap path with explicit role field (e.g. role: tenant in fixture).
+	// Bootstrap paths with no role field omit the field (omitempty suppresses "").
 	tcSpec := platformv1alpha1.TalosClusterSpec{
 		Mode:              tcMode,
 		TalosVersion:      b.TalosVersion,
 		KubernetesVersion: kubernetesVersion,
 		ClusterEndpoint:   stripScheme(controlPlaneEndpoint),
-		// CAPI nil -- management cluster bootstrap path; nil suppresses capi block (C-34).
 	}
-	if tcMode == platformv1alpha1.TalosClusterModeImport {
+	if in.ImportExistingCluster || in.Role != "" {
 		role, err := clusterRole(in)
 		if err != nil {
 			return fmt.Errorf("compileBootstrap: %w", err)
 		}
 		tcSpec.Role = role
+	}
+	if in.CAPI.Enabled {
+		// CAPI target cluster: populate the full CAPI block using buildCAPIConfig.
+		// CAPI nil when disabled -- pointer suppresses the capi block from YAML (C-34).
+		tcSpec.CAPI = buildCAPIConfig(in.CAPI)
 	}
 	tc := platformv1alpha1.TalosCluster{
 		TypeMeta: metav1.TypeMeta{

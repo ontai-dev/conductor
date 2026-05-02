@@ -359,10 +359,10 @@ bootstrap:
 
 // ── T-01: mode/role discriminator matrix ─────────────────────────────────────
 
-// TestReadClusterInput_ImportModeRequiresRole verifies that readClusterInput
-// rejects mode=import when role is absent. The discriminator matrix requires
-// role to be explicit on all import paths.
-func TestReadClusterInput_ImportModeRequiresRole(t *testing.T) {
+// TestReadClusterInput_ImportModeAbsentRoleDefaultsToManagement verifies that
+// readClusterInput accepts mode=import with an absent role field, treating it
+// as defaulting to management (consistent with the mgmt-import.yaml fixture).
+func TestReadClusterInput_ImportModeAbsentRoleDefaultsToManagement(t *testing.T) {
 	input := `
 name: my-cluster
 namespace: seam-system
@@ -371,12 +371,12 @@ capi:
   enabled: false
 `
 	inputPath := writeInputFile(t, input)
-	_, err := readClusterInput(inputPath)
-	if err == nil {
-		t.Fatal("expected error for mode=import with absent role; got nil")
+	got, err := readClusterInput(inputPath)
+	if err != nil {
+		t.Fatalf("expected no error for mode=import with absent role; got: %v", err)
 	}
-	if !containsStr(err.Error(), "role") {
-		t.Errorf("error should mention role; got: %v", err)
+	if got.Role != "" {
+		t.Errorf("ClusterInput.Role = %q; want empty (clusterRole defaults to management at compile time)", got.Role)
 	}
 }
 
