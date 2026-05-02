@@ -139,4 +139,10 @@ type ExecuteClients struct {
 	// nil during bootstrap window mode (INV-020) — verification is bypassed.
 	// Non-nil in normal operation — INV-026 enforcement applies.
 	SigningPublicKey ed25519.PublicKey
+
+	// TalosconfigPath is the filesystem path to the mounted talosconfig Secret.
+	// Set from TALOSCONFIG_PATH env var in main. Used by per-node capabilities
+	// (hardening-apply) to create one Talos client per cluster endpoint so that
+	// each node's own config is read and applied back to that node only.
+	TalosconfigPath string
 }

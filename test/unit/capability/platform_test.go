@@ -906,6 +906,42 @@ func TestHardeningApply_GetMachineConfigErrorReturnsFailure(t *testing.T) {
 	}
 }
 
+func TestHardeningApply_BadTalosconfigPathReturnsExecutionFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:     talos,
+			DynamicClient:   newPlatformDynClient(nm, hp),
+			TalosconfigPath: "/nonexistent/talosconfig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) != 0 {
+		t.Errorf("ApplyConfiguration must not be called when talosconfig cannot be read")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // cluster-reset
 // ---------------------------------------------------------------------------

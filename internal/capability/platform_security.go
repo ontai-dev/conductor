@@ -339,39 +339,69 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 			fmt.Sprintf("HardeningProfile %q in %s has no machineConfigPatches", hardeningProfileRef, hardeningProfileNs)), nil
 	}
 
-	// Read the current machine config so we can merge each patch into it before
-	// applying. Talos ApplyConfiguration requires a complete machine config, not a
-	// partial overlay. We deep-merge the patch onto the current config and send the
-	// result. Each patch is merged independently so failures are isolated.
-	currentConfig, err := params.TalosClient.GetMachineConfig(ctx)
-	if err != nil {
-		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("GetMachineConfig before hardening patch: %v", err)), nil
+	// Determine which nodes to apply hardening to. When TalosconfigPath is set
+	// (production), we iterate over each endpoint individually using per-node
+	// context so that GetMachineConfig reads that node's own config and
+	// ApplyConfiguration writes only to that node. Without per-node isolation,
+	// a multi-endpoint Talos client would apply node 1's config to every node,
+	// which corrupts hostnames, IPs, and certificates on nodes 2..N.
+	//
+	// When TalosconfigPath is empty (unit tests, single-node clusters), we fall
+	// back to the shared TalosClient with the original context.
+	var nodeIPs []string
+	if params.TalosconfigPath != "" {
+		ips, epErr := EndpointsFromTalosconfig(params.TalosconfigPath)
+		if epErr != nil {
+			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("read endpoints from talosconfig: %v", epErr)), nil
+		}
+		nodeIPs = ips
 	}
 
 	var steps []runnerlib.StepResult
-	for i, patch := range configPatches {
-		stepStart := time.Now().UTC()
 
-		merged, mergeErr := mergeYAMLPatch(currentConfig, []byte(patch))
-		if mergeErr != nil {
-			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
-				fmt.Sprintf("merge hardening patch %d into machine config: %v", i, mergeErr)), nil
+	applyNode := func(nodeCtx context.Context, nodeID string) *runnerlib.OperationResultSpec {
+		currentConfig, err := params.TalosClient.GetMachineConfig(nodeCtx)
+		if err != nil {
+			res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("GetMachineConfig on %s before hardening patch: %v", nodeID, err))
+			return &res
 		}
+		for i, patch := range configPatches {
+			stepStart := time.Now().UTC()
+			merged, mergeErr := mergeYAMLPatch(currentConfig, []byte(patch))
+			if mergeErr != nil {
+				res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("merge hardening patch %d on %s: %v", i, nodeID, mergeErr))
+				return &res
+			}
+			if err := params.TalosClient.ApplyConfiguration(nodeCtx, merged, "no-reboot"); err != nil {
+				res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("ApplyConfiguration (hardening, profile=%s, patch=%d, node=%s): %v", hardeningProfileRef, i, nodeID, err))
+				return &res
+			}
+			currentConfig = merged
+			steps = append(steps, runnerlib.StepResult{
+				Name:        fmt.Sprintf("apply-hardening-%d-%s", i, nodeID),
+				Status:      runnerlib.ResultSucceeded,
+				StartedAt:   stepStart,
+				CompletedAt: time.Now().UTC(),
+				Message:     fmt.Sprintf("hardening profile %q patch %d applied to %s (no-reboot mode)", hardeningProfileRef, i, nodeID),
+			})
+		}
+		return nil
+	}
 
-		if err := params.TalosClient.ApplyConfiguration(ctx, merged, "no-reboot"); err != nil {
-			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
-				fmt.Sprintf("ApplyConfiguration (hardening, profile=%s, patch=%d): %v", hardeningProfileRef, i, err)), nil
+	if len(nodeIPs) > 0 {
+		for _, nodeIP := range nodeIPs {
+			if res := applyNode(NodeContext(ctx, nodeIP), nodeIP); res != nil {
+				return *res, nil
+			}
 		}
-		// Update currentConfig for the next patch so patches compose correctly.
-		currentConfig = merged
-		steps = append(steps, runnerlib.StepResult{
-			Name:        fmt.Sprintf("apply-hardening-%d", i),
-			Status:      runnerlib.ResultSucceeded,
-			StartedAt:   stepStart,
-			CompletedAt: time.Now().UTC(),
-			Message:     fmt.Sprintf("hardening profile %q patch %d applied (no-reboot mode)", hardeningProfileRef, i),
-		})
+	} else {
+		if res := applyNode(ctx, "node"); res != nil {
+			return *res, nil
+		}
 	}
 
 	return runnerlib.OperationResultSpec{

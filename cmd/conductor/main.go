@@ -199,6 +199,7 @@ func runExecute() {
 		StorageClient:       storageClient,
 		OCIClient:           ociClient,
 		GuardianClient:      guardianClient,
+		TalosconfigPath:     os.Getenv("TALOSCONFIG_PATH"),
 	}
 
 	ctrlClient, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: seamScheme})

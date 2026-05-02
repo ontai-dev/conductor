@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // ── GuardianIntakeClientAdapter ──────────────────────────────────────────────
@@ -556,4 +557,55 @@ func (a *OCIRegistryClientAdapter) fetchBlob(ctx context.Context, blobURL string
 		return nil, fmt.Errorf("read blob body: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// ── Per-node Talos helpers ────────────────────────────────────────────────────
+
+// talosConfigFile is the minimal structure needed to read endpoints from a talosconfig.
+// The talosconfig format is defined by the Talos machinery client.
+type talosConfigFile struct {
+	Context  string                       `json:"context"`
+	Contexts map[string]talosConfigCtx    `json:"contexts"`
+}
+
+type talosConfigCtx struct {
+	Endpoints []string `json:"endpoints"`
+	Nodes     []string `json:"nodes"`
+}
+
+// EndpointsFromTalosconfig parses the talosconfig at path and returns the list
+// of targets for the active context. If the context has explicit nodes, those
+// are returned. Otherwise the endpoints are returned. An error is returned when
+// the file cannot be read, parsed, or the active context is missing.
+func EndpointsFromTalosconfig(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read talosconfig %s: %w", path, err)
+	}
+	var cfg talosConfigFile
+	if err := sigsyaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse talosconfig: %w", err)
+	}
+	ctx, ok := cfg.Contexts[cfg.Context]
+	if !ok {
+		return nil, fmt.Errorf("talosconfig context %q not found", cfg.Context)
+	}
+	if len(ctx.Nodes) > 0 {
+		return ctx.Nodes, nil
+	}
+	if len(ctx.Endpoints) > 0 {
+		return ctx.Endpoints, nil
+	}
+	return nil, fmt.Errorf("talosconfig context %q has no endpoints or nodes", cfg.Context)
+}
+
+// NodeContext returns a context that targets exactly one Talos node. The context
+// is passed to GetMachineConfig and ApplyConfiguration so the Talos RPC
+// infrastructure routes each call to the specified node only. This is the
+// correct way to perform per-node operations when the Talos client has multiple
+// endpoints configured -- without it, the client targets all endpoints and
+// GetMachineConfig returns only the first responding node's config while
+// ApplyConfiguration applies to every node.
+func NodeContext(ctx context.Context, nodeIP string) context.Context {
+	return talos_client.WithNode(ctx, nodeIP)
 }
