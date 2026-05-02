@@ -148,8 +148,9 @@ func TestPackDeploy_SplitPath_CallsGuardianIntakeBeforeWorkload(t *testing.T) {
 	dynClient := newWrapperDynClient(pe, cp)
 
 	_, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -186,8 +187,9 @@ func TestPackDeploy_SplitPath_GuardianClientRequiredWhenRBACDigestPresent(t *tes
 	dynClient := newWrapperDynClient(pe, cp)
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:     &stubOCIClient{manifests: [][]byte{rbacLayerTarGz(t)}},
 			KubeClient:    fake.NewSimpleClientset(),
@@ -222,8 +224,9 @@ func TestPackDeploy_SplitPath_SkipsWorkloadWhenIntakeFails(t *testing.T) {
 	dynClient := newWrapperDynClient(pe, cp)
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -295,8 +298,9 @@ func TestPackDeploy_SplitPath_LayerRefsUsesBaseURLWhenRegistryRefDigestSet(t *te
 	dynClient := newWrapperDynClient(pe, cp)
 
 	_, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -361,8 +365,9 @@ func TestPackDeploy_LegacyPath_SkipsGuardianIntakeWhenNoRBACDigest(t *testing.T)
 	})}}
 
 	_, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -399,8 +404,9 @@ func TestPackDeploy_SplitPath_StepNamesRecordedInResult(t *testing.T) {
 	dynClient := newWrapperDynClient(pe, cp)
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -458,8 +464,9 @@ metadata:
 	dynClient := newWrapperDynClient(pe, cp)
 
 	_, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -618,8 +625,9 @@ func TestPackDeploy_SplitPath_Step6_AppliesClusterScopedBeforeWorkload(t *testin
 	dynClient := newThreeBucketDynClient(pe, cp)
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),
@@ -689,8 +697,9 @@ func TestPackDeploy_SplitPath_Step6_SkippedWhenNoClusterScopedDigest(t *testing.
 	dynClient := newThreeBucketDynClient(pe, cp)
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
-		Capability: runnerlib.CapabilityPackDeploy,
-		ClusterRef: clusterRef,
+		Capability:        runnerlib.CapabilityPackDeploy,
+		ClusterRef:        clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:      oci,
 			KubeClient:     fake.NewSimpleClientset(),

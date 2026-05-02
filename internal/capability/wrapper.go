@@ -87,29 +87,29 @@ func (h *packDeployHandler) Execute(ctx context.Context, params ExecuteParams) (
 	}
 
 	// Read the PackExecution CR to get the ClusterPack reference.
-	// PackExecutions live in seam-tenant-{clusterRef}. wrapper-schema.md §4.
+	// The PE name is passed as operationResultCM by the wrapper PE reconciler;
+	// using a direct GET avoids the alphabetical-first-match bug when multiple
+	// packs are deployed concurrently to the same cluster. wrapper-schema.md §4.
 	peTenantNS := "seam-tenant-" + params.ClusterRef
-	peList, err := params.DynamicClient.Resource(packExecutionGVR).Namespace(peTenantNS).
-		List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("list PackExecution in %s: %v", peTenantNS, err)), nil
+	peName := params.OperationResultCM
+	if peName == "" {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
+			"pack-deploy: OperationResultCM missing — cannot identify PackExecution"), nil
 	}
 
-	var clusterPackName, clusterPackVersion string
-	for _, item := range peList.Items {
-		targetCluster, _, _ := unstructuredString(item.Object, "spec", "targetClusterRef")
-		if targetCluster != params.ClusterRef {
-			continue
-		}
-		clusterPackName, _, _ = unstructuredString(item.Object, "spec", "clusterPackRef", "name")
-		clusterPackVersion, _, _ = unstructuredString(item.Object, "spec", "clusterPackRef", "version")
-		break
+	peObj, err := params.DynamicClient.Resource(packExecutionGVR).Namespace(peTenantNS).
+		Get(ctx, peName, metav1.GetOptions{})
+	if err != nil {
+		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("get PackExecution %s/%s: %v", peTenantNS, peName, err)), nil
 	}
+
+	clusterPackName, _, _ := unstructuredString(peObj.Object, "spec", "clusterPackRef", "name")
+	clusterPackVersion, _, _ := unstructuredString(peObj.Object, "spec", "clusterPackRef", "version")
 
 	if clusterPackName == "" {
 		return failureResult(runnerlib.CapabilityPackDeploy, now, runnerlib.ValidationFailure,
-			fmt.Sprintf("no PackExecution CR targeting cluster %q found in %s", params.ClusterRef, peTenantNS)), nil
+			fmt.Sprintf("PackExecution %s/%s has no clusterPackRef.name", peTenantNS, peName)), nil
 	}
 
 	// Read the ClusterPack to get OCI registry reference, checksum, and

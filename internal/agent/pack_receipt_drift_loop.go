@@ -269,6 +269,15 @@ func (l *PackReceiptDriftLoop) checkDrift(ctx context.Context, spec map[string]i
 		}
 
 		if k8serrors.IsNotFound(getErr) {
+			// If the resource's namespace is Terminating, the resource disappearance is
+			// caused by active deletion -- wait for finalizers to release before counting
+			// as unresolved drift. Incrementing the counter here would prematurely exhaust
+			// the escalation budget before the corrective Job can run.
+			if ns != "" && l.namespaceTerminating(ctx, ns) {
+				fmt.Printf("drift loop: cluster=%q receipt=%q namespace %q terminating — deferring drift for %s/%s\n",
+					l.clusterName, receiptName, ns, kind, name)
+				continue
+			}
 			reason := fmt.Sprintf("resource %s %s/%s/%s missing from cluster", apiVersion, kind, ns, name)
 			fmt.Printf("drift loop: cluster=%q receipt=%q drift detected: %s\n",
 				l.clusterName, receiptName, reason)
@@ -281,6 +290,19 @@ func (l *PackReceiptDriftLoop) checkDrift(ctx context.Context, spec map[string]i
 		}
 	}
 	return false
+}
+
+// namespaceTerminating returns true when the named namespace has a DeletionTimestamp
+// set, meaning it is actively being deleted and waiting for finalizers. Resources
+// inside a Terminating namespace appear absent before finalizers release; the drift
+// loop must not count this transient state as unresolved drift.
+func (l *PackReceiptDriftLoop) namespaceTerminating(ctx context.Context, ns string) bool {
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	obj, err := l.localClient.Resource(nsGVR).Get(ctx, ns, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return obj.GetDeletionTimestamp() != nil
 }
 
 // emitDriftSignal writes or updates a DriftSignal in seam-tenant-{clusterName} on the
