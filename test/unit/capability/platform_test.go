@@ -3,7 +3,9 @@ package capability_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,22 +111,46 @@ type stubTalosClient struct {
 	etcdDefragErr         error
 	getMachineConfigErr   error
 	getMachineConfigBytes []byte
+	kubeconfigErr         error
+	kubeconfigBytes       []byte
 	bootstrapCalled       bool
 	upgradeCalled         bool
 	rebootCalled          bool
 	resetCalled           bool
 	defragmentCalled      bool
+	applyConfigCalls      []applyConfigCall
+	// Rolling upgrade support.
+	nodes            []string
+	healthResponses  []error // returned in sequence; nil after last entry
+	healthCallIdx    int
+	upgradeCallCount int // incremented on each Upgrade() call
+}
+
+type applyConfigCall struct {
+	configBytes []byte
+	mode        string
 }
 
 func (s *stubTalosClient) Bootstrap(_ context.Context) error {
 	s.bootstrapCalled = true
 	return s.bootstrapErr
 }
-func (s *stubTalosClient) ApplyConfiguration(_ context.Context, _ []byte, _ string) error {
+func (s *stubTalosClient) ApplyConfiguration(_ context.Context, configBytes []byte, mode string) error {
+	s.applyConfigCalls = append(s.applyConfigCalls, applyConfigCall{configBytes: configBytes, mode: mode})
 	return s.applyConfigErr
+}
+func (s *stubTalosClient) Nodes() []string { return s.nodes }
+func (s *stubTalosClient) Health(_ context.Context) error {
+	if s.healthCallIdx < len(s.healthResponses) {
+		err := s.healthResponses[s.healthCallIdx]
+		s.healthCallIdx++
+		return err
+	}
+	return nil
 }
 func (s *stubTalosClient) Upgrade(_ context.Context, _ string, _ bool) error {
 	s.upgradeCalled = true
+	s.upgradeCallCount++
 	return s.upgradeErr
 }
 func (s *stubTalosClient) Reboot(_ context.Context) error {
@@ -147,6 +173,9 @@ func (s *stubTalosClient) EtcdDefragment(_ context.Context) error {
 }
 func (s *stubTalosClient) GetMachineConfig(_ context.Context) ([]byte, error) {
 	return s.getMachineConfigBytes, s.getMachineConfigErr
+}
+func (s *stubTalosClient) Kubeconfig(_ context.Context) ([]byte, error) {
+	return s.kubeconfigBytes, s.kubeconfigErr
 }
 func (s *stubTalosClient) Close() error { return nil }
 
@@ -259,12 +288,27 @@ func TestTalosUpgrade_NilClientsReturnsValidationFailure(t *testing.T) {
 	assertValidationFailure(t, result, "talos-upgrade nil clients")
 }
 
-func TestTalosUpgrade_CallsUpgradeAPI(t *testing.T) {
+func TestTalosUpgrade_RollingUpgrade_AllNodes(t *testing.T) {
+	old := capability.NodeRebootPollInterval
+	capability.NodeRebootPollInterval = 0
+	t.Cleanup(func() { capability.NodeRebootPollInterval = old })
+
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityTalosUpgrade)
 
-	talos := &stubTalosClient{}
+	// healthResponses: for each node — one error (node went down) then nil (back up).
+	nodes := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	healthResponses := make([]error, 0, len(nodes)*2)
+	for range nodes {
+		healthResponses = append(healthResponses, fmt.Errorf("rebooting"))
+		healthResponses = append(healthResponses, nil)
+	}
+
+	talos := &stubTalosClient{
+		nodes:           nodes,
+		healthResponses: healthResponses,
+	}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityTalosUpgrade,
 		ClusterRef: "ccs-test",
@@ -279,9 +323,32 @@ func TestTalosUpgrade_CallsUpgradeAPI(t *testing.T) {
 	if result.Status != runnerlib.ResultSucceeded {
 		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
 	}
-	if !talos.upgradeCalled {
-		t.Error("expected Upgrade() to be called")
+	if talos.upgradeCallCount != len(nodes) {
+		t.Errorf("expected Upgrade called %d times (once per node), got %d", len(nodes), talos.upgradeCallCount)
 	}
+	if len(result.Steps) != len(nodes) {
+		t.Errorf("expected %d step results, got %d", len(nodes), len(result.Steps))
+	}
+}
+
+func TestTalosUpgrade_NoNodesReturnsValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityTalosUpgrade)
+
+	talos := &stubTalosClient{nodes: []string{}} // empty -- no nodes configured
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityTalosUpgrade,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "talos", "v1.12.0", "")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "talos-upgrade no nodes")
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +729,272 @@ func TestHardeningApply_NilClientsReturnsValidationFailure(t *testing.T) {
 	assertValidationFailure(t, result, "hardening-apply nil clients")
 }
 
+// TestHardeningApply_SinglePatchApplied verifies that a HardeningProfile with one
+// machineConfigPatch causes a single ApplyConfiguration call in no-reboot mode.
+// The handler merges the patch onto the base config from GetMachineConfig before
+// calling ApplyConfiguration -- the applied bytes must contain the patched sysctl.
+func TestHardeningApply_SinglePatchApplied(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+	// Provide a minimal base config so mergeYAMLPatch has a real document to merge into.
+	baseConfig := []byte("machine:\n  install:\n    disk: /dev/vda\n")
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{getMachineConfigBytes: baseConfig}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected ResultSucceeded; got %q: %+v", result.Status, result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) != 1 {
+		t.Fatalf("expected 1 ApplyConfiguration call; got %d", len(talos.applyConfigCalls))
+	}
+	if talos.applyConfigCalls[0].mode != "no-reboot" {
+		t.Errorf("expected mode=no-reboot; got %q", talos.applyConfigCalls[0].mode)
+	}
+	// The applied bytes must be the merged config containing both base and patch fields.
+	applied := string(talos.applyConfigCalls[0].configBytes)
+	if !strings.Contains(applied, "ip_forward") {
+		t.Errorf("applied config missing sysctl from patch; got %q", applied)
+	}
+	if !strings.Contains(applied, "vda") {
+		t.Errorf("applied config missing base install.disk field; got %q", applied)
+	}
+	if len(result.Steps) != 1 {
+		t.Errorf("expected 1 step; got %d", len(result.Steps))
+	}
+}
+
+// TestHardeningApply_MultiPatchApplied verifies that multiple machineConfigPatches
+// cause one ApplyConfiguration call per patch, in order, and that patches compose
+// (each call's config includes all prior patches via sequential merge).
+func TestHardeningApply_MultiPatchApplied(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-multi"
+	patches := []string{
+		"machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n",
+		"machine:\n  sysctls:\n    net.ipv4.conf.all.rp_filter: \"1\"\n",
+	}
+	baseConfig := []byte("machine:\n  install:\n    disk: /dev/vda\n")
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, patches)
+	talos := &stubTalosClient{getMachineConfigBytes: baseConfig}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected ResultSucceeded; got %q", result.Status)
+	}
+	if len(talos.applyConfigCalls) != 2 {
+		t.Fatalf("expected 2 ApplyConfiguration calls; got %d", len(talos.applyConfigCalls))
+	}
+	for i, call := range talos.applyConfigCalls {
+		if call.mode != "no-reboot" {
+			t.Errorf("call %d: expected mode=no-reboot; got %q", i, call.mode)
+		}
+	}
+	// Second call must include both sysctl keys (patches compose sequentially).
+	secondApplied := string(talos.applyConfigCalls[1].configBytes)
+	if !strings.Contains(secondApplied, "ip_forward") {
+		t.Errorf("second apply missing ip_forward sysctl from patch 0; got %q", secondApplied)
+	}
+	if !strings.Contains(secondApplied, "rp_filter") {
+		t.Errorf("second apply missing rp_filter sysctl from patch 1; got %q", secondApplied)
+	}
+	if len(result.Steps) != 2 {
+		t.Errorf("expected 2 steps; got %d", len(result.Steps))
+	}
+}
+
+// TestHardeningApply_EmptyPatchesValidationFailure verifies that a HardeningProfile
+// with no machineConfigPatches returns a ValidationFailure.
+func TestHardeningApply_EmptyPatchesValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-empty"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, nil)
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "hardening-apply empty patches")
+}
+
+// TestHardeningApply_NoHardeningProfileRefValidationFailure verifies that a
+// NodeMaintenance without a hardeningProfileRef returns a ValidationFailure.
+func TestHardeningApply_NoHardeningProfileRefValidationFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	// NodeMaintenance with operation=hardening-apply but no hardeningProfileRef.
+	nm := nodeMaintenanceCR(clusterRef, "hardening-apply", "")
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   &stubTalosClient{},
+			DynamicClient: newPlatformDynClient(nm),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "hardening-apply no profileRef")
+}
+
+// TestHardeningApply_ApplyErrorReturnsExecutionFailure verifies that a Talos API
+// error during patch application returns an ExecutionFailure.
+func TestHardeningApply_ApplyErrorReturnsExecutionFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{applyConfigErr: fmt.Errorf("talos connection refused")}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+}
+
+// TestHardeningApply_GetMachineConfigErrorReturnsFailure verifies that a
+// GetMachineConfig error before patch application returns an ExecutionFailure.
+func TestHardeningApply_GetMachineConfigErrorReturnsFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{getMachineConfigErr: fmt.Errorf("talos: connection refused")}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) != 0 {
+		t.Errorf("ApplyConfiguration must not be called when GetMachineConfig fails")
+	}
+}
+
+func TestHardeningApply_BadTalosconfigPathReturnsExecutionFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:     talos,
+			DynamicClient:   newPlatformDynClient(nm, hp),
+			TalosconfigPath: "/nonexistent/talosconfig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) != 0 {
+		t.Errorf("ApplyConfiguration must not be called when talosconfig cannot be read")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // cluster-reset
 // ---------------------------------------------------------------------------
@@ -992,3 +1325,47 @@ func TestEtcdRestore_DownloadsAndRecoversFromS3(t *testing.T) {
 		t.Errorf("expected key=snapshot.db; got %q", storage.lastKey)
 	}
 }
+
+// nodeMaintenanceHardeningCR builds a NodeMaintenance unstructured object for
+// operation=hardening-apply. profileName is the hardeningProfileRef.name field.
+// profileNS, when non-empty, overrides the hardeningProfileRef.namespace field;
+// the conductor handler defaults to the tenant namespace when empty.
+func nodeMaintenanceHardeningCR(clusterRef, profileName, profileNS string) *unstructured.Unstructured {
+	profileRef := map[string]interface{}{"name": profileName}
+	if profileNS != "" {
+		profileRef["namespace"] = profileNS
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "platform.ontai.dev/v1alpha1",
+		"kind":       "NodeMaintenance",
+		"metadata": map[string]interface{}{
+			"name":      "nm-harden-" + clusterRef,
+			"namespace": "seam-tenant-" + clusterRef,
+		},
+		"spec": map[string]interface{}{
+			"operation":           "hardening-apply",
+			"hardeningProfileRef": profileRef,
+		},
+	}}
+}
+
+// hardeningProfileCR builds a HardeningProfile unstructured object with the given
+// machineConfigPatches slice. An empty or nil slice produces a profile with no patches.
+func hardeningProfileCR(clusterRef, name string, patches []string) *unstructured.Unstructured {
+	patchList := make([]interface{}, len(patches))
+	for i, p := range patches {
+		patchList[i] = p
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "platform.ontai.dev/v1alpha1",
+		"kind":       "HardeningProfile",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": "seam-tenant-" + clusterRef,
+		},
+		"spec": map[string]interface{}{
+			"machineConfigPatches": patchList,
+		},
+	}}
+}
+

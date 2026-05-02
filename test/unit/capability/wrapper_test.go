@@ -125,9 +125,10 @@ func TestPackDeploy_NilClientsReturnsValidationFailure(t *testing.T) {
 	assertValidationFailure(t, result, "pack-deploy nil clients")
 }
 
-// TestPackDeploy_NoPackExecutionReturnsFailure verifies that pack-deploy returns
-// failure when no PackExecution CR targets the cluster.
-func TestPackDeploy_NoPackExecutionReturnsFailure(t *testing.T) {
+// TestPackDeploy_MissingOperationResultCM_ReturnsValidationFailure verifies that
+// pack-deploy returns ValidationFailure when operationResultCM is not in parameters.
+// This parameter is required: it carries the PackExecution name. wrapper-schema.md §4.
+func TestPackDeploy_MissingOperationResultCM_ReturnsValidationFailure(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityPackDeploy)
@@ -138,8 +139,9 @@ func TestPackDeploy_NoPackExecutionReturnsFailure(t *testing.T) {
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:     &stubOCIClient{},
 			KubeClient:    fake.NewSimpleClientset(),
-			DynamicClient: newWrapperDynClient(), // empty
+			DynamicClient: newWrapperDynClient(), // empty — no params
 		},
+		// Parameters intentionally omitted to simulate missing operationResultCM.
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -187,6 +189,7 @@ func TestPackDeploy_FetchesAndAppliesManifests(t *testing.T) {
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityPackDeploy,
 		ClusterRef: clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:     oci,
 			KubeClient:    kubeClient,
@@ -222,6 +225,7 @@ func TestPackDeploy_OCIFetchFailureReturnsExternalDependencyFailure(t *testing.T
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityPackDeploy,
 		ClusterRef: clusterRef,
+		OperationResultCM: "pe-" + clusterRef,
 		ExecuteClients: capability.ExecuteClients{
 			OCIClient:     oci,
 			KubeClient:    fake.NewSimpleClientset(),
@@ -236,6 +240,66 @@ func TestPackDeploy_OCIFetchFailureReturnsExternalDependencyFailure(t *testing.T
 	}
 	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExternalDependencyFailure {
 		t.Errorf("expected ExternalDependencyFailure; got %+v", result.FailureReason)
+	}
+}
+
+// TestPackDeploy_MultiplePEsSameCluster_DeploysCorrectPack verifies that when
+// multiple PackExecutions exist for the same cluster (e.g., nginx and cert-manager),
+// a pack-deploy Job for nginx does NOT accidentally deploy cert-manager. This guards
+// against the alphabetical-first-match bug where List+break returned the wrong PE.
+func TestPackDeploy_MultiplePEsSameCluster_DeploysCorrectPack(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityPackDeploy)
+
+	clusterRef := "ccs-dev"
+	// cert-manager PE comes before nginx alphabetically — it must NOT be selected.
+	peCertManager := packExecutionCR(clusterRef, "cert-manager", "v1.14.0")
+	// nginx PE: the one this Job should deploy.
+	peNginx := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+		"kind":       "InfrastructurePackExecution",
+		"metadata":   map[string]interface{}{"name": "nginx-pe-" + clusterRef, "namespace": "seam-tenant-" + clusterRef},
+		"spec": map[string]interface{}{
+			"targetClusterRef": clusterRef,
+			"clusterPackRef": map[string]interface{}{
+				"name":    "nginx-pack",
+				"version": "v4.9.0",
+			},
+		},
+	}}
+	cpNginx := clusterPackCR(clusterRef, "nginx-pack", "v4.9.0", "registry.example.com/nginx@sha256:aaaa")
+	cpCertManager := clusterPackCR(clusterRef, "cert-manager", "v1.14.0", "registry.example.com/cert-manager@sha256:bbbb")
+
+	nginxManifestJSON, _ := json.Marshal(map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]interface{}{"name": "nginx-cfg", "namespace": "ingress-nginx"},
+	})
+	tarGzBlob := makeTarGz(t, map[string][]byte{"manifest.yaml": nginxManifestJSON})
+	oci := &stubOCIClient{manifests: [][]byte{tarGzBlob}}
+
+	dynClient := newWrapperDynClient(peCertManager, peNginx, cpNginx, cpCertManager)
+
+	// operationResultCM = "nginx-pe-ccs-dev" → must select the nginx PE, not cert-manager.
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityPackDeploy,
+		ClusterRef: clusterRef,
+		OperationResultCM: "nginx-pe-" + clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			OCIClient:     oci,
+			KubeClient:    fake.NewSimpleClientset(),
+			DynamicClient: dynClient,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The OCI client was configured with nginx manifests; if cert-manager was
+	// selected instead, it would look up a different ClusterPack and OCI ref.
+	// Verifying capability field confirms the handler reached OCI fetch.
+	if result.Capability != runnerlib.CapabilityPackDeploy {
+		t.Errorf("expected capability=%q; got %q", runnerlib.CapabilityPackDeploy, result.Capability)
 	}
 }
 

@@ -87,6 +87,12 @@ func setupDriftLoopScheme() *runtime.Scheme {
 	s.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group: "apps", Version: "v1", Kind: "DeploymentList",
 	}, &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group: "", Version: "v1", Kind: "Namespace",
+	}, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group: "", Version: "v1", Kind: "NamespaceList",
+	}, &unstructured.UnstructuredList{})
 	return s
 }
 
@@ -469,6 +475,50 @@ func TestPackReceiptDriftLoop_OrphanReceipt_TearsDownResources(t *testing.T) {
 	)
 	if !k8serrors.IsNotFound(signalErr) {
 		t.Errorf("expected DriftSignal to be deleted, got: %v", signalErr)
+	}
+}
+
+// TestPackReceiptDriftLoop_NamespaceTerminating_SkipsDrift verifies that when a
+// resource's namespace has a DeletionTimestamp set (Terminating), the drift loop
+// skips the signal for that cycle and does not increment the escalation counter.
+// This prevents the counter from exhausting the escalation budget while a corrective
+// Job is still waiting for the namespace to fully terminate before recreating it.
+func TestPackReceiptDriftLoop_NamespaceTerminating_SkipsDrift(t *testing.T) {
+	scheme := setupDriftLoopScheme()
+
+	now := metav1.Now()
+	terminatingNS := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Namespace",
+			"metadata": map[string]interface{}{
+				"name":              "ingress-nginx",
+				"resourceVersion":   "1",
+				"deletionTimestamp": now.UTC().Format("2006-01-02T15:04:05Z"),
+			},
+		},
+	}
+	resources := []map[string]interface{}{
+		{"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "ingress-nginx", "name": "ingress-nginx-controller"},
+	}
+	boolTrue := true
+	receipt := fakePackReceipt("nginx-ccs-dev", "nginx-ccs-dev", &boolTrue, resources)
+	cp := fakeClusterPack("nginx-ccs-dev", "seam-tenant-ccs-dev", map[string]interface{}{})
+	// Deployment is NOT present but namespace IS Terminating.
+	localClient := fake.NewSimpleDynamicClient(scheme, receipt, terminatingNS)
+	mgmtClient := fake.NewSimpleDynamicClient(scheme, cp)
+
+	loop := NewPackReceiptDriftLoop(localClient, mgmtClient, "ccs-dev", "ont-system")
+	loop.runOnce(context.Background())
+
+	signals, err := mgmtClient.Resource(driftSignalGVR).Namespace("seam-tenant-ccs-dev").List(
+		context.Background(), metav1.ListOptions{},
+	)
+	if err != nil {
+		t.Fatalf("list DriftSignals: %v", err)
+	}
+	if len(signals.Items) != 0 {
+		t.Errorf("expected 0 DriftSignals when namespace is Terminating, got %d", len(signals.Items))
 	}
 }
 

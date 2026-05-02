@@ -7,6 +7,7 @@ package capability
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,9 +24,16 @@ var upgradePolicyGVR = schema.GroupVersionResource{
 	Resource: "upgradepolicies",
 }
 
+// NodeRebootPollInterval is the interval between Health() checks while waiting
+// for a node to complete its reboot cycle after an upgrade. Exported so tests
+// can lower it without modifying production constants.
+var NodeRebootPollInterval = 10 * time.Second
+
+
 // talosUpgradeHandler implements the talos-upgrade named capability.
-// Reads the UpgradePolicy CR for the target Talos image and calls the
-// Talos Upgrade API per node. platform-schema.md §5.
+// Performs a rolling sequential upgrade of all nodes: each node is upgraded
+// with stage=false (immediate reboot), then we wait for it to return healthy
+// before moving to the next. platform-schema.md §5.
 type talosUpgradeHandler struct{}
 
 func (h *talosUpgradeHandler) Execute(ctx context.Context, params ExecuteParams) (runnerlib.OperationResultSpec, error) {
@@ -36,6 +44,12 @@ func (h *talosUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 			"talos-upgrade requires TalosClient and DynamicClient"), nil
 	}
 
+	nodes := params.TalosClient.Nodes()
+	if len(nodes) == 0 {
+		return failureResult(runnerlib.CapabilityTalosUpgrade, now, runnerlib.ValidationFailure,
+			"talos-upgrade: no nodes available from talosconfig"), nil
+	}
+
 	ns := tenantNamespace(params.ClusterRef)
 	crList, err := params.DynamicClient.Resource(upgradePolicyGVR).Namespace(ns).
 		List(ctx, metav1.ListOptions{})
@@ -44,26 +58,58 @@ func (h *talosUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 			fmt.Sprintf("list UpgradePolicy in %s: %v", ns, err)), nil
 	}
 
-	var upgradeImage string
+	var targetVersion string
 	for _, item := range crList.Items {
 		ut, _, _ := unstructuredString(item.Object, "spec", "upgradeType")
 		if ut != "talos" {
 			continue
 		}
-		upgradeImage, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
+		targetVersion, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
 		break
 	}
 
-	if upgradeImage == "" {
+	if targetVersion == "" {
 		return failureResult(runnerlib.CapabilityTalosUpgrade, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("no UpgradePolicy CR with upgradeType=talos and targetTalosVersion found in %s", ns)), nil
 	}
+	upgradeImage := "ghcr.io/siderolabs/installer:" + targetVersion
 
-	stepStart := time.Now().UTC()
-	// stage=true stages the upgrade for next reboot rather than applying immediately.
-	if err := params.TalosClient.Upgrade(ctx, upgradeImage, true); err != nil {
-		return failureResult(runnerlib.CapabilityTalosUpgrade, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("Upgrade to %s: %v", upgradeImage, err)), nil
+	steps := make([]runnerlib.StepResult, 0, len(nodes))
+	for i, nodeIP := range nodes {
+		stepStart := time.Now().UTC()
+		nodeCtx := NodeContext(ctx, nodeIP)
+
+		slog.Info("talos-upgrade: starting node upgrade",
+			slog.Int("node_index", i+1), slog.Int("node_total", len(nodes)),
+			slog.String("node", nodeIP), slog.String("image", upgradeImage))
+
+		if uErr := params.TalosClient.Upgrade(nodeCtx, upgradeImage, false); uErr != nil {
+			slog.Info("talos-upgrade: upgrade call failed",
+				slog.String("node", nodeIP), slog.String("error", uErr.Error()))
+			return failureResult(runnerlib.CapabilityTalosUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("upgrade node %s to %s: %v", nodeIP, upgradeImage, uErr)), nil
+		}
+
+		slog.Info("talos-upgrade: upgrade initiated, waiting for node reboot",
+			slog.String("node", nodeIP), slog.String("image", upgradeImage))
+
+		if wErr := waitForNodeReboot(ctx, params.TalosClient, nodeIP); wErr != nil {
+			slog.Info("talos-upgrade: node did not recover after reboot",
+				slog.String("node", nodeIP), slog.String("error", wErr.Error()))
+			return failureResult(runnerlib.CapabilityTalosUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("node %s did not recover after upgrade to %s: %v", nodeIP, upgradeImage, wErr)), nil
+		}
+
+		slog.Info("talos-upgrade: node ready after reboot",
+			slog.String("node", nodeIP), slog.String("image", upgradeImage))
+
+		steps = append(steps, runnerlib.StepResult{
+			Name:        "talos-upgrade-" + nodeIP,
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   stepStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     fmt.Sprintf("upgraded node %s to %s", nodeIP, upgradeImage),
+		})
 	}
 
 	return runnerlib.OperationResultSpec{
@@ -72,14 +118,58 @@ func (h *talosUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "talos-upgrade", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("staged upgrade to %s", upgradeImage),
-			},
-		},
+		Steps:       steps,
 	}, nil
+}
+
+// waitForNodeReboot waits for nodeIP to complete its reboot cycle after upgrade.
+//
+// Phase 1 (up to 2 minutes): polls Health until the node goes offline, confirming
+// the reboot started. If the node never goes offline (upgrade completed faster than
+// the poll interval, or test stub), returns nil immediately.
+//
+// Phase 2 (up to 8 minutes): polls Health until the node comes back online.
+func waitForNodeReboot(ctx context.Context, client TalosNodeClient, nodeIP string) error {
+	nodeCtx := NodeContext(ctx, nodeIP)
+
+	// Phase 1: detect node going offline.
+	downDeadline := time.Now().Add(2 * time.Minute)
+	wentDown := false
+	for time.Now().Before(downDeadline) {
+		if err := client.Health(nodeCtx); err != nil {
+			slog.Info("talos-upgrade: node offline, reboot in progress", slog.String("node", nodeIP))
+			wentDown = true
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(NodeRebootPollInterval):
+		}
+	}
+
+	if !wentDown {
+		// Never went offline -- node may have rebooted faster than the poll interval.
+		// Return nil; the TalosVersionDriftLoop will detect persistence if needed.
+		slog.Info("talos-upgrade: node did not go offline within phase-1 window, assuming complete",
+			slog.String("node", nodeIP))
+		return nil
+	}
+
+	// Phase 2: wait for node to come back online.
+	upDeadline := time.Now().Add(8 * time.Minute)
+	for time.Now().Before(upDeadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(NodeRebootPollInterval):
+		}
+		if err := client.Health(nodeCtx); err == nil {
+			slog.Info("talos-upgrade: node back online after reboot", slog.String("node", nodeIP))
+			return nil
+		}
+	}
+	return fmt.Errorf("node %s did not become ready after reboot within %s", nodeIP, 8*time.Minute)
 }
 
 // kubeUpgradeHandler implements the kube-upgrade named capability.

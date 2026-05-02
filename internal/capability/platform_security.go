@@ -4,14 +4,62 @@ package capability
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+// secretsGVR is the GroupVersionResource for core/v1 Secrets.
+var secretsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+// kubeconfigWriteSecretKey is the data key used for kubeconfig values in
+// platform Secret conventions. Matches kubeconfigSecretKey in platform.
+const kubeconfigWriteSecretKey = "value"
+
+// upsertKubeconfigSecret creates or updates a Secret holding a kubeconfig in
+// the given namespace. Uses the dynamic client to remain independent of typed
+// Kubernetes client bindings in the execute image. platform-schema.md §13.
+func upsertKubeconfigSecret(ctx context.Context, params ExecuteParams, namespace, name string, kubeconfigBytes []byte) error {
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"data": map[string]interface{}{
+				kubeconfigWriteSecretKey: base64.StdEncoding.EncodeToString(kubeconfigBytes),
+			},
+		},
+	}
+
+	existing, err := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			_, createErr := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+			if createErr != nil {
+				return fmt.Errorf("create kubeconfig Secret %s/%s: %w", namespace, name, createErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("get kubeconfig Secret %s/%s: %w", namespace, name, err)
+	}
+
+	existing.Object["data"] = obj.Object["data"]
+	if _, err := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update kubeconfig Secret %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
 
 // pkiRotationGVR is the GroupVersionResource for PKIRotation.
 // platform.ontai.dev/v1alpha1/pkirotations — platform-schema.md §5.
@@ -60,7 +108,7 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 	// Read the current machine config from the node and re-apply it in staged mode.
 	// This initiates a rotation cycle: the staged config is applied on next reboot,
 	// refreshing certificate-backed component configuration. conductor-schema.md §6.
-	stepStart := time.Now().UTC()
+	stagedStart := time.Now().UTC()
 	configBytes, err := params.TalosClient.GetMachineConfig(ctx)
 	if err != nil {
 		return failureResult(runnerlib.CapabilityPKIRotate, now, runnerlib.ExecutionFailure,
@@ -72,19 +120,56 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 			fmt.Sprintf("ApplyConfiguration staged for PKI rotation: %v", err)), nil
 	}
 
+	stagedStep := runnerlib.StepResult{
+		Name: "pki-rotate-staged", Status: runnerlib.ResultSucceeded,
+		StartedAt: stagedStart, CompletedAt: time.Now().UTC(),
+		Message: fmt.Sprintf("PKI rotation staged for cluster %s; config staged for next reboot", params.ClusterRef),
+	}
+
+	// Refresh the kubeconfig Secret. This is a best-effort secondary step.
+	// The staged config apply (above) is the critical step. If kubeconfig
+	// refresh fails, the overall operation is still considered successful.
+	// platform-schema.md §13.
+	kubeconfigStart := time.Now().UTC()
+	var kubeconfigStep runnerlib.StepResult
+	var artifacts []runnerlib.ArtifactRef
+
+	kubeconfigBytes, kcErr := params.TalosClient.Kubeconfig(ctx)
+	if kcErr != nil {
+		kubeconfigStep = runnerlib.StepResult{
+			Name: "kubeconfig-refresh", Status: runnerlib.ResultSucceeded,
+			StartedAt: kubeconfigStart, CompletedAt: time.Now().UTC(),
+			Message: fmt.Sprintf("kubeconfig refresh skipped (non-fatal): %v", kcErr),
+		}
+	} else {
+		mcSecretName := "seam-mc-" + params.ClusterRef + "-kubeconfig"
+		targetSecretName := "target-cluster-kubeconfig"
+		kcRefreshErr := upsertKubeconfigSecret(ctx, params, ns, mcSecretName, kubeconfigBytes)
+		kcRefreshMsg := fmt.Sprintf("kubeconfig Secret %s/%s refreshed", ns, mcSecretName)
+		if kcRefreshErr != nil {
+			kcRefreshMsg = fmt.Sprintf("kubeconfig refresh partial: %s/%s failed: %v", ns, mcSecretName, kcRefreshErr)
+		} else {
+			_ = upsertKubeconfigSecret(ctx, params, ns, targetSecretName, kubeconfigBytes)
+			artifacts = append(artifacts, runnerlib.ArtifactRef{
+				Name:      "kubeconfig-refreshed",
+				Kind:      "KubernetesSecret",
+				Reference: fmt.Sprintf("%s/%s", ns, mcSecretName),
+			})
+		}
+		kubeconfigStep = runnerlib.StepResult{
+			Name: "kubeconfig-refresh", Status: runnerlib.ResultSucceeded,
+			StartedAt: kubeconfigStart, CompletedAt: time.Now().UTC(),
+			Message: kcRefreshMsg,
+		}
+	}
+
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityPKIRotate,
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
-		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "pki-rotate", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("PKI rotation staged for cluster %s; config staged for next reboot", params.ClusterRef),
-			},
-		},
+		Artifacts:   artifacts,
+		Steps:       []runnerlib.StepResult{stagedStep, kubeconfigStep},
 	}, nil
 }
 
@@ -232,25 +317,91 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 			fmt.Sprintf("list HardeningProfile in %s: %v", hardeningProfileNs, err)), nil
 	}
 
-	var machineConfigPatches string
+	// machineConfigPatches is []string in the spec; read via unstructuredList to avoid
+	// the incorrect type assertion that unstructuredString would perform on a slice.
+	var configPatches []string
 	for _, item := range hpList.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
 		if name != hardeningProfileRef {
 			continue
 		}
-		machineConfigPatches, _, _ = unstructuredString(item.Object, "spec", "machineConfigPatches")
+		raw, _, _ := unstructuredList(item.Object, "spec", "machineConfigPatches")
+		for _, p := range raw {
+			if s, ok := p.(string); ok && len(s) > 0 {
+				configPatches = append(configPatches, s)
+			}
+		}
 		break
 	}
 
-	if machineConfigPatches == "" {
+	if len(configPatches) == 0 {
 		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("HardeningProfile %q in %s has no machineConfigPatches", hardeningProfileRef, hardeningProfileNs)), nil
 	}
 
-	stepStart := time.Now().UTC()
-	if err := params.TalosClient.ApplyConfiguration(ctx, []byte(machineConfigPatches), "no-reboot"); err != nil {
-		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("ApplyConfiguration (hardening, profile=%s): %v", hardeningProfileRef, err)), nil
+	// Determine which nodes to apply hardening to. When TalosconfigPath is set
+	// (production), we iterate over each endpoint individually using per-node
+	// context so that GetMachineConfig reads that node's own config and
+	// ApplyConfiguration writes only to that node. Without per-node isolation,
+	// a multi-endpoint Talos client would apply node 1's config to every node,
+	// which corrupts hostnames, IPs, and certificates on nodes 2..N.
+	//
+	// When TalosconfigPath is empty (unit tests, single-node clusters), we fall
+	// back to the shared TalosClient with the original context.
+	var nodeIPs []string
+	if params.TalosconfigPath != "" {
+		ips, epErr := EndpointsFromTalosconfig(params.TalosconfigPath)
+		if epErr != nil {
+			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("read endpoints from talosconfig: %v", epErr)), nil
+		}
+		nodeIPs = ips
+	}
+
+	var steps []runnerlib.StepResult
+
+	applyNode := func(nodeCtx context.Context, nodeID string) *runnerlib.OperationResultSpec {
+		currentConfig, err := params.TalosClient.GetMachineConfig(nodeCtx)
+		if err != nil {
+			res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("GetMachineConfig on %s before hardening patch: %v", nodeID, err))
+			return &res
+		}
+		for i, patch := range configPatches {
+			stepStart := time.Now().UTC()
+			merged, mergeErr := mergeYAMLPatch(currentConfig, []byte(patch))
+			if mergeErr != nil {
+				res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("merge hardening patch %d on %s: %v", i, nodeID, mergeErr))
+				return &res
+			}
+			if err := params.TalosClient.ApplyConfiguration(nodeCtx, merged, "no-reboot"); err != nil {
+				res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("ApplyConfiguration (hardening, profile=%s, patch=%d, node=%s): %v", hardeningProfileRef, i, nodeID, err))
+				return &res
+			}
+			currentConfig = merged
+			steps = append(steps, runnerlib.StepResult{
+				Name:        fmt.Sprintf("apply-hardening-%d-%s", i, nodeID),
+				Status:      runnerlib.ResultSucceeded,
+				StartedAt:   stepStart,
+				CompletedAt: time.Now().UTC(),
+				Message:     fmt.Sprintf("hardening profile %q patch %d applied to %s (no-reboot mode)", hardeningProfileRef, i, nodeID),
+			})
+		}
+		return nil
+	}
+
+	if len(nodeIPs) > 0 {
+		for _, nodeIP := range nodeIPs {
+			if res := applyNode(NodeContext(ctx, nodeIP), nodeIP); res != nil {
+				return *res, nil
+			}
+		}
+	} else {
+		if res := applyNode(ctx, "node"); res != nil {
+			return *res, nil
+		}
 	}
 
 	return runnerlib.OperationResultSpec{
@@ -259,12 +410,50 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "apply-hardening", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("hardening profile %q applied (no-reboot mode)", hardeningProfileRef),
-			},
-		},
+		Steps:       steps,
 	}, nil
+}
+
+// mergeYAMLPatch deep-merges a YAML patch onto a base YAML document. Map keys
+// in patch override or extend corresponding keys in base; slices in patch
+// replace slices in base (no append semantics). The merged result is returned
+// as YAML bytes. This is the correct approach for applying a partial Talos
+// machine config overlay: the base is the current node config from
+// GetMachineConfig, and the patch is a HardeningProfile machineConfigPatch.
+func mergeYAMLPatch(base, patch []byte) ([]byte, error) {
+	var baseMap map[string]interface{}
+	if err := sigsyaml.Unmarshal(base, &baseMap); err != nil {
+		return nil, fmt.Errorf("unmarshal base config: %w", err)
+	}
+	var patchMap map[string]interface{}
+	if err := sigsyaml.Unmarshal(patch, &patchMap); err != nil {
+		return nil, fmt.Errorf("unmarshal patch: %w", err)
+	}
+	merged := deepMergeStringMaps(baseMap, patchMap)
+	out, err := sigsyaml.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged config: %w", err)
+	}
+	return out, nil
+}
+
+// deepMergeStringMaps merges src into dst recursively. Map values are merged;
+// all other types (including slices) from src replace the corresponding dst value.
+func deepMergeStringMaps(dst, src map[string]interface{}) map[string]interface{} {
+	if dst == nil {
+		dst = make(map[string]interface{})
+	}
+	for k, srcVal := range src {
+		dstVal, exists := dst[k]
+		if exists {
+			srcMap, srcIsMap := srcVal.(map[string]interface{})
+			dstMap, dstIsMap := dstVal.(map[string]interface{})
+			if srcIsMap && dstIsMap {
+				dst[k] = deepMergeStringMaps(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[k] = srcVal
+	}
+	return dst
 }

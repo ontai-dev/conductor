@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // ── GuardianIntakeClientAdapter ──────────────────────────────────────────────
@@ -197,17 +198,19 @@ func WaitForRBACProfileProvisioned(
 // INV-013: talos goclient is executor/agent mode only.
 type TalosClientAdapter struct {
 	inner *talos_client.Client
+	nodes []string // endpoint IPs parsed from talosconfig at construction time
 }
 
 // NewTalosClientAdapter creates a TalosClientAdapter by reading the talosconfig
 // from talosconfigPath. Returns an error if the config cannot be read or the
 // gRPC connection cannot be established.
 func NewTalosClientAdapter(ctx context.Context, talosconfigPath string) (*TalosClientAdapter, error) {
+	nodes, _ := EndpointsFromTalosconfig(talosconfigPath) // empty slice on parse error
 	c, err := talos_client.New(ctx, talos_client.WithConfigFromFile(talosconfigPath))
 	if err != nil {
 		return nil, fmt.Errorf("TalosClientAdapter: open talosconfig %s: %w", talosconfigPath, err)
 	}
-	return &TalosClientAdapter{inner: c}, nil
+	return &TalosClientAdapter{inner: c, nodes: nodes}, nil
 }
 
 // Bootstrap bootstraps etcd on the first control plane node.
@@ -242,6 +245,15 @@ func (a *TalosClientAdapter) ApplyConfiguration(ctx context.Context, configBytes
 		Data: configBytes,
 		Mode: modeEnum,
 	})
+	return err
+}
+
+// Nodes returns the endpoint IPs parsed from the talosconfig at construction time.
+func (a *TalosClientAdapter) Nodes() []string { return a.nodes }
+
+// Health calls the Talos Version RPC as a lightweight liveness check.
+func (a *TalosClientAdapter) Health(ctx context.Context) error {
+	_, err := a.inner.Version(ctx)
 	return err
 }
 
@@ -303,6 +315,18 @@ func (a *TalosClientAdapter) GetMachineConfig(ctx context.Context) ([]byte, erro
 		return nil, fmt.Errorf("GetMachineConfig: read response: %w", err)
 	}
 	return data, nil
+}
+
+// Kubeconfig generates a fresh admin kubeconfig from the cluster Talos API.
+// Returns raw kubeconfig YAML bytes signed by the cluster Kubernetes CA.
+// Used by pkiRotateHandler to refresh the stored kubeconfig Secret after a
+// PKI rotation cycle. platform-schema.md §13.
+func (a *TalosClientAdapter) Kubeconfig(ctx context.Context) ([]byte, error) {
+	b, err := a.inner.Kubeconfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Kubeconfig: %w", err)
+	}
+	return b, nil
 }
 
 // Close releases the underlying gRPC connection.
@@ -544,4 +568,55 @@ func (a *OCIRegistryClientAdapter) fetchBlob(ctx context.Context, blobURL string
 		return nil, fmt.Errorf("read blob body: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// ── Per-node Talos helpers ────────────────────────────────────────────────────
+
+// talosConfigFile is the minimal structure needed to read endpoints from a talosconfig.
+// The talosconfig format is defined by the Talos machinery client.
+type talosConfigFile struct {
+	Context  string                       `json:"context"`
+	Contexts map[string]talosConfigCtx    `json:"contexts"`
+}
+
+type talosConfigCtx struct {
+	Endpoints []string `json:"endpoints"`
+	Nodes     []string `json:"nodes"`
+}
+
+// EndpointsFromTalosconfig parses the talosconfig at path and returns the list
+// of targets for the active context. If the context has explicit nodes, those
+// are returned. Otherwise the endpoints are returned. An error is returned when
+// the file cannot be read, parsed, or the active context is missing.
+func EndpointsFromTalosconfig(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read talosconfig %s: %w", path, err)
+	}
+	var cfg talosConfigFile
+	if err := sigsyaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse talosconfig: %w", err)
+	}
+	ctx, ok := cfg.Contexts[cfg.Context]
+	if !ok {
+		return nil, fmt.Errorf("talosconfig context %q not found", cfg.Context)
+	}
+	if len(ctx.Nodes) > 0 {
+		return ctx.Nodes, nil
+	}
+	if len(ctx.Endpoints) > 0 {
+		return ctx.Endpoints, nil
+	}
+	return nil, fmt.Errorf("talosconfig context %q has no endpoints or nodes", cfg.Context)
+}
+
+// NodeContext returns a context that targets exactly one Talos node. The context
+// is passed to GetMachineConfig and ApplyConfiguration so the Talos RPC
+// infrastructure routes each call to the specified node only. This is the
+// correct way to perform per-node operations when the Talos client has multiple
+// endpoints configured -- without it, the client targets all endpoints and
+// GetMachineConfig returns only the first responding node's config while
+// ApplyConfiguration applies to every node.
+func NodeContext(ctx context.Context, nodeIP string) context.Context {
+	return talos_client.WithNode(ctx, nodeIP)
 }

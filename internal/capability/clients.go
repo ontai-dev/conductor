@@ -47,6 +47,23 @@ type TalosNodeClient interface {
 	// /system/state/config.yaml on the node.
 	GetMachineConfig(ctx context.Context) ([]byte, error)
 
+	// Kubeconfig generates a fresh admin kubeconfig from the cluster and returns
+	// the raw YAML bytes. The generated kubeconfig has a new certificate signed by
+	// the cluster Kubernetes CA with a fresh expiry (typically 1 year).
+	// Used by pkiRotateHandler to refresh the stored kubeconfig Secret after a
+	// PKI rotation cycle. platform-schema.md §13.
+	Kubeconfig(ctx context.Context) ([]byte, error)
+
+	// Nodes returns the list of node IP addresses this client manages, parsed
+	// from the talosconfig endpoints at construction time. Used by the rolling
+	// talos-upgrade path to iterate nodes sequentially.
+	Nodes() []string
+
+	// Health performs a lightweight liveness check against the Talos machine API.
+	// Returns nil when the node is responsive, non-nil otherwise.
+	// Used to detect reboot completion during rolling upgrades.
+	Health(ctx context.Context) error
+
 	// Close releases the underlying gRPC connection.
 	Close() error
 }
@@ -132,4 +149,10 @@ type ExecuteClients struct {
 	// nil during bootstrap window mode (INV-020) — verification is bypassed.
 	// Non-nil in normal operation — INV-026 enforcement applies.
 	SigningPublicKey ed25519.PublicKey
+
+	// TalosconfigPath is the filesystem path to the mounted talosconfig Secret.
+	// Set from TALOSCONFIG_PATH env var in main. Used by per-node capabilities
+	// (hardening-apply) to create one Talos client per cluster endpoint so that
+	// each node's own config is read and applied back to that node only.
+	TalosconfigPath string
 }

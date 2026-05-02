@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/ontai-dev/conductor/internal/capability"
@@ -240,3 +241,78 @@ func TestOCIRef_TagAndDigestRef(t *testing.T) {
 	}
 }
 
+
+// ── EndpointsFromTalosconfig tests ───────────────────────────────────────────
+
+func TestEndpointsFromTalosconfig_EndpointsFallback(t *testing.T) {
+	content := `context: ccs-mgmt
+contexts:
+  ccs-mgmt:
+    endpoints:
+      - 10.20.0.2
+      - 10.20.0.3
+    ca: dGVzdA==
+    crt: dGVzdA==
+    key: dGVzdA==
+`
+	f := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := capability.EndpointsFromTalosconfig(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "10.20.0.2" || got[1] != "10.20.0.3" {
+		t.Errorf("unexpected endpoints: %v", got)
+	}
+}
+
+func TestEndpointsFromTalosconfig_NodesTakePrecedence(t *testing.T) {
+	content := `context: ccs-mgmt
+contexts:
+  ccs-mgmt:
+    endpoints:
+      - 10.20.0.2
+    nodes:
+      - 10.20.0.3
+    ca: dGVzdA==
+    crt: dGVzdA==
+    key: dGVzdA==
+`
+	f := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := capability.EndpointsFromTalosconfig(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "10.20.0.3" {
+		t.Errorf("expected nodes to take precedence; got %v", got)
+	}
+}
+
+func TestEndpointsFromTalosconfig_MissingFile(t *testing.T) {
+	_, err := capability.EndpointsFromTalosconfig("/nonexistent/talosconfig")
+	if err == nil {
+		t.Fatal("expected error for missing file; got nil")
+	}
+}
+
+func TestEndpointsFromTalosconfig_UnknownContext(t *testing.T) {
+	content := `context: other
+contexts:
+  ccs-mgmt:
+    endpoints:
+      - 10.20.0.2
+`
+	f := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := capability.EndpointsFromTalosconfig(f)
+	if err == nil {
+		t.Fatal("expected error for unknown context; got nil")
+	}
+}
