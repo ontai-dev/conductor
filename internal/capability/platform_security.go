@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
@@ -338,14 +339,32 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 			fmt.Sprintf("HardeningProfile %q in %s has no machineConfigPatches", hardeningProfileRef, hardeningProfileNs)), nil
 	}
 
-	// Apply each patch individually in no-reboot mode; one step per patch.
+	// Read the current machine config so we can merge each patch into it before
+	// applying. Talos ApplyConfiguration requires a complete machine config, not a
+	// partial overlay. We deep-merge the patch onto the current config and send the
+	// result. Each patch is merged independently so failures are isolated.
+	currentConfig, err := params.TalosClient.GetMachineConfig(ctx)
+	if err != nil {
+		return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+			fmt.Sprintf("GetMachineConfig before hardening patch: %v", err)), nil
+	}
+
 	var steps []runnerlib.StepResult
 	for i, patch := range configPatches {
 		stepStart := time.Now().UTC()
-		if err := params.TalosClient.ApplyConfiguration(ctx, []byte(patch), "no-reboot"); err != nil {
+
+		merged, mergeErr := mergeYAMLPatch(currentConfig, []byte(patch))
+		if mergeErr != nil {
+			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("merge hardening patch %d into machine config: %v", i, mergeErr)), nil
+		}
+
+		if err := params.TalosClient.ApplyConfiguration(ctx, merged, "no-reboot"); err != nil {
 			return failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
 				fmt.Sprintf("ApplyConfiguration (hardening, profile=%s, patch=%d): %v", hardeningProfileRef, i, err)), nil
 		}
+		// Update currentConfig for the next patch so patches compose correctly.
+		currentConfig = merged
 		steps = append(steps, runnerlib.StepResult{
 			Name:        fmt.Sprintf("apply-hardening-%d", i),
 			Status:      runnerlib.ResultSucceeded,
@@ -363,4 +382,48 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 		Artifacts:   []runnerlib.ArtifactRef{},
 		Steps:       steps,
 	}, nil
+}
+
+// mergeYAMLPatch deep-merges a YAML patch onto a base YAML document. Map keys
+// in patch override or extend corresponding keys in base; slices in patch
+// replace slices in base (no append semantics). The merged result is returned
+// as YAML bytes. This is the correct approach for applying a partial Talos
+// machine config overlay: the base is the current node config from
+// GetMachineConfig, and the patch is a HardeningProfile machineConfigPatch.
+func mergeYAMLPatch(base, patch []byte) ([]byte, error) {
+	var baseMap map[string]interface{}
+	if err := sigsyaml.Unmarshal(base, &baseMap); err != nil {
+		return nil, fmt.Errorf("unmarshal base config: %w", err)
+	}
+	var patchMap map[string]interface{}
+	if err := sigsyaml.Unmarshal(patch, &patchMap); err != nil {
+		return nil, fmt.Errorf("unmarshal patch: %w", err)
+	}
+	merged := deepMergeStringMaps(baseMap, patchMap)
+	out, err := sigsyaml.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged config: %w", err)
+	}
+	return out, nil
+}
+
+// deepMergeStringMaps merges src into dst recursively. Map values are merged;
+// all other types (including slices) from src replace the corresponding dst value.
+func deepMergeStringMaps(dst, src map[string]interface{}) map[string]interface{} {
+	if dst == nil {
+		dst = make(map[string]interface{})
+	}
+	for k, srcVal := range src {
+		dstVal, exists := dst[k]
+		if exists {
+			srcMap, srcIsMap := srcVal.(map[string]interface{})
+			dstMap, dstIsMap := dstVal.(map[string]interface{})
+			if srcIsMap && dstIsMap {
+				dst[k] = deepMergeStringMaps(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[k] = srcVal
+	}
+	return dst
 }

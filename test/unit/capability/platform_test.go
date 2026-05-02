@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -677,6 +678,8 @@ func TestHardeningApply_NilClientsReturnsValidationFailure(t *testing.T) {
 
 // TestHardeningApply_SinglePatchApplied verifies that a HardeningProfile with one
 // machineConfigPatch causes a single ApplyConfiguration call in no-reboot mode.
+// The handler merges the patch onto the base config from GetMachineConfig before
+// calling ApplyConfiguration -- the applied bytes must contain the patched sysctl.
 func TestHardeningApply_SinglePatchApplied(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
@@ -685,10 +688,12 @@ func TestHardeningApply_SinglePatchApplied(t *testing.T) {
 	clusterRef := "ccs-test"
 	profileName := "seam-hardening-base"
 	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+	// Provide a minimal base config so mergeYAMLPatch has a real document to merge into.
+	baseConfig := []byte("machine:\n  install:\n    disk: /dev/vda\n")
 
 	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
 	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
-	talos := &stubTalosClient{}
+	talos := &stubTalosClient{getMachineConfigBytes: baseConfig}
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityHardeningApply,
@@ -710,9 +715,13 @@ func TestHardeningApply_SinglePatchApplied(t *testing.T) {
 	if talos.applyConfigCalls[0].mode != "no-reboot" {
 		t.Errorf("expected mode=no-reboot; got %q", talos.applyConfigCalls[0].mode)
 	}
-	if string(talos.applyConfigCalls[0].configBytes) != patch {
-		t.Errorf("config bytes mismatch; got %q want %q",
-			string(talos.applyConfigCalls[0].configBytes), patch)
+	// The applied bytes must be the merged config containing both base and patch fields.
+	applied := string(talos.applyConfigCalls[0].configBytes)
+	if !strings.Contains(applied, "ip_forward") {
+		t.Errorf("applied config missing sysctl from patch; got %q", applied)
+	}
+	if !strings.Contains(applied, "vda") {
+		t.Errorf("applied config missing base install.disk field; got %q", applied)
 	}
 	if len(result.Steps) != 1 {
 		t.Errorf("expected 1 step; got %d", len(result.Steps))
@@ -720,7 +729,8 @@ func TestHardeningApply_SinglePatchApplied(t *testing.T) {
 }
 
 // TestHardeningApply_MultiPatchApplied verifies that multiple machineConfigPatches
-// cause one ApplyConfiguration call per patch, in order.
+// cause one ApplyConfiguration call per patch, in order, and that patches compose
+// (each call's config includes all prior patches via sequential merge).
 func TestHardeningApply_MultiPatchApplied(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
@@ -732,10 +742,11 @@ func TestHardeningApply_MultiPatchApplied(t *testing.T) {
 		"machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n",
 		"machine:\n  sysctls:\n    net.ipv4.conf.all.rp_filter: \"1\"\n",
 	}
+	baseConfig := []byte("machine:\n  install:\n    disk: /dev/vda\n")
 
 	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
 	hp := hardeningProfileCR(clusterRef, profileName, patches)
-	talos := &stubTalosClient{}
+	talos := &stubTalosClient{getMachineConfigBytes: baseConfig}
 
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityHardeningApply,
@@ -758,9 +769,14 @@ func TestHardeningApply_MultiPatchApplied(t *testing.T) {
 		if call.mode != "no-reboot" {
 			t.Errorf("call %d: expected mode=no-reboot; got %q", i, call.mode)
 		}
-		if string(call.configBytes) != patches[i] {
-			t.Errorf("call %d: config bytes mismatch", i)
-		}
+	}
+	// Second call must include both sysctl keys (patches compose sequentially).
+	secondApplied := string(talos.applyConfigCalls[1].configBytes)
+	if !strings.Contains(secondApplied, "ip_forward") {
+		t.Errorf("second apply missing ip_forward sysctl from patch 0; got %q", secondApplied)
+	}
+	if !strings.Contains(secondApplied, "rp_filter") {
+		t.Errorf("second apply missing rp_filter sysctl from patch 1; got %q", secondApplied)
 	}
 	if len(result.Steps) != 2 {
 		t.Errorf("expected 2 steps; got %d", len(result.Steps))
@@ -850,6 +866,43 @@ func TestHardeningApply_ApplyErrorReturnsExecutionFailure(t *testing.T) {
 	}
 	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
 		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+}
+
+// TestHardeningApply_GetMachineConfigErrorReturnsFailure verifies that a
+// GetMachineConfig error before patch application returns an ExecutionFailure.
+func TestHardeningApply_GetMachineConfigErrorReturnsFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	talos := &stubTalosClient{getMachineConfigErr: fmt.Errorf("talos: connection refused")}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(nm, hp),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure; got %+v", result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) != 0 {
+		t.Errorf("ApplyConfiguration must not be called when GetMachineConfig fails")
 	}
 }
 
