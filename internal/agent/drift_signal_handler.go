@@ -81,6 +81,13 @@ func (h *DriftSignalHandler) handleOnce(ctx context.Context) {
 		signalName := item.GetName()
 		counter, _ := spec["escalationCounter"].(int64)
 
+		// InfrastructureTalosCluster version drift signals are handled by platform's
+		// DriftSignalReconciler (TCOR write + observedTalosVersion patch). Skip here.
+		affectedRef, _, _ := unstructuredNestedMap(spec, "affectedCRRef")
+		if kind, _ := affectedRef["kind"].(string); kind == "InfrastructureTalosCluster" {
+			continue
+		}
+
 		if int32(counter) >= escalationThreshold {
 			fmt.Printf("drift handler: signal=%q escalation threshold reached — marking TerminalDrift\n",
 				signalName)
@@ -88,8 +95,6 @@ func (h *DriftSignalHandler) handleOnce(ctx context.Context) {
 			continue
 		}
 
-		// Extract affected CR reference and clusterPackRef.
-		affectedRef, _, _ := unstructuredNestedMap(spec, "affectedCRRef")
 		driftReason, _ := spec["driftReason"].(string)
 
 		// Derive cluster name from namespace: seam-tenant-{clusterName}
