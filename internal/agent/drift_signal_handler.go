@@ -101,7 +101,7 @@ func (h *DriftSignalHandler) handleOnce(ctx context.Context) {
 		clusterName := strings.TrimPrefix(ns, "seam-tenant-")
 
 		// Find and retrigger the PackExecution for this cluster namespace.
-		retriggered, jobRef := h.retriggerPackExecution(ctx, ns, clusterName)
+		retriggered, jobRef := h.retriggerPackExecution(ctx, ns, clusterName, signalName)
 		if !retriggered {
 			fmt.Printf("drift handler: cluster=%q signal=%q no PackExecution found to retrigger\n",
 				clusterName, signalName)
@@ -115,20 +115,42 @@ func (h *DriftSignalHandler) handleOnce(ctx context.Context) {
 	}
 }
 
-// retriggerPackExecution deletes the PackExecution for the given cluster so
-// wrapper recreates it and submits a new pack-deploy Job. Returns (true, jobName)
+// retriggerPackExecution deletes the PackExecution for the pack that triggered the
+// signal so wrapper recreates it and submits a new pack-deploy Job. Returns (true, jobName)
 // on success, (false, "") if no PackExecution is found.
-func (h *DriftSignalHandler) retriggerPackExecution(ctx context.Context, tenantNS, clusterName string) (bool, string) {
-	list, err := h.client.Resource(packExecutionGVR).Namespace(tenantNS).List(ctx, metav1.ListOptions{})
-	if err != nil || len(list.Items) == 0 {
+//
+// The PE name is derived directly from the signal name: DriftSignals are named
+// "drift-{receiptName}" and execute-mode PackReceipts are named after their ClusterPack.
+// PE names follow "{clusterPackName}-{clusterName}", so:
+//   peName = strings.TrimPrefix(signalName, "drift-") + "-" + clusterName
+//
+// This avoids deleting an unrelated PE when multiple packs exist in the same tenant namespace.
+func (h *DriftSignalHandler) retriggerPackExecution(ctx context.Context, tenantNS, clusterName, signalName string) (bool, string) {
+	clusterPackName := strings.TrimPrefix(signalName, "drift-")
+	// Remove the trailing "-{clusterName}" suffix that is part of the receipt name
+	// (receipts are named "{packBaseName}-{clusterName}" by convention).
+	// The PE name is "{clusterPackName}-{clusterName}" where clusterPackName already
+	// contains the clusterName suffix in the receipt name -- so the full PE name is
+	// exactly the receipt name + "-" + clusterName.
+	// Example: signal="drift-nginx-ccs-dev", clusterName="ccs-dev"
+	//   → clusterPackName="nginx-ccs-dev" → peName="nginx-ccs-dev-ccs-dev"
+	peName := clusterPackName + "-" + clusterName
+
+	// Try to get the specific PE first to confirm it exists.
+	pe, err := h.client.Resource(packExecutionGVR).Namespace(tenantNS).Get(
+		ctx, peName, metav1.GetOptions{},
+	)
+	if k8serrors.IsNotFound(err) {
+		fmt.Printf("drift handler: PackExecution %s/%s not found, no retrigger\n", tenantNS, peName)
+		return false, ""
+	}
+	if err != nil {
+		fmt.Printf("drift handler: get PackExecution %s/%s: %v\n", tenantNS, peName, err)
 		return false, ""
 	}
 
-	// Delete the first PackExecution found (the one that delivered the drifted pack).
-	pe := list.Items[0]
 	spec, _, _ := unstructuredNestedMap(pe.Object, "spec")
-	packName, _ := spec["packRef"].(string)
-	peName := pe.GetName()
+	packRef, _ := spec["admissionProfileRef"].(string)
 
 	if delErr := h.client.Resource(packExecutionGVR).Namespace(tenantNS).Delete(
 		ctx, peName, metav1.DeleteOptions{},
@@ -137,7 +159,7 @@ func (h *DriftSignalHandler) retriggerPackExecution(ctx context.Context, tenantN
 		return false, ""
 	}
 	fmt.Printf("drift handler: deleted PackExecution %s/%s (pack=%q) for retrigger\n",
-		tenantNS, peName, packName)
+		tenantNS, peName, packRef)
 	return true, peName
 }
 
