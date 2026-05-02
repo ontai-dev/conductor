@@ -209,17 +209,66 @@ func (h *kubeUpgradeHandler) Execute(ctx context.Context, params ExecuteParams) 
 			fmt.Sprintf("no UpgradePolicy CR with upgradeType=kubernetes and targetKubernetesVersion found in %s", ns)), nil
 	}
 
-	// Build the kubelet configuration patch for the target version.
-	// Talos manages Kubernetes component upgrades via machine config.
-	kubeletPatch := []byte(fmt.Sprintf(
-		`{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:%s"}}}`,
+	kubeletImagePatch := []byte(fmt.Sprintf(
+		`{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:v%s"}}}`,
 		targetKubeVersion,
 	))
 
-	stepStart := time.Now().UTC()
-	if err := params.TalosClient.ApplyConfiguration(ctx, kubeletPatch, "staged"); err != nil {
-		return failureResult(runnerlib.CapabilityKubeUpgrade, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("ApplyConfiguration for kube upgrade to %s: %v", targetKubeVersion, err)), nil
+	// Enumerate nodes from talosconfig; fall back to single-context when absent.
+	var nodeIPs []string
+	if params.TalosconfigPath != "" {
+		ips, epErr := EndpointsFromTalosconfig(params.TalosconfigPath)
+		if epErr != nil {
+			return failureResult(runnerlib.CapabilityKubeUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("read endpoints from talosconfig: %v", epErr)), nil
+		}
+		nodeIPs = ips
+	}
+
+	applyKubelet := func(nodeCtx context.Context, nodeID string) *runnerlib.OperationResultSpec {
+		existing, err := params.TalosClient.GetMachineConfig(nodeCtx)
+		if err != nil {
+			res := failureResult(runnerlib.CapabilityKubeUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("GetMachineConfig on %s: %v", nodeID, err))
+			return &res
+		}
+		merged, err := mergeYAMLPatch(existing, kubeletImagePatch)
+		if err != nil {
+			res := failureResult(runnerlib.CapabilityKubeUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("merge kubelet patch on %s: %v", nodeID, err))
+			return &res
+		}
+		if err := params.TalosClient.ApplyConfiguration(nodeCtx, merged, "no-reboot"); err != nil {
+			res := failureResult(runnerlib.CapabilityKubeUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("ApplyConfiguration for kube upgrade to %s on %s: %v", targetKubeVersion, nodeID, err))
+			return &res
+		}
+		return nil
+	}
+
+	var steps []runnerlib.StepResult
+	if len(nodeIPs) > 0 {
+		for _, nodeIP := range nodeIPs {
+			stepStart := time.Now().UTC()
+			if res := applyKubelet(NodeContext(ctx, nodeIP), nodeIP); res != nil {
+				return *res, nil
+			}
+			steps = append(steps, runnerlib.StepResult{
+				Name: "kube-upgrade-" + nodeIP, Status: runnerlib.ResultSucceeded,
+				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+				Message: fmt.Sprintf("kubelet upgraded to %s on %s", targetKubeVersion, nodeIP),
+			})
+		}
+	} else {
+		stepStart := time.Now().UTC()
+		if res := applyKubelet(ctx, "node"); res != nil {
+			return *res, nil
+		}
+		steps = append(steps, runnerlib.StepResult{
+			Name: "kube-upgrade", Status: runnerlib.ResultSucceeded,
+			StartedAt: stepStart, CompletedAt: time.Now().UTC(),
+			Message: fmt.Sprintf("kubelet upgraded to %s", targetKubeVersion),
+		})
 	}
 
 	return runnerlib.OperationResultSpec{
@@ -228,13 +277,7 @@ func (h *kubeUpgradeHandler) Execute(ctx context.Context, params ExecuteParams) 
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
 		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "kube-upgrade", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("staged kubelet upgrade to %s", targetKubeVersion),
-			},
-		},
+		Steps:       steps,
 	}, nil
 }
 
@@ -289,15 +332,46 @@ func (h *stackUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 		Message: fmt.Sprintf("staged Talos upgrade to %s", talosImage),
 	})
 
-	// Step 2 — Stage Kubernetes upgrade.
-	step2Start := time.Now().UTC()
-	kubeletPatch := []byte(fmt.Sprintf(
-		`{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:%s"}}}`,
+	// Step 2 — Apply Kubernetes kubelet upgrade per node. The Talos OS upgrade is
+	// already staged (stage=true above), so the kubelet change is also staged here
+	// to co-apply on the next reboot that the Talos upgrade triggers.
+	kubeletImagePatch := []byte(fmt.Sprintf(
+		`{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:v%s"}}}`,
 		kubeVersion,
 	))
-	if err := params.TalosClient.ApplyConfiguration(ctx, kubeletPatch, "staged"); err != nil {
-		return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("ApplyConfiguration (Kubernetes) to %s: %v", kubeVersion, err)), nil
+	var stackNodeIPs []string
+	if params.TalosconfigPath != "" {
+		ips, epErr := EndpointsFromTalosconfig(params.TalosconfigPath)
+		if epErr != nil {
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("read endpoints from talosconfig: %v", epErr)), nil
+		}
+		stackNodeIPs = ips
+	}
+	applyStackKubelet := func(nodeCtx context.Context, nodeID string) error {
+		existing, err := params.TalosClient.GetMachineConfig(nodeCtx)
+		if err != nil {
+			return fmt.Errorf("GetMachineConfig on %s: %w", nodeID, err)
+		}
+		merged, err := mergeYAMLPatch(existing, kubeletImagePatch)
+		if err != nil {
+			return fmt.Errorf("merge kubelet patch on %s: %w", nodeID, err)
+		}
+		return params.TalosClient.ApplyConfiguration(nodeCtx, merged, "staged")
+	}
+	step2Start := time.Now().UTC()
+	if len(stackNodeIPs) > 0 {
+		for _, nodeIP := range stackNodeIPs {
+			if err := applyStackKubelet(NodeContext(ctx, nodeIP), nodeIP); err != nil {
+				return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+					fmt.Sprintf("ApplyConfiguration (Kubernetes) to %s on %s: %v", kubeVersion, nodeIP, err)), nil
+			}
+		}
+	} else {
+		if err := applyStackKubelet(ctx, "node"); err != nil {
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("ApplyConfiguration (Kubernetes) to %s: %v", kubeVersion, err)), nil
+		}
 	}
 	steps = append(steps, runnerlib.StepResult{
 		Name: "kube-upgrade", Status: runnerlib.ResultSucceeded,

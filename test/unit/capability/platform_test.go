@@ -372,12 +372,16 @@ func TestKubeUpgrade_AppliesKubeletConfig(t *testing.T) {
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityKubeUpgrade)
 
+	// targetKubernetesVersion is stored without the "v" prefix in UpgradePolicy spec
+	// (mirrors TalosCluster.spec.kubernetesVersion). The handler must prepend "v" when
+	// building the kubelet image reference so the image is pullable from ghcr.io.
+	talos := &stubTalosClient{}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityKubeUpgrade,
 		ClusterRef: "ccs-test",
 		ExecuteClients: capability.ExecuteClients{
-			TalosClient:   &stubTalosClient{},
-			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "kubernetes", "", "v1.32.0")),
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "kubernetes", "", "1.32.0")),
 		},
 	})
 	if err != nil {
@@ -385,6 +389,39 @@ func TestKubeUpgrade_AppliesKubeletConfig(t *testing.T) {
 	}
 	if result.Status != runnerlib.ResultSucceeded {
 		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
+	}
+	if len(talos.applyConfigCalls) == 0 {
+		t.Fatal("expected ApplyConfiguration to be called")
+	}
+	applied := string(talos.applyConfigCalls[0].configBytes)
+	const wantImage = "ghcr.io/siderolabs/kubelet:v1.32.0"
+	if !strings.Contains(applied, wantImage) {
+		t.Errorf("applied config does not contain %q; got:\n%s", wantImage, applied)
+	}
+}
+
+func TestKubeUpgrade_GetMachineConfigErrorReturnsFailure(t *testing.T) {
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityKubeUpgrade)
+
+	talos := &stubTalosClient{getMachineConfigErr: fmt.Errorf("talos api timeout")}
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityKubeUpgrade,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "kubernetes", "", "1.32.0")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultFailed {
+		t.Errorf("expected ResultFailed; got %q", result.Status)
+	}
+	if result.FailureReason == nil || result.FailureReason.Category != runnerlib.ExecutionFailure {
+		t.Errorf("expected ExecutionFailure category; got %+v", result.FailureReason)
 	}
 }
 
@@ -409,13 +446,15 @@ func TestStackUpgrade_RunsBothUpgradeSteps(t *testing.T) {
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityStackUpgrade)
 
+	// targetKubernetesVersion without "v" prefix; handler must prepend "v" for the
+	// kubelet image. targetTalosVersion carries the "v" as Talos convention.
 	talos := &stubTalosClient{}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityStackUpgrade,
 		ClusterRef: "ccs-test",
 		ExecuteClients: capability.ExecuteClients{
 			TalosClient:   talos,
-			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "stack", "v1.12.0", "v1.32.0")),
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "stack", "v1.12.0", "1.32.0")),
 		},
 	})
 	if err != nil {
@@ -429,6 +468,15 @@ func TestStackUpgrade_RunsBothUpgradeSteps(t *testing.T) {
 	}
 	if len(result.Steps) < 2 {
 		t.Errorf("expected ≥2 steps; got %d", len(result.Steps))
+	}
+	// Verify the kubelet image in the applied config has the "v" prefix.
+	if len(talos.applyConfigCalls) == 0 {
+		t.Fatal("expected ApplyConfiguration to be called for kube step")
+	}
+	applied := string(talos.applyConfigCalls[0].configBytes)
+	const wantImage = "ghcr.io/siderolabs/kubelet:v1.32.0"
+	if !strings.Contains(applied, wantImage) {
+		t.Errorf("applied config does not contain %q; got:\n%s", wantImage, applied)
 	}
 }
 
