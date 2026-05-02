@@ -47,10 +47,16 @@ var (
 
 var _ = Describe("Conductor signing loop: PackInstance artifact storage", func() {
 	// All tests use mgmtClient (conductor role=management runs on ccs-mgmt).
+	// PackInstance name follows {basePackName}-{clusterName}: cert-manager-helm-{cluster}.
+	// Signed artifact Secret name: seam-pack-signed-{cluster}-{packInstanceName}.
 
-	It("signed artifact Secret seam-pack-signed-{tenant}-cert-manager exists in seam-tenant-{tenant}", func() {
+	certMgrSecretName := func() string {
+		return fmt.Sprintf("seam-pack-signed-%s-cert-manager-helm-%s", tenantClusterName, tenantClusterName)
+	}
+
+	It("signed artifact Secret seam-pack-signed-{tenant}-cert-manager-helm-{tenant} exists in seam-tenant-{tenant}", func() {
 		tenantNS := "seam-tenant-" + tenantClusterName
-		secretName := fmt.Sprintf("seam-pack-signed-%s-cert-manager", tenantClusterName)
+		secretName := certMgrSecretName()
 
 		By(fmt.Sprintf("polling for Secret %s/%s on %s", tenantNS, secretName, mgmtClient.Name))
 		Eventually(func() bool {
@@ -65,10 +71,9 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 
 	It("signed Secret carries data.artifact and data.signature", func() {
 		tenantNS := "seam-tenant-" + tenantClusterName
-		secretName := fmt.Sprintf("seam-pack-signed-%s-cert-manager", tenantClusterName)
 
 		secret, err := mgmtClient.Typed.CoreV1().Secrets(tenantNS).Get(
-			context.Background(), secretName, metav1.GetOptions{})
+			context.Background(), certMgrSecretName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		artifact, hasArtifact := secret.Data["artifact"]
@@ -82,10 +87,9 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 
 	It("data.artifact is valid base64-encoded JSON containing PackInstance fields", func() {
 		tenantNS := "seam-tenant-" + tenantClusterName
-		secretName := fmt.Sprintf("seam-pack-signed-%s-cert-manager", tenantClusterName)
 
 		secret, err := mgmtClient.Typed.CoreV1().Secrets(tenantNS).Get(
-			context.Background(), secretName, metav1.GetOptions{})
+			context.Background(), certMgrSecretName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		// Secret.Data is already decoded from base64 by the Kubernetes API.
@@ -105,10 +109,9 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 
 	It("data.signature is valid base64-encoded bytes (Ed25519 output is 64 bytes)", func() {
 		tenantNS := "seam-tenant-" + tenantClusterName
-		secretName := fmt.Sprintf("seam-pack-signed-%s-cert-manager", tenantClusterName)
 
 		secret, err := mgmtClient.Typed.CoreV1().Secrets(tenantNS).Get(
-			context.Background(), secretName, metav1.GetOptions{})
+			context.Background(), certMgrSecretName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		sigBytes := secret.Data["signature"]
@@ -127,10 +130,9 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 
 	It("signing loop is idempotent: signature does not change between reads", func() {
 		tenantNS := "seam-tenant-" + tenantClusterName
-		secretName := fmt.Sprintf("seam-pack-signed-%s-cert-manager", tenantClusterName)
 
 		secret1, err := mgmtClient.Typed.CoreV1().Secrets(tenantNS).Get(
-			context.Background(), secretName, metav1.GetOptions{})
+			context.Background(), certMgrSecretName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		sig1 := string(secret1.Data["signature"])
 
@@ -139,7 +141,7 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 		time.Sleep(65 * time.Second)
 
 		secret2, err := mgmtClient.Typed.CoreV1().Secrets(tenantNS).Get(
-			context.Background(), secretName, metav1.GetOptions{})
+			context.Background(), certMgrSecretName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		sig2 := string(secret2.Data["signature"])
 
@@ -149,26 +151,29 @@ var _ = Describe("Conductor signing loop: PackInstance artifact storage", func()
 })
 
 var _ = Describe("Conductor signing loop: ClusterPack annotation", func() {
-	It("cert-manager ClusterPack carries ontai.dev/pack-signature annotation", func() {
-		By(fmt.Sprintf("listing ClusterPacks on %s", mgmtClient.Name))
+	It("cert-manager-{tenantClusterName} ClusterPack carries ontai.dev/pack-signature annotation", func() {
+		tenantNS := "seam-tenant-" + tenantClusterName
+		cpName := "cert-manager-" + tenantClusterName
+		By(fmt.Sprintf("getting ClusterPack %s/%s on %s", tenantNS, cpName, mgmtClient.Name))
 
-		// ClusterPacks are cluster-scoped resources.
-		list, err := mgmtClient.Dynamic.Resource(clusterPackGVR).Namespace("").List(
-			context.Background(), metav1.ListOptions{})
+		// ClusterPacks are namespace-scoped under seam-tenant-{clusterName}.
+		list, err := mgmtClient.Dynamic.Resource(clusterPackGVR).
+			Namespace(tenantNS).List(context.Background(), metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		var found bool
 		for _, item := range list.Items {
-			if item.GetName() != "cert-manager" {
+			if item.GetName() != cpName {
 				continue
 			}
 			found = true
 			sig := item.GetAnnotations()[packSignatureAnnotation]
 			Expect(sig).NotTo(BeEmpty(),
-				"cert-manager ClusterPack must carry %s annotation (signing loop INV-026)",
-				packSignatureAnnotation)
+				"%s ClusterPack must carry %s annotation (signing loop INV-026)",
+				cpName, packSignatureAnnotation)
 		}
 		Expect(found).To(BeTrue(),
-			"cert-manager ClusterPack not found on management cluster — required for signing loop test")
+			"ClusterPack %s not found in %s on management cluster — required for signing loop test",
+			cpName, tenantNS)
 	})
 })

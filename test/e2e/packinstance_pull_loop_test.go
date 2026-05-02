@@ -8,7 +8,14 @@ package e2e_test
 //   - TENANT_KUBECONFIG set (ccs-dev, TENANT_CLUSTER_NAME=ccs-dev).
 //   - Conductor agent running in ont-system on ccs-dev with MGMT_KUBECONFIG_PATH set.
 //   - cert-manager deployed to ccs-dev via ClusterPack; signing loop on ccs-mgmt has
-//     written seam-pack-signed-ccs-dev-cert-manager into seam-tenant-ccs-dev.
+//     written seam-pack-signed-{tenantClusterName}-cert-manager-helm-{tenantClusterName}
+//     into seam-tenant-{tenantClusterName}.
+//
+// PackReceipt naming:
+//   - Wrapper writePackReceipt() writes: cert-manager-{clusterName} (has deployedResources,
+//     no verified status).
+//   - PackInstancePullLoop writes: cert-manager-helm-{clusterName} (verified=true, from
+//     signed PackInstance artifact Secret).
 //
 // What this test verifies (conductor-schema.md §6, INV-026):
 //   - Tenant conductor pull loop discovers signed artifact Secrets on ccs-mgmt.
@@ -45,25 +52,30 @@ var _ = Describe("Conductor role=agent: PackInstance pull loop", func() {
 		}
 	})
 
-	It("PackReceipt cert-manager exists in ont-system on tenant cluster", func() {
-		By(fmt.Sprintf("polling for InfrastructurePackReceipt cert-manager in ont-system on %s",
-			tenantClient.Name))
+	// pullReceiptName is the PackReceipt written by the PackInstancePullLoop from the
+	// signed artifact Secret. Named after the PackInstance: cert-manager-helm-{cluster}.
+	pullReceiptName := func() string { return "cert-manager-helm-" + tenantClusterName }
+
+	It("PackReceipt cert-manager-helm-{tenantClusterName} exists in ont-system on tenant cluster", func() {
+		name := pullReceiptName()
+		By(fmt.Sprintf("polling for InfrastructurePackReceipt %s in ont-system on %s",
+			name, tenantClient.Name))
 
 		Eventually(func() bool {
 			_, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 				Namespace("ont-system").
-				Get(context.Background(), "cert-manager", metav1.GetOptions{})
+				Get(context.Background(), name, metav1.GetOptions{})
 			return err == nil
 		}, packReceiptPollTimeout, packReceiptPollInterval).Should(BeTrue(),
-			"PackInstance pull loop did not create PackReceipt cert-manager in ont-system within %s; "+
+			"PackInstance pull loop did not create PackReceipt %s in ont-system within %s; "+
 				"ensure conductor agent running with MGMT_KUBECONFIG_PATH and signing Secret exists on ccs-mgmt",
-			packReceiptPollTimeout)
+			name, packReceiptPollTimeout)
 	})
 
-	It("PackReceipt cert-manager has verified=true", func() {
+	It("PackReceipt has verified=true", func() {
 		receipt, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 			Namespace("ont-system").
-			Get(context.Background(), "cert-manager", metav1.GetOptions{})
+			Get(context.Background(), pullReceiptName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		status, _ := receipt.Object["status"].(map[string]interface{})
@@ -74,10 +86,10 @@ var _ = Describe("Conductor role=agent: PackInstance pull loop", func() {
 			"PackReceipt must have verified=true after conductor validates Ed25519 signature (INV-026)")
 	})
 
-	It("PackReceipt cert-manager has non-empty clusterPackRef", func() {
+	It("PackReceipt has non-empty clusterPackRef", func() {
 		receipt, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 			Namespace("ont-system").
-			Get(context.Background(), "cert-manager", metav1.GetOptions{})
+			Get(context.Background(), pullReceiptName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		spec, _ := receipt.Object["spec"].(map[string]interface{})
@@ -90,7 +102,7 @@ var _ = Describe("Conductor role=agent: PackInstance pull loop", func() {
 	It("PackReceipt verificationFailedReason is empty when verified=true", func() {
 		receipt, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 			Namespace("ont-system").
-			Get(context.Background(), "cert-manager", metav1.GetOptions{})
+			Get(context.Background(), pullReceiptName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		status, _ := receipt.Object["status"].(map[string]interface{})
@@ -102,7 +114,7 @@ var _ = Describe("Conductor role=agent: PackInstance pull loop", func() {
 	It("PackReceipt is idempotent: second read after pull interval shows same verified=true", func() {
 		receipt1, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 			Namespace("ont-system").
-			Get(context.Background(), "cert-manager", metav1.GetOptions{})
+			Get(context.Background(), pullReceiptName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		status1, _ := receipt1.Object["status"].(map[string]interface{})
@@ -113,7 +125,7 @@ var _ = Describe("Conductor role=agent: PackInstance pull loop", func() {
 
 		receipt2, err := tenantClient.Dynamic.Resource(packReceiptGVR).
 			Namespace("ont-system").
-			Get(context.Background(), "cert-manager", metav1.GetOptions{})
+			Get(context.Background(), pullReceiptName(), metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		status2, _ := receipt2.Object["status"].(map[string]interface{})

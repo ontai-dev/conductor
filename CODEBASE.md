@@ -118,7 +118,7 @@ Single-active-revision pattern (Decision E): lists all PORs for `packExecutionRe
 | `test/unit/kernel` | Role/mode init, sequencer, execute mode |
 | `test/unit/persistence` | Single-active-revision, superseded label, pruning at max 10 |
 | `test/unit/runnerlib` | CapabilityManifest, jobspec, generators |
-| `test/e2e` | 8 stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs |
+| `test/e2e` | 11 spec files (68 specs total); all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs. New in session/16: `rbacprofile_rbacpolicy_pull_loop_test.go` (T-17: RBACProfilePullLoop + RBACPolicyPullLoop), `clusterpack_version_cleanup_test.go` (CLUSTERPACK-BL-VERSION-CLEANUP invariants), `drift_injection_test.go` (Decision H full drift injection cycle), `cnpg_audit_sweep_test.go` (guardian CNPG audit_events sweep) |
 | `test/integration` | RunnerConfig generation |
 
 ---

@@ -33,6 +33,10 @@ import (
 const (
 	snapshotLoopPollTimeout  = 2 * time.Minute
 	snapshotLoopPollInterval = 5 * time.Second
+
+	// mgmtSignatureAnnotation is the annotation key written by the management conductor
+	// signing loop on PermissionSnapshot CRs (INV-026).
+	mgmtSignatureAnnotation = "infrastructure.ontai.dev/management-signature"
 )
 
 var _ = Describe("Conductor role=agent: SnapshotPullLoop", func() {
@@ -55,10 +59,10 @@ var _ = Describe("Conductor role=agent: SnapshotPullLoop", func() {
 				continue
 			}
 			found = true
-			sig := item.GetAnnotations()["ontai.dev/pack-signature"]
+			sig := item.GetAnnotations()[mgmtSignatureAnnotation]
 			Expect(sig).NotTo(BeEmpty(),
-				"PermissionSnapshot %s must carry ontai.dev/pack-signature before SnapshotPullLoop can verify it",
-				snapshotName)
+				"PermissionSnapshot %s must carry %s before SnapshotPullLoop can verify it",
+				snapshotName, mgmtSignatureAnnotation)
 		}
 		Expect(found).To(BeTrue(),
 			"PermissionSnapshot %s not found on management cluster — signing loop must run first",
