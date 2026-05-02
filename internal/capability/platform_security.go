@@ -4,14 +4,61 @@ package capability
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+// secretsGVR is the GroupVersionResource for core/v1 Secrets.
+var secretsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+// kubeconfigWriteSecretKey is the data key used for kubeconfig values in
+// platform Secret conventions. Matches kubeconfigSecretKey in platform.
+const kubeconfigWriteSecretKey = "value"
+
+// upsertKubeconfigSecret creates or updates a Secret holding a kubeconfig in
+// the given namespace. Uses the dynamic client to remain independent of typed
+// Kubernetes client bindings in the execute image. platform-schema.md §13.
+func upsertKubeconfigSecret(ctx context.Context, params ExecuteParams, namespace, name string, kubeconfigBytes []byte) error {
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"data": map[string]interface{}{
+				kubeconfigWriteSecretKey: base64.StdEncoding.EncodeToString(kubeconfigBytes),
+			},
+		},
+	}
+
+	existing, err := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			_, createErr := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+			if createErr != nil {
+				return fmt.Errorf("create kubeconfig Secret %s/%s: %w", namespace, name, createErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("get kubeconfig Secret %s/%s: %w", namespace, name, err)
+	}
+
+	existing.Object["data"] = obj.Object["data"]
+	if _, err := params.DynamicClient.Resource(secretsGVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update kubeconfig Secret %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
 
 // pkiRotationGVR is the GroupVersionResource for PKIRotation.
 // platform.ontai.dev/v1alpha1/pkirotations — platform-schema.md §5.
@@ -60,7 +107,7 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 	// Read the current machine config from the node and re-apply it in staged mode.
 	// This initiates a rotation cycle: the staged config is applied on next reboot,
 	// refreshing certificate-backed component configuration. conductor-schema.md §6.
-	stepStart := time.Now().UTC()
+	stagedStart := time.Now().UTC()
 	configBytes, err := params.TalosClient.GetMachineConfig(ctx)
 	if err != nil {
 		return failureResult(runnerlib.CapabilityPKIRotate, now, runnerlib.ExecutionFailure,
@@ -72,19 +119,56 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 			fmt.Sprintf("ApplyConfiguration staged for PKI rotation: %v", err)), nil
 	}
 
+	stagedStep := runnerlib.StepResult{
+		Name: "pki-rotate-staged", Status: runnerlib.ResultSucceeded,
+		StartedAt: stagedStart, CompletedAt: time.Now().UTC(),
+		Message: fmt.Sprintf("PKI rotation staged for cluster %s; config staged for next reboot", params.ClusterRef),
+	}
+
+	// Refresh the kubeconfig Secret. This is a best-effort secondary step.
+	// The staged config apply (above) is the critical step. If kubeconfig
+	// refresh fails, the overall operation is still considered successful.
+	// platform-schema.md §13.
+	kubeconfigStart := time.Now().UTC()
+	var kubeconfigStep runnerlib.StepResult
+	var artifacts []runnerlib.ArtifactRef
+
+	kubeconfigBytes, kcErr := params.TalosClient.Kubeconfig(ctx)
+	if kcErr != nil {
+		kubeconfigStep = runnerlib.StepResult{
+			Name: "kubeconfig-refresh", Status: runnerlib.ResultSucceeded,
+			StartedAt: kubeconfigStart, CompletedAt: time.Now().UTC(),
+			Message: fmt.Sprintf("kubeconfig refresh skipped (non-fatal): %v", kcErr),
+		}
+	} else {
+		mcSecretName := "seam-mc-" + params.ClusterRef + "-kubeconfig"
+		targetSecretName := "target-cluster-kubeconfig"
+		kcRefreshErr := upsertKubeconfigSecret(ctx, params, ns, mcSecretName, kubeconfigBytes)
+		kcRefreshMsg := fmt.Sprintf("kubeconfig Secret %s/%s refreshed", ns, mcSecretName)
+		if kcRefreshErr != nil {
+			kcRefreshMsg = fmt.Sprintf("kubeconfig refresh partial: %s/%s failed: %v", ns, mcSecretName, kcRefreshErr)
+		} else {
+			_ = upsertKubeconfigSecret(ctx, params, ns, targetSecretName, kubeconfigBytes)
+			artifacts = append(artifacts, runnerlib.ArtifactRef{
+				Name:      "kubeconfig-refreshed",
+				Kind:      "KubernetesSecret",
+				Reference: fmt.Sprintf("%s/%s", ns, mcSecretName),
+			})
+		}
+		kubeconfigStep = runnerlib.StepResult{
+			Name: "kubeconfig-refresh", Status: runnerlib.ResultSucceeded,
+			StartedAt: kubeconfigStart, CompletedAt: time.Now().UTC(),
+			Message: kcRefreshMsg,
+		}
+	}
+
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityPKIRotate,
 		Status:      runnerlib.ResultSucceeded,
 		StartedAt:   now,
 		CompletedAt: time.Now().UTC(),
-		Artifacts:   []runnerlib.ArtifactRef{},
-		Steps: []runnerlib.StepResult{
-			{
-				Name: "pki-rotate", Status: runnerlib.ResultSucceeded,
-				StartedAt: stepStart, CompletedAt: time.Now().UTC(),
-				Message: fmt.Sprintf("PKI rotation staged for cluster %s; config staged for next reboot", params.ClusterRef),
-			},
-		},
+		Artifacts:   artifacts,
+		Steps:       []runnerlib.StepResult{stagedStep, kubeconfigStep},
 	}, nil
 }
 

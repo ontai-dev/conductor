@@ -305,6 +305,18 @@ func (a *TalosClientAdapter) GetMachineConfig(ctx context.Context) ([]byte, erro
 	return data, nil
 }
 
+// Kubeconfig generates a fresh admin kubeconfig from the cluster Talos API.
+// Returns raw kubeconfig YAML bytes signed by the cluster Kubernetes CA.
+// Used by pkiRotateHandler to refresh the stored kubeconfig Secret after a
+// PKI rotation cycle. platform-schema.md §13.
+func (a *TalosClientAdapter) Kubeconfig(ctx context.Context) ([]byte, error) {
+	b, err := a.inner.Kubeconfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Kubeconfig: %w", err)
+	}
+	return b, nil
+}
+
 // Close releases the underlying gRPC connection.
 func (a *TalosClientAdapter) Close() error {
 	return a.inner.Close()

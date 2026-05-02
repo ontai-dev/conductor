@@ -109,6 +109,8 @@ type stubTalosClient struct {
 	etcdDefragErr         error
 	getMachineConfigErr   error
 	getMachineConfigBytes []byte
+	kubeconfigErr         error
+	kubeconfigBytes       []byte
 	bootstrapCalled       bool
 	upgradeCalled         bool
 	rebootCalled          bool
@@ -147,6 +149,9 @@ func (s *stubTalosClient) EtcdDefragment(_ context.Context) error {
 }
 func (s *stubTalosClient) GetMachineConfig(_ context.Context) ([]byte, error) {
 	return s.getMachineConfigBytes, s.getMachineConfigErr
+}
+func (s *stubTalosClient) Kubeconfig(_ context.Context) ([]byte, error) {
+	return s.kubeconfigBytes, s.kubeconfigErr
 }
 func (s *stubTalosClient) Close() error { return nil }
 

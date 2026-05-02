@@ -55,6 +55,7 @@ Conductor is three binaries from one repo (Decision 12). The **compiler** (`cmd/
 | `etcdBackupHandler` | `etcd-backup` | Lists EtcdMaintenance CRs in `seam-tenant-{cluster}`, reads `spec.s3Destination.bucket/key`, calls `TalosClient.EtcdSnapshot` into a `bytes.Buffer`, wraps with `bytes.NewReader(buf.Bytes())` (seekable) before calling `StorageClient.Upload`. Seekable wrapper is required for MinIO/Scality over HTTP -- AWS SDK v2 cannot compute checksums on unseekable streams without TLS. |
 | `etcdDefragHandler` | `etcd-defrag` | Calls `TalosClient.EtcdDefragment`. |
 | `etcdRestoreHandler` | `etcd-restore` | Lists EtcdMaintenance CRs, reads `spec.s3SnapshotPath`, downloads snapshot via `StorageClient.Download`, calls `TalosClient.EtcdRecover`. |
+| `pkiRotateHandler` | `pki-rotate` | Lists PKIRotation CRs to verify trigger exists. Calls `TalosClient.GetMachineConfig` then `TalosClient.ApplyConfiguration` in staged mode to initiate rotation cycle. Then calls `TalosClient.Kubeconfig` (new) to generate fresh kubeconfig and writes it to `seam-mc-{cluster}-kubeconfig` and `target-cluster-kubeconfig` in `seam-tenant-{cluster}` via dynamic client. Kubeconfig refresh is best-effort: failure is logged but does not fail the overall operation. platform-schema.md §13. |
 
 `tenantNamespace(clusterRef string) string` -- returns `seam-tenant-{clusterRef}`.
 

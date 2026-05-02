@@ -47,6 +47,13 @@ type TalosNodeClient interface {
 	// /system/state/config.yaml on the node.
 	GetMachineConfig(ctx context.Context) ([]byte, error)
 
+	// Kubeconfig generates a fresh admin kubeconfig from the cluster and returns
+	// the raw YAML bytes. The generated kubeconfig has a new certificate signed by
+	// the cluster Kubernetes CA with a fresh expiry (typically 1 year).
+	// Used by pkiRotateHandler to refresh the stored kubeconfig Secret after a
+	// PKI rotation cycle. platform-schema.md §13.
+	Kubeconfig(ctx context.Context) ([]byte, error)
+
 	// Close releases the underlying gRPC connection.
 	Close() error
 }
