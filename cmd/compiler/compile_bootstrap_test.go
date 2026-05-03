@@ -14,12 +14,14 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// bootstrapInputYAML is a minimal valid management cluster bootstrap input.
-// Uses a real (but minimal) Talos version string for version contract parsing.
+// bootstrapInputYAML is a minimal valid tenant cluster bootstrap input used
+// for compiler output structure tests. Uses a real (but minimal) Talos version
+// string for version contract parsing.
 const bootstrapInputYAML = `
 name: ccs-mgmt
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -201,6 +203,7 @@ func TestBootstrap_SecretNamingConvention(t *testing.T) {
 func TestBootstrap_MissingBootstrapSectionFails(t *testing.T) {
 	inputYAML := `name: ccs-mgmt
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 `
@@ -216,6 +219,7 @@ capi:
 func TestBootstrap_MissingControlPlaneEndpointFails(t *testing.T) {
 	inputYAML := `name: ccs-mgmt
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -238,6 +242,7 @@ bootstrap:
 func TestBootstrap_MultipleInitNodesFails(t *testing.T) {
 	inputYAML := `name: ccs-mgmt
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -266,6 +271,7 @@ bootstrap:
 func TestBootstrap_InvalidRoleFails(t *testing.T) {
 	inputYAML := `name: ccs-mgmt
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -292,6 +298,7 @@ bootstrap:
 func TestBootstrap_DefaultInstallerImageApplied(t *testing.T) {
 	inputYAML := `name: ccs-mgmt
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -325,6 +332,7 @@ bootstrap:
 func TestBootstrap_MissingNameFieldYieldsDescriptiveError(t *testing.T) {
 	const input = `
 mode: bootstrap
+role: tenant
 bootstrap:
   controlPlaneEndpoint: 10.20.0.10
   talosVersion: v1.7.0

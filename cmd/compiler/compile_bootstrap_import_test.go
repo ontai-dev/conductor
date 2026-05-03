@@ -24,6 +24,7 @@ func generateMachineConfigFile(t *testing.T, clusterName, hostname string) strin
 name: %s
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -255,6 +256,7 @@ func TestBootstrap_BootstrapMode_DoesNotEmitSeamTenantNamespaceManifest(t *testi
 name: fresh-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -444,14 +446,16 @@ capi:
 	}
 }
 
-// TestBootstrap_BootstrapCAPIFalse_NoRoleEmitted verifies that compileBootstrap
-// with mode=bootstrap and capi.enabled=false does not emit a role field in the
-// TalosCluster CR. Role is implicit on all bootstrap paths.
-func TestBootstrap_BootstrapCAPIFalse_NoRoleEmitted(t *testing.T) {
+// TestBootstrap_BootstrapTenantCAPIFalse_RoleTenantEmitted verifies that compileBootstrap
+// with mode=bootstrap and role=tenant emits role: tenant in the TalosCluster CR.
+// mode=bootstrap is only permitted for tenant clusters (management clusters must use
+// mode=import per the management bootstrap guard in readClusterInput).
+func TestBootstrap_BootstrapTenantCAPIFalse_RoleTenantEmitted(t *testing.T) {
 	input := `
-name: mgmt-cluster
+name: tenant-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -469,23 +473,23 @@ bootstrap:
 	if err := compileBootstrap(inputPath, outDir, "", ""); err != nil {
 		t.Fatalf("compileBootstrap error: %v", err)
 	}
-	crData, err := os.ReadFile(filepath.Join(outDir, "mgmt-cluster.yaml"))
+	crData, err := os.ReadFile(filepath.Join(outDir, "tenant-cluster.yaml"))
 	if err != nil {
 		t.Fatalf("TalosCluster CR not found: %v", err)
 	}
-	content := string(crData)
-	if containsStr(content, "role:") {
-		t.Errorf("TalosCluster CR must not contain role field on mode=bootstrap path; got:\n%s", content)
-	}
+	assertContainsStr(t, string(crData), "role: tenant")
 }
 
-// TestBootstrap_BootstrapCAPITrue_NoRoleEmitted verifies that compileBootstrap
-// with mode=bootstrap and capi.enabled=true does not emit a role field.
-func TestBootstrap_BootstrapCAPITrue_NoRoleEmitted(t *testing.T) {
+// TestBootstrap_BootstrapCAPITrue_RoleTenantEmitted verifies that compileBootstrap
+// with mode=bootstrap, role=tenant, and capi.enabled=true emits role: tenant in
+// the TalosCluster CR. The role=tenant input is required because mode=bootstrap
+// is blocked for role=management (management clusters must use mode=import).
+func TestBootstrap_BootstrapCAPITrue_RoleTenantEmitted(t *testing.T) {
 	input := `
 name: tenant-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: true
   talosVersion: "v1.7.0"
@@ -510,9 +514,7 @@ bootstrap:
 	if err != nil {
 		t.Fatalf("TalosCluster CR not found: %v", err)
 	}
-	if containsStr(string(crData), "role:") {
-		t.Errorf("TalosCluster CR must not contain role field on mode=bootstrap capi=true path")
-	}
+	assertContainsStr(t, string(crData), "role: tenant")
 }
 
 // TestBootstrap_ImportManagement_RoleEmitted verifies that compileBootstrap
@@ -585,4 +587,100 @@ bootstrap:
 		t.Fatalf("TalosCluster CR not found: %v", err)
 	}
 	assertContainsStr(t, string(crData), "role: tenant")
+}
+
+// ── T-MGMT-BOOTSTRAP-GUARD: management cluster bootstrap guard ───────────────
+
+// TestReadClusterInput_BootstrapManagementRoleRejected verifies that
+// readClusterInput rejects mode=bootstrap with role=management, since the
+// management cluster cannot be bootstrapped via the compiler.
+// Management clusters must use mode=import. The compiler guard prevents
+// accidentally generating fresh PKI for a cluster that must be imported.
+func TestReadClusterInput_BootstrapManagementRoleRejected(t *testing.T) {
+	input := `
+name: ccs-mgmt
+namespace: seam-system
+mode: bootstrap
+role: management
+capi:
+  enabled: false
+bootstrap:
+  controlPlaneEndpoint: "https://10.20.0.10:6443"
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.20.0.11"
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	_, err := readClusterInput(inputPath)
+	if err == nil {
+		t.Fatal("expected error for mode=bootstrap role=management; got nil")
+	}
+	if !containsStr(err.Error(), "mode=import") {
+		t.Errorf("error should mention mode=import as the correct alternative; got: %v", err)
+	}
+}
+
+// TestReadClusterInput_BootstrapEmptyRoleRejected verifies that
+// readClusterInput rejects mode=bootstrap with an absent role field.
+// An absent role defaults to management, which cannot be bootstrapped.
+func TestReadClusterInput_BootstrapEmptyRoleRejected(t *testing.T) {
+	input := `
+name: ccs-mgmt
+namespace: seam-system
+mode: bootstrap
+capi:
+  enabled: false
+bootstrap:
+  controlPlaneEndpoint: "https://10.20.0.10:6443"
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.20.0.11"
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	_, err := readClusterInput(inputPath)
+	if err == nil {
+		t.Fatal("expected error for mode=bootstrap with absent role (defaults to management); got nil")
+	}
+	if !containsStr(err.Error(), "mode=import") {
+		t.Errorf("error should mention mode=import as the correct alternative; got: %v", err)
+	}
+}
+
+// TestReadClusterInput_BootstrapTenantRoleAccepted verifies that
+// readClusterInput accepts mode=bootstrap with role=tenant.
+// Tenant clusters may be bootstrapped via the compiler.
+func TestReadClusterInput_BootstrapTenantRoleAccepted(t *testing.T) {
+	input := `
+name: tenant-cluster
+namespace: seam-system
+mode: bootstrap
+role: tenant
+capi:
+  enabled: false
+bootstrap:
+  controlPlaneEndpoint: "https://10.0.0.10:6443"
+  talosVersion: "v1.9.3"
+  kubernetesVersion: "1.32.3"
+  installDisk: "/dev/sda"
+  nodes:
+    - hostname: cp1
+      ip: "10.0.0.1"
+      role: init
+`
+	inputPath := writeInputFile(t, input)
+	in, err := readClusterInput(inputPath)
+	if err != nil {
+		t.Fatalf("unexpected error for mode=bootstrap role=tenant: %v", err)
+	}
+	if in.Role != "tenant" {
+		t.Errorf("expected role=tenant; got %q", in.Role)
+	}
 }
