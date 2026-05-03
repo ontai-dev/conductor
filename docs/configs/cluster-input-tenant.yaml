@@ -20,6 +20,18 @@ capi:
 
 importExistingCluster: true
 
+# machineConfigPaths maps each node hostname to the local path of that node's
+# raw Talos machine config YAML file. Required when importExistingCluster=true
+# for clusters bootstrapped before Seam (no seam-mc Secrets in management cluster).
+# The init node entry is required for CA extraction; derived configs are reused
+# for all other nodes in this run.
+machineConfigPaths:
+  tenant-cp1: /path/to/tenant-cp1-machineconfig.yaml
+  tenant-cp2: /path/to/tenant-cp2-machineconfig.yaml
+  tenant-cp3: /path/to/tenant-cp3-machineconfig.yaml
+  tenant-w1:  /path/to/tenant-w1-machineconfig.yaml
+  tenant-w2:  /path/to/tenant-w2-machineconfig.yaml
+
 bootstrap:
   # controlPlaneEndpoint: stable VIP or load-balancer address for the kube-apiserver.
   # Required for mode=import when machineConfigPaths is not provided.
@@ -34,8 +46,26 @@ bootstrap:
   # UpgradePolicy automatically when out-of-band k8s upgrades are detected.
   kubernetesVersion: "1.32.3"
 
-# No machineConfigPaths for a tenant-only import.
+  nodes:
+    - hostname: tenant-cp1
+      ip: "10.1.0.11"
+      role: init
+    - hostname: tenant-cp2
+      ip: "10.1.0.12"
+      role: controlplane
+    - hostname: tenant-cp3
+      ip: "10.1.0.13"
+      role: controlplane
+    - hostname: tenant-w1
+      ip: "10.1.0.14"
+      role: worker
+    - hostname: tenant-w2
+      ip: "10.1.0.15"
+      role: worker
+
 # The compiler emits:
-#   tenant.yaml                      -- InfrastructureTalosCluster CR (apply to management)
-#   seam-tenant-tenant.yaml          -- namespace manifest (apply to management)
-#   bootstrap-sequence.yaml          -- ordered apply sequence
+#   tenant.yaml                             -- InfrastructureTalosCluster CR (apply to management)
+#   seam-tenant-tenant.yaml                 -- namespace manifest (apply to management)
+#   seam-mc-tenant-{hostname}.yaml          -- machine config Secret per node (apply to management)
+#   seam-mc-tenant-talosconfig.yaml         -- talosconfig Secret (apply to management)
+#   bootstrap-sequence.yaml                 -- ordered apply sequence

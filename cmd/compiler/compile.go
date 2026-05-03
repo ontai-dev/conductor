@@ -641,6 +641,9 @@ func readClusterInput(path string) (ClusterInput, error) {
 	if in.Mode == "import" && in.Role != "" && in.Role != "management" && in.Role != "tenant" {
 		return ClusterInput{}, fmt.Errorf("input file %q: mode=import role must be \"management\" or \"tenant\", got %q", path, in.Role)
 	}
+	if in.Mode == "bootstrap" && (in.Role == "" || in.Role == "management") {
+		return ClusterInput{}, fmt.Errorf("input file %q: management cluster cannot be bootstrapped via compiler (mode=bootstrap is not supported for role=management); use mode=import", path)
+	}
 	return in, nil
 }
 

@@ -10,11 +10,12 @@ import (
 	"testing"
 )
 
-// baseBootstrapYAML is a one-node bootstrap input for feature tests.
+// baseBootstrapYAML is a one-node tenant cluster bootstrap input for feature tests.
 const baseBootstrapYAML = `
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -39,6 +40,7 @@ func TestBootstrap_CiliumPrerequisitesInjectsModulesAndSysctls(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 ciliumPrerequisites: true
@@ -108,6 +110,7 @@ func TestBootstrap_RegistryMirrorsInjected(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 registryMirrors:
@@ -154,6 +157,7 @@ func TestBootstrap_RegistryMirrorsAppliedToAllNodes(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 registryMirrors:
@@ -200,6 +204,7 @@ func TestBootstrap_PatchAppliedToAllNodes(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 patches:
@@ -245,6 +250,7 @@ func TestBootstrap_MultiplePatchesAppliedInOrder(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 patches:
@@ -290,6 +296,7 @@ func TestBootstrap_CiliumAndRegistryMirrorsAndPatches(t *testing.T) {
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 ciliumPrerequisites: true
@@ -575,6 +582,7 @@ func TestBootstrap_KubernetesVersionDerivedFromTalosVersion(t *testing.T) {
 name: derived-k8s
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -646,6 +654,7 @@ func TestBootstrap_EndpointRequiredWhenNoMachineConfigPaths(t *testing.T) {
 name: missing-ep
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 bootstrap:
@@ -672,6 +681,7 @@ func TestBootstrap_ImportExistingCluster_MissingKubeconfigReturnsError(t *testin
 name: test-cluster
 namespace: seam-system
 mode: bootstrap
+role: tenant
 capi:
   enabled: false
 importExistingCluster: true
