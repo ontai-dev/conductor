@@ -63,6 +63,32 @@ Export the registry address once and reuse it across all compile and push comman
 export IMAGE_REGISTRY=10.0.0.1:5000/ontai-dev
 ```
 
+**Authentication for secured registries:**
+
+The Compiler reads `~/.docker/config.json` to resolve credentials when pushing OCI pack artifacts. On Ubuntu systems with snap-installed Docker the config lives at `~/snap/docker/current/.docker/config.json` instead -- the Compiler checks both paths automatically.
+
+To populate credentials for a registry that requires authentication:
+
+```
+docker login your-registry.example.com
+# Prompts for username and password.
+# Writes the encoded credential to ~/.docker/config.json.
+```
+
+The config format the Compiler reads is:
+
+```
+{
+  "auths": {
+    "your-registry.example.com": {
+      "auth": "<base64-encoded user:password>"
+    }
+  }
+}
+```
+
+If the Compiler returns HTTP 401 or 403 when pushing a pack layer, the error message will include `check registry auth if 401/403`. Run `docker login` for the registry and retry. Unauthenticated registries on `10.x` and `localhost` addresses use plain HTTP without credentials -- no login required for lab setups.
+
 ### 1.3 Build the Compiler binary
 
 The Compiler is a stateless offline tool. It reads YAML input files and emits Kubernetes CR YAML. It never connects to any cluster.
@@ -110,6 +136,14 @@ The management cluster runs all five ONT operators and holds the authoritative g
 
 Edit `docs/configs/cluster-input-management.yaml` to match your cluster. The cluster name must be short, DNS-label-safe, and unique across your ONT deployment.
 
+**Management clusters must always use `mode: import`.** The Compiler rejects `mode: bootstrap` combined with `role: management` or an absent role (management is the default). If you pass a management cluster input file with `mode: bootstrap`, the Compiler returns:
+
+```
+input file "cluster-input-management.yaml": management cluster cannot be bootstrapped via compiler (mode=bootstrap is not supported for role=management); use mode=import
+```
+
+Compile:
+
 ```
 ./compiler bootstrap \
   --input  docs/configs/cluster-input-management.yaml \
@@ -120,9 +154,10 @@ Inspect the output before applying:
 
 ```
 ls ./out/management/
-# management.yaml                     InfrastructureTalosCluster CR
-# seam-mc-management-{node}.yaml x N  Talos machine config Secrets (one per node)
-# bootstrap-sequence.yaml             Ordered apply sequence
+# management.yaml                        InfrastructureTalosCluster CR
+# seam-mc-management-{node}.yaml x N     Talos machine config Secrets (one per node)
+# seam-mc-management-talosconfig.yaml    talosconfig Secret
+# bootstrap-sequence.yaml                Ordered apply sequence
 ```
 
 ### 2.2 Apply the output to the management cluster
@@ -196,7 +231,7 @@ ONT uses two independent fields on `InfrastructureTalosCluster`:
 
 **`spec.mode`**: How the cluster was created.
 - `import` -- the cluster already exists; ONT assumes governance of a running cluster.
-- `bootstrap` -- ONT provisions the cluster from bare metal (deferred for alpha).
+- `bootstrap` -- ONT provisions the cluster from bare metal (deferred for alpha tenant clusters).
 
 When `mode=import` and the cluster is deleted from seam-system, the management relationship is severed and governance stops. The cluster continues to run -- no nodes are destroyed. This is the "divorce" path, not a destruction.
 
@@ -204,11 +239,30 @@ When `mode=import` and the cluster is deleted from seam-system, the management r
 - `management` -- runs the full operator stack; holds authoritative governance state.
 - `tenant` -- governed by a management cluster; runs only the Conductor agent in tenant role.
 
-These two fields are independent. A cluster with `mode=import, role=tenant` is an existing cluster that is being brought under ONT governance. A cluster with `mode=bootstrap, role=tenant` would be a new cluster spun up by the Platform operator (deferred for alpha).
+These two fields are independent. A cluster with `mode=import, role=tenant` is an existing cluster being brought under ONT governance. A cluster with `mode=bootstrap, role=tenant` would be a new cluster provisioned by the Platform operator (deferred for alpha).
+
+**Hard constraint enforced by the Compiler:** `mode=bootstrap` is never valid for `role=management`. Management clusters are always imported from an existing, running cluster. The Compiler returns an error immediately if you attempt to bootstrap a management cluster. Management cluster lifecycle (`mode=bootstrap`) is permanently deferred -- management clusters are by definition pre-existing.
+
+**Deletion semantics:**
+- `mode=import`: deleting the `InfrastructureTalosCluster` CR severs governance only. The cluster continues to run.
+- `mode=bootstrap`: deleting the CR triggers full decommission. The cluster is destroyed.
 
 ### 3.2 Compile the tenant cluster manifests
 
-Edit `docs/configs/cluster-input-tenant.yaml` for your tenant cluster:
+Edit `docs/configs/cluster-input-tenant.yaml` for your tenant cluster.
+
+**Machine config files are required for tenant imports.** When importing an existing cluster that was bootstrapped independently (without ONT), the Compiler needs the raw Talos machine config for each node so it can extract the CA and generate the per-node `seam-mc-*` Secrets. Set `machineConfigPaths` in the input file:
+
+```
+machineConfigPaths:
+  tenant-cp1: /path/to/tenant-cp1-machineconfig.yaml
+  tenant-cp2: /path/to/tenant-cp2-machineconfig.yaml
+  tenant-cp3: /path/to/tenant-cp3-machineconfig.yaml
+```
+
+The keys are node hostnames and must match the `nodes[].hostname` entries exactly. The `init` node entry is required (CA extraction is performed from its machine config). If the cluster was originally bootstrapped by ONT, the Compiler reads machine configs from the `seam-mc-*` Secrets already in the management cluster -- `machineConfigPaths` is not needed in that case.
+
+Compile:
 
 ```
 ./compiler bootstrap \
@@ -219,10 +273,14 @@ Edit `docs/configs/cluster-input-tenant.yaml` for your tenant cluster:
 Output:
 ```
 ls ./out/tenant/
-# tenant.yaml               InfrastructureTalosCluster CR
-# seam-tenant-tenant.yaml   Namespace manifest
-# bootstrap-sequence.yaml   Ordered apply sequence
+# tenant.yaml                              InfrastructureTalosCluster CR
+# seam-tenant-tenant.yaml                  Namespace manifest
+# seam-mc-tenant-{hostname}.yaml x N       Machine config Secrets (one per node)
+# seam-mc-tenant-talosconfig.yaml          talosconfig Secret
+# bootstrap-sequence.yaml                  Ordered apply sequence
 ```
+
+The machine config Secrets and talosconfig Secret are applied to the **management cluster**. The Platform operator reads them to communicate with the tenant cluster via the Talos API for day2 operations.
 
 ### 3.3 Apply to the management cluster
 
@@ -597,7 +655,7 @@ ONT uses annotations on CRs to communicate intent and trigger operations. This t
 - **Ownership annotations** (`rbac-owner`): durable labels that declare a resource's controlling principal.
 - **Mode annotations** (`rbac-enforcement-mode`, `webhook-mode`): control how a controller or webhook behaves against a given resource or namespace.
 - **Retry annotations** (`retry-ts`): manual nudges for stuck reconciliation cycles.
-- **Lineage annotations**: the `InfrastructureLineageController` writes governance annotations on root declaration CRs once the `LineageSynced` condition transitions to `True`. During alpha, `LineageSynced=False/LineageControllerAbsent` is the expected steady-state -- operators function normally regardless.
+- **Lineage annotations**: the `InfrastructureLineageController` writes governance annotations on root declaration CRs once the `LineageSynced` condition transitions to `True`. The controller runs within seam-core and covers all 9 root-declaration GVKs across `infrastructure.ontai.dev` and `security.ontai.dev`. `LineageSynced=True` is the expected steady-state once seam-core is deployed. Operators function normally while a condition is pending its first reconcile.
 
 ---
 
@@ -651,7 +709,7 @@ ONTAR (ONT Application Runtime) is the planned application runtime layer that br
 | DriftSignal stays in `queued` | Check UpgradePolicy status for Degraded=True | Corrective Job failed; retry with nudge annotation |
 | Node `NotReady` after kube upgrade | Check node machine config kubelet image | v-prefix missing in targetKubernetesVersion (should not have `v`) |
 | Guardian webhook rejects resource | `kubectl get events -n seam-system` | Resource lacks `ontai.dev/rbac-owner=guardian` annotation |
-| LineageSynced=False on all CRs | Normal during alpha | InfrastructureLineageController deferred; not a blocking condition |
+| LineageSynced=False on a CR | Check seam-core pod logs in seam-system | LineageController running; likely a transient state on first reconcile. All 9 root-declaration GVKs are covered. |
 | UpgradePolicy reaches Degraded | Check TCOR operation record | Talos API rejected partial machine config; check executor Job logs |
 
 ---
