@@ -316,3 +316,56 @@ contexts:
 		t.Fatal("expected error for unknown context; got nil")
 	}
 }
+
+// TestEndpointsFromTalosconfig_ClusterEndpointFiltered verifies that the VIP
+// (clusterEndpoint) is removed from the returned endpoints list so that
+// per-node Talos operations target only real node IPs and never the VIP.
+func TestEndpointsFromTalosconfig_ClusterEndpointFiltered(t *testing.T) {
+	content := `context: ccs-mgmt
+contexts:
+  ccs-mgmt:
+    clusterEndpoint: 10.20.0.10
+    endpoints:
+      - 10.20.0.10
+      - 10.20.0.11
+      - 10.20.0.12
+    ca: dGVzdA==
+    crt: dGVzdA==
+    key: dGVzdA==
+`
+	f := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := capability.EndpointsFromTalosconfig(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "10.20.0.11" || got[1] != "10.20.0.12" {
+		t.Errorf("expected VIP (10.20.0.10) filtered from endpoints; got %v", got)
+	}
+}
+
+// TestEndpointsFromTalosconfig_ClusterEndpointOnlyReturnsError verifies that
+// when clusterEndpoint filtering removes all endpoints an error is returned
+// rather than an empty list that would silently skip all nodes.
+func TestEndpointsFromTalosconfig_ClusterEndpointOnlyReturnsError(t *testing.T) {
+	content := `context: ccs-mgmt
+contexts:
+  ccs-mgmt:
+    clusterEndpoint: 10.20.0.10
+    endpoints:
+      - 10.20.0.10
+    ca: dGVzdA==
+    crt: dGVzdA==
+    key: dGVzdA==
+`
+	f := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := capability.EndpointsFromTalosconfig(f)
+	if err == nil {
+		t.Fatal("expected error when only the VIP remains after filtering; got nil")
+	}
+}

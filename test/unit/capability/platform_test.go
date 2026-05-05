@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1040,6 +1042,75 @@ func TestHardeningApply_BadTalosconfigPathReturnsExecutionFailure(t *testing.T) 
 	}
 	if len(talos.applyConfigCalls) != 0 {
 		t.Errorf("ApplyConfiguration must not be called when talosconfig cannot be read")
+	}
+}
+
+// TestHardeningApply_StabilizationWaitBetweenNodes verifies that after applying
+// patches to a node the handler waits for that node to report healthy before
+// proceeding to the next node. The stubTalosClient healthResponses sequence is
+// used to confirm Health() is called between the two nodes' ApplyConfiguration
+// calls rather than fire-and-forget across all nodes simultaneously.
+func TestHardeningApply_StabilizationWaitBetweenNodes(t *testing.T) {
+	old := capability.HardeningStablePollInterval
+	capability.HardeningStablePollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { capability.HardeningStablePollInterval = old })
+
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityHardeningApply)
+
+	clusterRef := "ccs-test"
+	profileName := "seam-hardening-base"
+	patch := "machine:\n  sysctls:\n    net.ipv4.ip_forward: \"1\"\n"
+	baseConfig := []byte("machine:\n  install:\n    disk: /dev/vda\n")
+
+	// Two-node talosconfig with explicit nodes (no VIP).
+	talosconfigContent := `context: ccs-test
+contexts:
+  ccs-test:
+    nodes:
+      - 10.20.0.11
+      - 10.20.0.12
+    ca: dGVzdA==
+    crt: dGVzdA==
+    key: dGVzdA==
+`
+	talosconfigFile := t.TempDir() + "/talosconfig"
+	if err := os.WriteFile(talosconfigFile, []byte(talosconfigContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	nm := nodeMaintenanceHardeningCR(clusterRef, profileName, "")
+	hp := hardeningProfileCR(clusterRef, profileName, []string{patch})
+	// First Health() call returns transient error; second returns nil (node stable).
+	// This confirms waitForNodeStable polls until healthy between the two nodes.
+	talos := &stubTalosClient{
+		getMachineConfigBytes: baseConfig,
+		healthResponses:       []error{fmt.Errorf("node temporarily busy"), nil},
+	}
+
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityHardeningApply,
+		ClusterRef: clusterRef,
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:     talos,
+			DynamicClient:   newPlatformDynClient(nm, hp),
+			TalosconfigPath: talosconfigFile,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != runnerlib.ResultSucceeded {
+		t.Errorf("expected ResultSucceeded; got %q: %v", result.Status, result.FailureReason)
+	}
+	// One patch per node = 2 ApplyConfiguration calls total.
+	if len(talos.applyConfigCalls) != 2 {
+		t.Fatalf("expected 2 ApplyConfiguration calls (one per node); got %d", len(talos.applyConfigCalls))
+	}
+	// Health() must have been called at least twice (one transient error, one nil).
+	if talos.healthCallIdx < 2 {
+		t.Errorf("expected Health() called at least twice for stabilization poll; got %d calls", talos.healthCallIdx)
 	}
 }
 

@@ -580,14 +580,28 @@ type talosConfigFile struct {
 }
 
 type talosConfigCtx struct {
-	Endpoints []string `json:"endpoints"`
-	Nodes     []string `json:"nodes"`
+	// ClusterEndpoint is the virtual IP or load-balancer address that routes to
+	// the control-plane nodes. When set, EndpointsFromTalosconfig filters it from
+	// the returned node list so that per-node operations are never sent to the VIP.
+	// Populate this field in the talosconfig when the endpoints list contains the
+	// cluster VIP alongside individual node IPs.
+	ClusterEndpoint string   `json:"clusterEndpoint,omitempty"`
+	Endpoints       []string `json:"endpoints"`
+	Nodes           []string `json:"nodes"`
 }
 
 // EndpointsFromTalosconfig parses the talosconfig at path and returns the list
-// of targets for the active context. If the context has explicit nodes, those
-// are returned. Otherwise the endpoints are returned. An error is returned when
-// the file cannot be read, parsed, or the active context is missing.
+// of individual node targets for the active context.
+//
+// Priority order:
+//  1. ctx.nodes — explicit physical node IPs, returned as-is (no VIP expected).
+//  2. ctx.endpoints filtered by ctx.clusterEndpoint — removes the virtual IP or
+//     load-balancer entry so that per-node operations (GetMachineConfig,
+//     ApplyConfiguration) target only real nodes and never the VIP.
+//
+// If clusterEndpoint filtering removes every endpoint, an error is returned:
+// the caller must either add ctx.nodes or correct the endpoints list so that
+// at least one individual node IP remains after filtering.
 func EndpointsFromTalosconfig(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -601,13 +615,30 @@ func EndpointsFromTalosconfig(path string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("talosconfig context %q not found", cfg.Context)
 	}
+	// Explicit node list takes precedence; individual node IPs never include the VIP.
 	if len(ctx.Nodes) > 0 {
 		return ctx.Nodes, nil
 	}
-	if len(ctx.Endpoints) > 0 {
-		return ctx.Endpoints, nil
+	if len(ctx.Endpoints) == 0 {
+		return nil, fmt.Errorf("talosconfig context %q has no endpoints or nodes", cfg.Context)
 	}
-	return nil, fmt.Errorf("talosconfig context %q has no endpoints or nodes", cfg.Context)
+	// Filter the cluster endpoint (VIP) from the fallback endpoints list.
+	// Sending per-node Talos operations to the VIP address causes GetMachineConfig
+	// to read from the current VIP holder and ApplyConfiguration to target only
+	// that node, silently skipping all other control-plane nodes.
+	if ctx.ClusterEndpoint != "" {
+		var filtered []string
+		for _, ep := range ctx.Endpoints {
+			if ep != ctx.ClusterEndpoint {
+				filtered = append(filtered, ep)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("talosconfig context %q: after filtering cluster endpoint %q, no node IPs remain; add individual node IPs to ctx.nodes", cfg.Context, ctx.ClusterEndpoint)
+		}
+		return filtered, nil
+	}
+	return ctx.Endpoints, nil
 }
 
 // NodeContext returns a context that targets exactly one Talos node. The context
