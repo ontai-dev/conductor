@@ -71,6 +71,13 @@ type Registry struct {
 
 // NewRegistry allocates an empty Registry. Callers must call RegisterAll (or
 // individual Register calls) before any Resolve calls.
+//
+// Dual-mode usage: execute-mode Jobs call NewRegistry+RegisterAll then Resolve
+// to dispatch a single named capability. Agent mode calls NewRegistry+RegisterAll
+// then RegisteredNames to build the capability manifest written to RunnerConfig
+// status -- the agent never calls Execute. Sharing one registry keeps the
+// manifest declaration and execute implementation in sync by construction: a
+// capability that is not compiled in cannot appear in the manifest.
 func NewRegistry() *Registry {
 	return &Registry{handlers: make(map[string]Handler)}
 }
