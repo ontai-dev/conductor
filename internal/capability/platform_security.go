@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,42 @@ import (
 
 	"github.com/ontai-dev/conductor/pkg/runnerlib"
 )
+
+// HardeningStablePollInterval is the interval between Health() checks while
+// waiting for a node to stabilize after a no-reboot config apply. Declared as
+// a var so tests can lower it without modifying production constants.
+var HardeningStablePollInterval = 5 * time.Second
+
+// HardeningStableTimeout is the maximum time to wait for a node to report
+// healthy after a hardening config apply before declaring failure.
+var HardeningStableTimeout = 2 * time.Minute
+
+// waitForNodeStable polls Health() on nodeIP until the node reports healthy or
+// HardeningStableTimeout expires. If the node is already healthy on the first
+// check this returns immediately without sleeping (fast path).
+//
+// No-reboot machineconfig applies can briefly restart services (e.g. kubelet
+// for sysctl changes). Calling this between nodes prevents overlapping restarts
+// across control-plane nodes from causing etcd quorum loss and VIP failure.
+func waitForNodeStable(ctx context.Context, client TalosNodeClient, nodeIP string) error {
+	nodeCtx := NodeContext(ctx, nodeIP)
+	deadline := time.Now().Add(HardeningStableTimeout)
+	for {
+		if err := client.Health(nodeCtx); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("node %s did not stabilize within %s after hardening apply", nodeIP, HardeningStableTimeout)
+		}
+		slog.Info("hardening-apply: node temporarily unhealthy after config apply, waiting",
+			slog.String("node", nodeIP))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(HardeningStablePollInterval):
+		}
+	}
+}
 
 // secretsGVR is the GroupVersionResource for core/v1 Secrets.
 var secretsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
@@ -393,9 +430,21 @@ func (h *hardeningApplyHandler) Execute(ctx context.Context, params ExecuteParam
 	}
 
 	if len(nodeIPs) > 0 {
-		for _, nodeIP := range nodeIPs {
+		for i, nodeIP := range nodeIPs {
 			if res := applyNode(NodeContext(ctx, nodeIP), nodeIP); res != nil {
 				return *res, nil
+			}
+			// Stabilization wait between nodes (not after the last node).
+			// Allows services restarted by the no-reboot apply on this node to
+			// recover before proceeding to the next node. Without this, overlapping
+			// service restarts across control-plane nodes can drop etcd quorum and
+			// take down the VIP.
+			if i < len(nodeIPs)-1 {
+				if wErr := waitForNodeStable(ctx, params.TalosClient, nodeIP); wErr != nil {
+					res := failureResult(runnerlib.CapabilityHardeningApply, now, runnerlib.ExecutionFailure,
+						fmt.Sprintf("node %s did not stabilize after hardening apply: %v", nodeIP, wErr))
+					return res, nil
+				}
 			}
 		}
 	} else {
