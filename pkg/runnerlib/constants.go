@@ -71,6 +71,11 @@ const (
 	// Requires annotation ontai.dev/reset-approved=true before execution proceeds.
 	// INV-007, INV-015.
 	CapabilityClusterReset = "cluster-reset"
+
+	// CapabilityMachineConfigBackup reads each node's running machine config via
+	// GetMachineConfig and uploads to S3 at {cluster}/machineconfigs/{TIMESTAMP}/{hostname}.yaml.
+	// Triggered by TalosMachineConfigBackup CR. platform-schema.md §11.
+	CapabilityMachineConfigBackup = "machineconfig-backup"
 )
 
 // Compile mode capabilities — invoked by the conductor binary directly, not by conductor Jobs.
