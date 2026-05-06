@@ -31,6 +31,7 @@ func RegisterAll(reg *Registry) {
 	reg.Register(runnerlib.CapabilityHardeningApply, &hardeningApplyHandler{})
 	reg.Register(runnerlib.CapabilityClusterReset, &clusterResetHandler{})
 	reg.Register(runnerlib.CapabilityMachineConfigBackup, &machineConfigBackupHandler{})
+	reg.Register(runnerlib.CapabilityMachineConfigRestore, &machineConfigRestoreHandler{})
 
 	// Wrapper capabilities -- pack delivery.
 	reg.Register(runnerlib.CapabilityPackDeploy, &packDeployHandler{})
