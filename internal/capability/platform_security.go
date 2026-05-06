@@ -180,13 +180,11 @@ func (h *pkiRotateHandler) Execute(ctx context.Context, params ExecuteParams) (r
 		}
 	} else {
 		mcSecretName := "seam-mc-" + params.ClusterRef + "-kubeconfig"
-		targetSecretName := "target-cluster-kubeconfig"
 		kcRefreshErr := upsertKubeconfigSecret(ctx, params, ns, mcSecretName, kubeconfigBytes)
 		kcRefreshMsg := fmt.Sprintf("kubeconfig Secret %s/%s refreshed", ns, mcSecretName)
 		if kcRefreshErr != nil {
 			kcRefreshMsg = fmt.Sprintf("kubeconfig refresh partial: %s/%s failed: %v", ns, mcSecretName, kcRefreshErr)
 		} else {
-			_ = upsertKubeconfigSecret(ctx, params, ns, targetSecretName, kubeconfigBytes)
 			artifacts = append(artifacts, runnerlib.ArtifactRef{
 				Name:      "kubeconfig-refreshed",
 				Kind:      "KubernetesSecret",
