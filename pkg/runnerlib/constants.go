@@ -76,6 +76,11 @@ const (
 	// GetMachineConfig and uploads to S3 at {cluster}/machineconfigs/{TIMESTAMP}/{hostname}.yaml.
 	// Triggered by TalosMachineConfigBackup CR. platform-schema.md §11.
 	CapabilityMachineConfigBackup = "machineconfig-backup"
+
+	// CapabilityMachineConfigRestore downloads a node machine config from S3 at
+	// {cluster}/machineconfigs/{backupTimestamp}/{hostname}.yaml and applies it
+	// via ApplyConfiguration. Non-fatal per node. platform-schema.md §11.
+	CapabilityMachineConfigRestore = "machineconfig-restore"
 )
 
 // Compile mode capabilities — invoked by the conductor binary directly, not by conductor Jobs.
