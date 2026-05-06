@@ -7,10 +7,10 @@
 // recording StepStatusWriter cannot validate (no real status patch ordering,
 // no etcd visibility).
 //
-// envtest binaries are required:
+// envtest binaries are required. From the ontai root:
 //
-//	setup-envtest use --bin-dir /tmp/envtest-bins
-//	export KUBEBUILDER_ASSETS=/tmp/envtest-bins/k8s/1.35.0-linux-amd64
+//	make envtest-setup
+//	export KUBEBUILDER_ASSETS=$(make -s envtest-path)
 package integration_test
 
 import (
