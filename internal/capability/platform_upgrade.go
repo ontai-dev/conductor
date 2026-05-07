@@ -302,21 +302,22 @@ func (h *stackUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 			fmt.Sprintf("list UpgradePolicy in %s: %v", ns, err)), nil
 	}
 
-	var talosImage, kubeVersion string
+	var talosVersion, kubeVersion string
 	for _, item := range crList.Items {
 		ut, _, _ := unstructuredString(item.Object, "spec", "upgradeType")
 		if ut != "stack" {
 			continue
 		}
-		talosImage, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
+		talosVersion, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
 		kubeVersion, _, _ = unstructuredString(item.Object, "spec", "targetKubernetesVersion")
 		break
 	}
 
-	if talosImage == "" || kubeVersion == "" {
+	if talosVersion == "" || kubeVersion == "" {
 		return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("UpgradePolicy with upgradeType=stack must specify both targetTalosVersion and targetKubernetesVersion in %s", ns)), nil
 	}
+	talosImage := "ghcr.io/siderolabs/installer:" + talosVersion
 
 	var steps []runnerlib.StepResult
 
