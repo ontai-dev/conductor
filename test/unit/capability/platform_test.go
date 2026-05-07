@@ -443,14 +443,49 @@ func TestStackUpgrade_NilClientsReturnsValidationFailure(t *testing.T) {
 	assertValidationFailure(t, result, "stack-upgrade nil clients")
 }
 
-func TestStackUpgrade_RunsBothUpgradeSteps(t *testing.T) {
+func TestStackUpgrade_NoNodesReturnsValidationFailure(t *testing.T) {
 	reg := capability.NewRegistry()
 	capability.RegisterAll(reg)
 	h, _ := reg.Resolve(runnerlib.CapabilityStackUpgrade)
 
-	// targetKubernetesVersion without "v" prefix; handler must prepend "v" for the
-	// kubelet image. targetTalosVersion carries the "v" as Talos convention.
-	talos := &stubTalosClient{}
+	talos := &stubTalosClient{nodes: []string{}}
+	result, err := h.Execute(context.Background(), capability.ExecuteParams{
+		Capability: runnerlib.CapabilityStackUpgrade,
+		ClusterRef: "ccs-test",
+		ExecuteClients: capability.ExecuteClients{
+			TalosClient:   talos,
+			DynamicClient: newPlatformDynClient(upgradePolicyCR("ccs-test", "stack", "v1.12.0", "1.32.0")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertValidationFailure(t, result, "stack-upgrade no nodes")
+}
+
+// TestStackUpgrade_RollingUpgrade_AllNodes verifies the per-node rolling upgrade:
+// kubelet staged, Talos immediate reboot, wait for recovery -- for each node.
+func TestStackUpgrade_RollingUpgrade_AllNodes(t *testing.T) {
+	old := capability.NodeRebootPollInterval
+	capability.NodeRebootPollInterval = 0
+	t.Cleanup(func() { capability.NodeRebootPollInterval = old })
+
+	reg := capability.NewRegistry()
+	capability.RegisterAll(reg)
+	h, _ := reg.Resolve(runnerlib.CapabilityStackUpgrade)
+
+	// Three nodes. Per node: one health error (offline) then nil (back online).
+	nodes := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	healthResponses := make([]error, 0, len(nodes)*2)
+	for range nodes {
+		healthResponses = append(healthResponses, fmt.Errorf("rebooting"))
+		healthResponses = append(healthResponses, nil)
+	}
+
+	talos := &stubTalosClient{
+		nodes:           nodes,
+		healthResponses: healthResponses,
+	}
 	result, err := h.Execute(context.Background(), capability.ExecuteParams{
 		Capability: runnerlib.CapabilityStackUpgrade,
 		ClusterRef: "ccs-test",
@@ -465,20 +500,28 @@ func TestStackUpgrade_RunsBothUpgradeSteps(t *testing.T) {
 	if result.Status != runnerlib.ResultSucceeded {
 		t.Errorf("expected ResultSucceeded; got %q (reason: %v)", result.Status, result.FailureReason)
 	}
-	if !talos.upgradeCalled {
-		t.Error("expected Upgrade() to be called for talos step")
+	// One Upgrade() call per node.
+	if talos.upgradeCallCount != len(nodes) {
+		t.Errorf("expected Upgrade called %d times (once per node), got %d", len(nodes), talos.upgradeCallCount)
 	}
-	if len(result.Steps) < 2 {
-		t.Errorf("expected ≥2 steps; got %d", len(result.Steps))
+	// One step per node.
+	if len(result.Steps) != len(nodes) {
+		t.Errorf("expected %d step results, got %d", len(nodes), len(result.Steps))
 	}
-	// Verify the kubelet image in the applied config has the "v" prefix.
-	if len(talos.applyConfigCalls) == 0 {
-		t.Fatal("expected ApplyConfiguration to be called for kube step")
+	// One ApplyConfiguration per node (kubelet staged).
+	if len(talos.applyConfigCalls) != len(nodes) {
+		t.Fatalf("expected %d ApplyConfiguration calls (one per node); got %d", len(nodes), len(talos.applyConfigCalls))
 	}
-	applied := string(talos.applyConfigCalls[0].configBytes)
+	// Every ApplyConfiguration must use "staged" mode.
+	for i, call := range talos.applyConfigCalls {
+		if call.mode != "staged" {
+			t.Errorf("node %d: expected mode=staged; got %q", i, call.mode)
+		}
+	}
+	// Kubelet image must carry the "v" prefix.
 	const wantImage = "ghcr.io/siderolabs/kubelet:v1.32.0"
-	if !strings.Contains(applied, wantImage) {
-		t.Errorf("applied config does not contain %q; got:\n%s", wantImage, applied)
+	if !strings.Contains(string(talos.applyConfigCalls[0].configBytes), wantImage) {
+		t.Errorf("applied config does not contain %q", wantImage)
 	}
 }
 
