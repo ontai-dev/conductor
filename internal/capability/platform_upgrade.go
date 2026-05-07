@@ -282,8 +282,11 @@ func (h *kubeUpgradeHandler) Execute(ctx context.Context, params ExecuteParams) 
 }
 
 // stackUpgradeHandler implements the stack-upgrade named capability.
-// Combines talos-upgrade and kube-upgrade into a sequenced upgrade of both
-// the Talos OS and Kubernetes components. platform-schema.md §5.
+// Combines talos-upgrade and kube-upgrade into a sequenced rolling upgrade of
+// both the Talos OS and Kubernetes kubelet. Per node: stage the kubelet image
+// change, then trigger the Talos upgrade with immediate reboot (stage=false).
+// The node reboots once and applies both changes together. Wait for each node
+// to recover before proceeding to the next. platform-schema.md §5.
 type stackUpgradeHandler struct{}
 
 func (h *stackUpgradeHandler) Execute(ctx context.Context, params ExecuteParams) (runnerlib.OperationResultSpec, error) {
@@ -294,6 +297,12 @@ func (h *stackUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 			"stack-upgrade requires TalosClient and DynamicClient"), nil
 	}
 
+	nodes := params.TalosClient.Nodes()
+	if len(nodes) == 0 {
+		return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ValidationFailure,
+			"stack-upgrade: no nodes available from talosconfig"), nil
+	}
+
 	ns := tenantNamespace(params.ClusterRef)
 	crList, err := params.DynamicClient.Resource(upgradePolicyGVR).Namespace(ns).
 		List(ctx, metav1.ListOptions{})
@@ -302,82 +311,80 @@ func (h *stackUpgradeHandler) Execute(ctx context.Context, params ExecuteParams)
 			fmt.Sprintf("list UpgradePolicy in %s: %v", ns, err)), nil
 	}
 
-	var talosImage, kubeVersion string
+	var talosVersion, kubeVersion string
 	for _, item := range crList.Items {
 		ut, _, _ := unstructuredString(item.Object, "spec", "upgradeType")
 		if ut != "stack" {
 			continue
 		}
-		talosImage, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
+		talosVersion, _, _ = unstructuredString(item.Object, "spec", "targetTalosVersion")
 		kubeVersion, _, _ = unstructuredString(item.Object, "spec", "targetKubernetesVersion")
 		break
 	}
 
-	if talosImage == "" || kubeVersion == "" {
+	if talosVersion == "" || kubeVersion == "" {
 		return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ValidationFailure,
 			fmt.Sprintf("UpgradePolicy with upgradeType=stack must specify both targetTalosVersion and targetKubernetesVersion in %s", ns)), nil
 	}
+	talosImage := "ghcr.io/siderolabs/installer:" + talosVersion
 
-	var steps []runnerlib.StepResult
-
-	// Step 1 — Stage Talos upgrade.
-	step1Start := time.Now().UTC()
-	if err := params.TalosClient.Upgrade(ctx, talosImage, true); err != nil {
-		return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
-			fmt.Sprintf("Upgrade (Talos) to %s: %v", talosImage, err)), nil
-	}
-	steps = append(steps, runnerlib.StepResult{
-		Name: "talos-upgrade", Status: runnerlib.ResultSucceeded,
-		StartedAt: step1Start, CompletedAt: time.Now().UTC(),
-		Message: fmt.Sprintf("staged Talos upgrade to %s", talosImage),
-	})
-
-	// Step 2 — Apply Kubernetes kubelet upgrade per node. The Talos OS upgrade is
-	// already staged (stage=true above), so the kubelet change is also staged here
-	// to co-apply on the next reboot that the Talos upgrade triggers.
 	kubeletImagePatch := []byte(fmt.Sprintf(
 		`{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:v%s"}}}`,
 		kubeVersion,
 	))
-	var stackNodeIPs []string
-	if params.TalosconfigPath != "" {
-		ips, epErr := EndpointsFromTalosconfig(params.TalosconfigPath)
-		if epErr != nil {
-			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
-				fmt.Sprintf("read endpoints from talosconfig: %v", epErr)), nil
-		}
-		stackNodeIPs = ips
-	}
-	applyStackKubelet := func(nodeCtx context.Context, nodeID string) error {
+
+	var steps []runnerlib.StepResult
+
+	// Rolling per-node upgrade: stage kubelet then trigger immediate Talos reboot.
+	// The node reboots once and co-applies both the Talos installer and the kubelet
+	// image change in the same reboot cycle.
+	for i, nodeIP := range nodes {
+		stepStart := time.Now().UTC()
+		nodeCtx := NodeContext(ctx, nodeIP)
+
+		slog.Info("stack-upgrade: staging kubelet image change",
+			slog.Int("node_index", i+1), slog.Int("node_total", len(nodes)),
+			slog.String("node", nodeIP), slog.String("kubeVersion", kubeVersion))
+
 		existing, err := params.TalosClient.GetMachineConfig(nodeCtx)
 		if err != nil {
-			return fmt.Errorf("GetMachineConfig on %s: %w", nodeID, err)
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("GetMachineConfig on %s: %v", nodeIP, err)), nil
 		}
 		merged, err := mergeYAMLPatch(existing, kubeletImagePatch)
 		if err != nil {
-			return fmt.Errorf("merge kubelet patch on %s: %w", nodeID, err)
-		}
-		return params.TalosClient.ApplyConfiguration(nodeCtx, merged, "staged")
-	}
-	step2Start := time.Now().UTC()
-	if len(stackNodeIPs) > 0 {
-		for _, nodeIP := range stackNodeIPs {
-			if err := applyStackKubelet(NodeContext(ctx, nodeIP), nodeIP); err != nil {
-				return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
-					fmt.Sprintf("ApplyConfiguration (Kubernetes) to %s on %s: %v", kubeVersion, nodeIP, err)), nil
-			}
-		}
-	} else {
-		if err := applyStackKubelet(ctx, "node"); err != nil {
 			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
-				fmt.Sprintf("ApplyConfiguration (Kubernetes) to %s: %v", kubeVersion, err)), nil
+				fmt.Sprintf("merge kubelet patch on %s: %v", nodeIP, err)), nil
 		}
+		if err := params.TalosClient.ApplyConfiguration(nodeCtx, merged, "staged"); err != nil {
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("ApplyConfiguration (Kubernetes %s) on %s: %v", kubeVersion, nodeIP, err)), nil
+		}
+
+		slog.Info("stack-upgrade: triggering Talos upgrade with immediate reboot",
+			slog.String("node", nodeIP), slog.String("image", talosImage))
+
+		if uErr := params.TalosClient.Upgrade(nodeCtx, talosImage, false); uErr != nil {
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("Upgrade (Talos %s) on %s: %v", talosImage, nodeIP, uErr)), nil
+		}
+
+		if wErr := waitForNodeReboot(ctx, params.TalosClient, nodeIP); wErr != nil {
+			return failureResult(runnerlib.CapabilityStackUpgrade, now, runnerlib.ExecutionFailure,
+				fmt.Sprintf("node %s did not recover after stack upgrade: %v", nodeIP, wErr)), nil
+		}
+
+		slog.Info("stack-upgrade: node ready after reboot",
+			slog.String("node", nodeIP), slog.String("talos", talosImage), slog.String("kube", kubeVersion))
+
+		steps = append(steps, runnerlib.StepResult{
+			Name:        "stack-upgrade-" + nodeIP,
+			Status:      runnerlib.ResultSucceeded,
+			StartedAt:   stepStart,
+			CompletedAt: time.Now().UTC(),
+			Message:     fmt.Sprintf("upgraded node %s to Talos %s + Kubernetes %s", nodeIP, talosVersion, kubeVersion),
+		})
 	}
-	steps = append(steps, runnerlib.StepResult{
-		Name: "kube-upgrade", Status: runnerlib.ResultSucceeded,
-		StartedAt: step2Start, CompletedAt: time.Now().UTC(),
-		Message: fmt.Sprintf("staged Kubernetes upgrade to %s", kubeVersion),
-	})
 
 	return runnerlib.OperationResultSpec{
 		Capability:  runnerlib.CapabilityStackUpgrade,
